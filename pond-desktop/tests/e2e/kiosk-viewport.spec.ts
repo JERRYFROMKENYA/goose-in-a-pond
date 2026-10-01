@@ -14,12 +14,7 @@ async function checkNoHorizOverflow(page: Page): Promise<void> {
   expect(overflow, "No horizontal overflow expected").toBe(false);
 }
 
-/**
- * The shell gives navigation no width of its own.
- *
- * Asserted as "content starts at the left edge" rather than "no .sidebar
- * exists", because the absence of a class is satisfied by a blank page.
- */
+/** Nav takes no width: content starts at the left edge (a blank page also lacks .sidebar). */
 async function checkNoPersistentNav(page: Page, contentSelector: string): Promise<void> {
   const left = await page.evaluate((sel) => {
     const el = document.querySelector(sel);
@@ -73,8 +68,7 @@ async function checkDrawerFits(page: Page): Promise<void> {
   expect(b.right, "Drawer inside the right edge").toBeLessThanOrEqual(b.vw);
   expect(b.top, "Drawer inside the top edge").toBeGreaterThanOrEqual(0);
   expect(b.bottom, "Drawer inside the bottom edge").toBeLessThanOrEqual(b.vh);
-  // Taller than the panel is expected and fine; clipped is not. The body must
-  // be the thing that scrolls.
+  // Taller than the panel is fine; clipped is not, so the body must scroll.
   expect(b.clientH, "Drawer body has height to scroll in").toBeGreaterThan(0);
   await page.keyboard.press("Escape");
 }
@@ -166,21 +160,7 @@ test.describe("Classic sections UI — 800×480", () => {
   });
 });
 
-/**
- * Home's own controls are inside the panel, not below it.
- *
- * VERTICAL, where everything else in this file measures horizontally, and it is
- * here because the screen it guards is the one that had the defect: `.dash`
- * carried a `min-height: 520px` under a 60px shell bar, so on the 800x480 panel
- * its bottom edge -- which the floating dock was positioned against -- sat at
- * 580. Measured at the time: the mic at top=500 bottom=564 in a 480px viewport,
- * and the page dots at 524. The panel could not reach either.
- *
- * No existing check could have caught it. Horizontal overflow was clean, the
- * touch targets were the right size, the drawer fitted, and a full-page
- * screenshot renders an overflowing box in full -- so the kiosk screenshots
- * this file writes showed a mic that no thumb could touch.
- */
+/** Home's mic and page dots are inside the viewport; a full-page screenshot hides overflow. */
 async function checkHomeControlsAreOnScreen(page: Page): Promise<void> {
   const box = await page.evaluate(() => {
     const dash = document.querySelector(".dash");

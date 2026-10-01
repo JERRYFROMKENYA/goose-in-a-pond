@@ -285,8 +285,7 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
-        // Speculation left the engine on 2026-09-24 (goose 743649d98); its switch is commented out,
-        // and restoring it means restoring this upsert and the apply_key arm together.
+        // Speculation left the engine; restore this upsert together with its apply_key arm.
         // upsert!(
         //     "speculative_decoding_enabled",
         //     if settings.speculative_decoding_enabled {

@@ -1,19 +1,5 @@
-//! SQLite-backed [`ReminderRepository`] — the rows migration 0057 added.
-//!
-//! # The one thing to understand before editing a query here
-//!
-//! **The insert is `ON CONFLICT DO NOTHING`, and that is the deduplication.**
-//! Not a read followed by a write: the engine re-walks conversations, two lane
-//! ticks can overlap a restart, and a check-then-insert would be a race that
-//! files the same reminder twice on exactly the pond that walks its history
-//! fastest. The UNIQUE constraint on `(window_id, about_key)` is the guard, the
-//! database enforces it, and `rows_affected` is how the caller learns which of
-//! the two happened.
-//!
-//! `DO NOTHING` rather than `DO UPDATE` is also deliberate: the row that is
-//! already there may have been dismissed, and an upsert would quietly resurrect
-//! it as pending. A second sighting of a reminder somebody already said no to is
-//! not new information.
+//! SQLite-backed [`ReminderRepository`]. Dedup is `ON CONFLICT (window_id, about_key) DO NOTHING`:
+//! check-then-insert races on overlapping re-walks, and `DO UPDATE` would revive dismissed rows.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -23,14 +9,11 @@ use pond_core::user_data::domain::reminder::{CapturedReminder, ReminderDispositi
 use pond_core::user_data::ports::reminder_repository::ReminderRepository;
 use sqlx::{Pool, Sqlite};
 
-/// The columns a reminder is rebuilt from. Stated once so a column added to one
-/// query and not the others shifts a tuple field at compile time rather than at
-/// runtime -- the same reason `sqlite_proposal.rs` has `PROPOSAL_COLUMNS`.
+/// Shared by every SELECT so each matches `ReminderRow`'s field order.
 const REMINDER_COLUMNS: &str = "id, about, when_said, session_id, window_id, subject, \
      profile_id, said_at, captured_at, disposition";
 
-/// `(id, about, when_said, session_id, window_id, subject, profile_id, said_at,
-/// captured_at, disposition)`.
+/// One row of `REMINDER_COLUMNS`, in order.
 type ReminderRow = (
     String,
     String,
@@ -54,12 +37,7 @@ impl SqliteReminderRepository {
     }
 }
 
-/// The wire format for this table's three timestamp columns.
-///
-/// Seconds precision, UTC, `Z`-suffixed, matching what `sqlite_proposal.rs`
-/// writes. 0057's profile-delete trigger stamps `decided_at` with
-/// `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`, which is this spelling, so a row
-/// disposed of by SQL and a row disposed of by Rust read back the same.
+/// Must match the profile-delete trigger's `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')`.
 fn sql_ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
@@ -70,11 +48,7 @@ fn parse_ts(raw: &str) -> Result<DateTime<Utc>> {
         .with_context(|| format!("unreadable reminder timestamp: {raw}"))
 }
 
-/// Rebuild a reminder from its row.
-///
-/// An unreadable disposition is an error rather than a default, because the
-/// default anybody would reach for is `Pending` and that is the one value that
-/// puts the row back in front of the household. On failure, access narrows.
+/// An unreadable disposition is an error, not `Pending`: that default would resurface the row.
 fn row_to_reminder(row: ReminderRow) -> Result<CapturedReminder> {
     let (
         id,
@@ -106,10 +80,7 @@ fn row_to_reminder(row: ReminderRow) -> Result<CapturedReminder> {
     })
 }
 
-/// The scope predicate, in the same shape `sqlite_suggestion_queue` and
-/// `sqlite_memory` use: an `Owner` sees their own rows and the unattributed
-/// ones, a `Household` sees everything, a `Guest` sees nothing -- and says so
-/// in SQL, so a caller that forgot to check still fails closed.
+/// Same predicate shape as `sqlite_memory`; `Guest` is refused in SQL, so it fails closed.
 fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
     match scope {
         ProfileScope::Owner(id) => (
@@ -169,9 +140,7 @@ impl ReminderRepository for SqliteReminderRepository {
             .await
             .context("listing pending reminders")?;
 
-        // A row that cannot be rebuilt is dropped from the answer rather than
-        // failing the whole read: one unreadable timestamp must not hide every
-        // other reminder the household is holding.
+        // Skip unreadable rows rather than fail the read: one bad row must not hide the rest.
         Ok(rows
             .into_iter()
             .filter_map(|row| match row_to_reminder(row) {
@@ -184,12 +153,7 @@ impl ReminderRepository for SqliteReminderRepository {
             .collect())
     }
 
-    /// The `disposition = 'pending'` clause is the whole of the concurrency
-    /// story here, and it is in the WHERE rather than in a read before the
-    /// write for the same reason `capture` leans on the UNIQUE constraint: two
-    /// callers can arrive at once -- the promotion run and a person pressing
-    /// dismiss -- and a check-then-update would let the second overwrite the
-    /// first's decision. `rows_affected` is how the caller learns it lost.
+    /// `disposition = 'pending'` in the WHERE makes a race's loser get `false`, not overwrite.
     async fn set_disposition(
         &self,
         id: &str,
@@ -243,8 +207,7 @@ mod tests {
         }
     }
 
-    /// A reminder said in one member's conversation. `profile_id` carries no
-    /// foreign key (see 0057), so no profile row is needed for the fixture.
+    /// `profile_id` has no foreign key, so the fixture needs no profile row.
     fn reminder_of(id: &str, about: &str, owner: Option<&str>) -> CapturedReminder {
         CapturedReminder {
             profile_id: owner.map(str::to_string),
@@ -272,9 +235,6 @@ mod tests {
         v
     }
 
-    /// THE DEFECT: `list_pending` filtered only on disposition, and the batch
-    /// engine stamps each reminder with the member whose conversation said it
-    /// -- so any caller read every member's dated reminders.
     #[tokio::test]
     async fn an_owner_reads_their_own_and_the_unattributed_but_not_another_members() {
         let (_tmp, repo) = seeded().await;
@@ -299,9 +259,7 @@ mod tests {
             .is_empty());
     }
 
-    /// The control for the two above: `Household` -- the engine's own read,
-    /// which routes each reminder to its owner -- sees every row. Without it,
-    /// an adapter that returned nothing for everyone would pass both.
+    /// Control for the two above: an adapter returning nothing would pass both.
     #[tokio::test]
     async fn the_household_read_sees_every_members_reminder() {
         let (_tmp, repo) = seeded().await;
@@ -312,8 +270,6 @@ mod tests {
         assert_eq!(ids(&all), vec!["r-anyone", "r-jerry", "r-liz"]);
     }
 
-    /// A move is scoped as well as a read: dismissing somebody else's
-    /// reminder deletes their date as surely as reading it discloses it.
     #[tokio::test]
     async fn one_member_cannot_dismiss_another_members_reminder() {
         let (_tmp, repo) = seeded().await;
@@ -338,7 +294,6 @@ mod tests {
                 .unwrap(),
             "a guest dismissed Liz's reminder"
         );
-        // Still pending, for the person it belongs to.
         let liz = repo
             .list_pending(&ProfileScope::Owner("liz".into()), 10)
             .await
@@ -348,8 +303,7 @@ mod tests {
             "the refused dismiss moved the row anyway"
         );
 
-        // The control: the owner CAN dismiss their own. A move that refused
-        // everybody would pass everything above.
+        // Control: the owner can still dismiss their own.
         assert!(repo
             .set_disposition(
                 "r-jerry",
@@ -387,8 +341,6 @@ mod tests {
         );
     }
 
-    /// The re-walk case. The same window, read a second time, must not
-    /// accumulate.
     #[tokio::test]
     async fn re_capturing_the_same_window_writes_no_second_row() {
         let (_tmp, pool) = db().await;
@@ -398,8 +350,7 @@ mod tests {
             .capture(&reminder("r-1", "w-1", "the dentist"))
             .await
             .unwrap());
-        // A fresh id and a drifted spelling: what a second model call over the
-        // same messages actually produces.
+        // Fresh id and drifted spelling, as a second model call over the same messages produces.
         assert!(
             !repo
                 .capture(&reminder("r-2", "w-1", "The dentist."))
@@ -416,7 +367,6 @@ mod tests {
         assert_eq!(back[0].id, "r-1", "the first row is the one that is kept");
     }
 
-    /// Two different reminders out of one window are two rows.
     #[tokio::test]
     async fn one_window_may_file_two_different_reminders() {
         let (_tmp, pool) = db().await;
@@ -439,8 +389,6 @@ mod tests {
         );
     }
 
-    /// The same words out of a DIFFERENT window are a different reminder. A
-    /// household that asks about the dentist again in March has asked again.
     #[tokio::test]
     async fn the_same_words_in_another_window_are_another_reminder() {
         let (_tmp, pool) = db().await;
@@ -463,7 +411,6 @@ mod tests {
         );
     }
 
-    /// A re-walk must not resurrect something somebody said no to.
     #[tokio::test]
     async fn a_dismissed_reminder_is_not_revived_by_a_re_walk() {
         let (_tmp, pool) = db().await;
@@ -501,8 +448,7 @@ mod tests {
         assert_eq!(disposition, "dismissed");
     }
 
-    /// 0057's trigger, which is the layer under the Rust: a departed member's
-    /// reminders stop being live, and the rows keep their provenance.
+    /// Covers the migration's profile-delete trigger, not Rust code.
     #[tokio::test]
     async fn deleting_a_member_expires_their_pending_reminders() {
         let (_tmp, pool) = db().await;
@@ -541,14 +487,7 @@ mod tests {
         );
     }
 
-    /// The disposition vocabulary the table accepts is the one the domain
-    /// writes. A value added to one and not the other fails here rather than at
-    /// three in the morning on somebody's pond.
-    ///
-    /// A row each, because the move is out of `pending` and nothing else: four
-    /// writes against one row would land the first and be refused three times
-    /// over, and the test would pass while proving nothing about three of the
-    /// four values.
+    /// A row each: only a `pending` row moves, so one shared row would test only the first value.
     #[tokio::test]
     async fn every_disposition_the_domain_can_write_is_one_the_table_accepts() {
         let (_tmp, pool) = db().await;
@@ -575,9 +514,6 @@ mod tests {
         }
     }
 
-    /// The route that dismisses a reminder has to be able to tell "there was
-    /// one" from "there was not", or it answers "dismissed" for an id that does
-    /// not exist.
     #[tokio::test]
     async fn disposing_says_whether_there_was_anything_to_dispose_of() {
         let (_tmp, pool) = db().await;

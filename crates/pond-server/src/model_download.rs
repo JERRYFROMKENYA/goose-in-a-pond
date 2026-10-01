@@ -297,6 +297,7 @@ pub async fn ensure_espeak_ng_data(data_dir: &Path) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -1075,9 +1076,7 @@ mod kokoro_engine_tests {
     }
 }
 
-// Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98), so
-// the drafter's download, its validation and their tests are commented out rather than deleted;
-// restore them with the startup block in main.rs if it returns.
+// Speculative decoding is out of the engine: restore this and main.rs's block if it returns.
 // // ── MTP drafter ───────────────────────────────────────────────────────────────
 //
 // pub use pond_core::models::domain::drafter::drafter_for;

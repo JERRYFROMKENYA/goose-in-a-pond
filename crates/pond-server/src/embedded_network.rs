@@ -35,28 +35,12 @@ mod recovery;
 
 const PEER_HEADER: &str = "x-pond-embedded-peer";
 
-/// The coordination and enrollment services a household uses when it has not
-/// chosen its own.
-///
-/// A household should not have to know what a Headscale origin is to reach its
-/// own Pond from outside the house, so enabling remote access without naming a
-/// coordinator uses these. They are substituted when the user enables remote
-/// access, never when configuration is read: an empty control URL is what
-/// distinguishes a local-only household, and defaulting on read would make every
-/// such household start contacting coordination and start advertising a
-/// coordinator to its paired phones.
-///
-/// Self-hosting stays supported: an explicitly configured origin is used as given
-/// and never replaced.
+/// Hosted coordinator for a household that names none. Applied on enable, never on read: an
+/// empty control URL is what marks a household local-only.
 pub const DEFAULT_CONTROL_URL: &str = "https://controlpond.jarida.io";
 pub const DEFAULT_ENROLLMENT_URL: &str = "https://enrollpond.jarida.io";
 
-/// Fill in the hosted coordinator for a household that named none.
-///
-/// Both origins move together. A household that set one and not the other has
-/// configured something deliberate and half-finished, and quietly completing it
-/// from the other side would point it at a coordinator it never chose; the
-/// existing validation rejects that instead.
+/// Default both origins only when both are empty; validation rejects a half-configured pair.
 fn with_default_coordinator(mut config: Config) -> Config {
     if config.control_url.is_empty() && config.enrollment_url.is_empty() {
         config.control_url = DEFAULT_CONTROL_URL.to_string();
@@ -122,8 +106,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// Create the private bridge. A short random socket path also fits macOS's
-    /// sockaddr_un limit when the application's data-directory path is long.
+    /// Create the private bridge; the short random socket path fits macOS's sockaddr_un limit.
     pub fn new(data: &Path, port: u16) -> Result<(Arc<Self>, tokio::net::UnixListener)> {
         let directory = data.join("embedded-network");
         match std::fs::DirBuilder::new().mode(0o700).create(&directory) {
@@ -252,11 +235,6 @@ impl Runtime {
             .arg(self.port.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Captured, not discarded. This was `Stdio::null()`, so when the
-            // helper failed it explained itself into /dev/null and the pond
-            // reported one generic sentence with no exit code -- which is
-            // exactly as much as an operator could learn about why remote
-            // access would not turn on.
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
@@ -266,15 +244,7 @@ impl Runtime {
         let output =
             tokio::time::timeout(std::time::Duration::from_secs(25), child.wait_with_output())
                 .await??;
-        // Two different failures, reported as two different things. Conflating
-        // them said "operation failed" for both an unreachable coordinator and
-        // a helper that answered with too much.
-        // Exit 3 is the helper's word for a coordinator that understood the
-        // request and refused it. That is a different answer to the user than a
-        // coordinator it could not reach, and flattening both into one status
-        // told a household with remote access already enrolled that remote
-        // access was not set up -- and hid the recovery control that would have
-        // fixed it.
+        // Exit 3: the coordinator refused the request, as opposed to being unreachable.
         if output.status.code() == Some(3) {
             bail!(RefusedByCoordinator(helper_complaint(&output.stderr)));
         }
@@ -386,10 +356,7 @@ impl Runtime {
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticks.tick().await;
-            // Devices that have stopped coming home lose their remote access.
-            // Queued here rather than acted on directly, so it travels the same
-            // durable path as every other revocation and survives a coordinator
-            // that is offline.
+            // Absent-device revocations are queued, so they survive an offline coordinator.
             if let Err(error) = self.sweep_absent_devices().await {
                 tracing::warn!(%error, "could not check which devices have been away too long");
             }
@@ -635,12 +602,7 @@ fn valid_device(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Where the household records when it last saw each of its devices at home.
-///
-/// A JSON map beside `revocations.json` rather than a column on `devices`:
-/// this is remote-access state, it belongs with the rest of the subsystem's
-/// files, and it avoids claiming a migration version number while several
-/// branches are open against this repository.
+/// When each device was last seen at home; kept with the remote-access files, not in `devices`.
 const PRESENCE_FILE: &str = "presence.json";
 
 impl Runtime {
@@ -665,15 +627,12 @@ impl Runtime {
         Ok(())
     }
 
-    /// Revoke the remote access of every device that has not been home inside
-    /// the window. Runs beside the revocation retry, which is what carries the
-    /// result to the coordinator.
+    /// Queue revocation for every device not home within the window; the retry loop sends them.
     async fn sweep_absent_devices(&self) -> Result<()> {
         use pond_core::security::ports::remote_access::{
             DevicePresence, RemoteRevocation, LAN_PRESENCE_WINDOW_DAYS,
         };
-        // A household that never enabled remote access has nothing to revoke,
-        // and must not contact coordination to discover that.
+        // A local-only household must not contact coordination.
         if self.config()?.enrollment_url.is_empty() {
             return Ok(());
         }
@@ -689,8 +648,7 @@ impl Runtime {
                  and bringing it home restores it."
             );
             self.queue(&device).await?;
-            // Forget the sighting, or every sweep re-queues a revocation that
-            // has already been made.
+            // Forget the sighting, or every sweep re-queues this revocation.
             let mut seen = self.presence()?;
             seen.remove(&device);
             self.save_presence(&seen)?;
@@ -702,9 +660,7 @@ impl Runtime {
 #[async_trait::async_trait]
 impl pond_core::security::ports::remote_access::DevicePresence for Runtime {
     async fn seen_on_lan(&self, device_id: &str) {
-        // The pond's own device id, not the coordinator's hash of it. `queue`
-        // hashes when it sends a revocation onward, and hashing here as well
-        // would revoke a device that does not exist.
+        // Keyed by the pond's own id, unhashed: `queue` hashes it when revoking.
         if device_id.is_empty() || device_id.len() > 256 {
             return;
         }
@@ -714,8 +670,7 @@ impl pond_core::security::ports::remote_access::DevicePresence for Runtime {
             self.save_presence(&seen)
         };
         if let Err(error) = write() {
-            // Never fails the request that carried it. A lost renewal costs a
-            // device an earlier reminder to come home, not its access.
+            // Never fails the request; a lost sighting only brings the device's reminder forward.
             tracing::warn!(%error, device = %device_id, "could not record a LAN sighting");
         }
     }
@@ -859,11 +814,7 @@ struct Registration {
     machine_key: String,
 }
 
-/// A coordinator answer that was a decision rather than a fault.
-///
-/// Carried as its own type so the handler can choose a status from it: a
-/// household whose phone is already enrolled needs the replacement flow, and
-/// telling it the service is unavailable sends it to the wrong control.
+/// A coordinator refusal rather than a fault, typed so the handler can pick a distinct status.
 #[derive(Debug)]
 pub struct RefusedByCoordinator(pub String);
 
@@ -875,16 +826,8 @@ impl std::fmt::Display for RefusedByCoordinator {
 
 impl std::error::Error for RefusedByCoordinator {}
 
-/// The last thing the network helper said before it gave up, fit to log.
-///
-/// Bounded, flattened to one line, and stripped of anything carrying a
-/// `/register/` path. That path is the tailnet node-authorisation URL: it is a
-/// bearer capability for joining this household, and the helper already redacts
-/// it from its own diagnostics sink for that reason (`native/pondnet/node.go`).
-/// Capturing stderr must not be the hole that puts it back in a log file.
-///
-/// An empty answer is reported as such rather than as nothing, so "the helper
-/// said why" and "the helper said nothing" stay distinguishable.
+/// The helper's stderr, fit to log: bounded, one line, and with `/register/` URLs redacted
+/// (a bearer capability to join the household's tailnet).
 fn helper_complaint(stderr: &[u8]) -> String {
     const KEEP: usize = 400;
     let text = String::from_utf8_lossy(stderr);
@@ -903,8 +846,7 @@ fn helper_complaint(stderr: &[u8]) -> String {
         return "and said nothing".to_string();
     }
     match line.char_indices().nth_back(KEEP) {
-        // Keep the END: a helper that fails prints its context first and its
-        // reason last, so the tail is the part worth having.
+        // Keep the tail: the helper prints its reason last.
         Some((at, _)) => format!("...{}", &line[at..]),
         None => line,
     }
@@ -939,9 +881,7 @@ async fn register_pond(
         node_key: current.node_key,
         machine_key: current.machine_key,
     };
-    // Introduce the household first. A household that an operator created
-    // already exists and this answers with it, so the two paths converge here
-    // and a household nobody provisioned can still set itself up.
+    // Register the household first; idempotent for one an operator already created.
     if let Err(error) = runtime.authority("register", serde_json::Value::Null).await {
         tracing::warn!(%error, "household registration failed");
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -966,8 +906,7 @@ async fn remote_configuration(
         tracing::warn!(%error, operation = "config", "embedded enrollment failed");
         StatusCode::SERVICE_UNAVAILABLE
     })?;
-    // When this device's remote access lapses if it does not come home, so the
-    // app can say so beforehand rather than after it has gone.
+    // When remote access lapses unless the device comes home, so the app can warn first.
     let lapses_at = match device.id() {
         Some(id) => {
             use pond_core::security::ports::remote_access::DevicePresence;
@@ -1015,16 +954,8 @@ async fn register_phone(
             StatusCode::CONFLICT
         })?;
 
-    // Ask before telling. A phone that is already enrolled, still active, and
-    // still holding the identity it enrolled with does not need enrolling
-    // again -- and asking anyway produces a conflict the user reads as a
-    // failure, on a pond where remote access is working.
-    //
-    // Only an answer that is affirmative on every count short-circuits. Any
-    // other outcome, including one where the coordinator cannot be asked,
-    // falls through to the enrollment below rather than guessing: this is a
-    // way to avoid a pointless conflict, not a second place that decides
-    // whether a device is enrolled.
+    // Skip re-enrolling a phone already active with the same identity (it would raise a
+    // conflict); any other answer, or none, falls through to the enrollment below.
     match runtime.authority("inspect", payload.clone()).await {
         Ok(existing) => {
             let field = |name: &str| {
@@ -1035,11 +966,7 @@ async fn register_phone(
                     .to_string()
             };
             let status = field("status");
-            // Machine keys are public identifiers, not secrets -- the same
-            // value the coordinator hands back on an inspect. Logged as a
-            // match or a mismatch rather than in full, because which of the
-            // two it is is the entire question and the keys themselves are
-            // sixty characters of noise.
+            // Machine keys are public; only whether they match is logged, as the keys are noise.
             let same_identity = field("machineKey") == registration.machine_key;
             if status == "active" && same_identity {
                 tracing::info!(
@@ -1056,8 +983,7 @@ async fn register_phone(
             );
         }
         Err(error) => {
-            // Not a failure: the enrollment below is the authority, and this
-            // was only a chance to avoid a conflict it would raise.
+            // Not a failure: the enrollment below is the authority.
             tracing::info!(%error, %device, "remote access: could not inspect the existing enrollment; enrolling");
         }
     }
@@ -1122,13 +1048,6 @@ mod tests {
 
     use super::helper_complaint;
 
-    /// The helper's stderr now reaches a log file, so what it may carry there
-    /// is a decision rather than an accident.
-    ///
-    /// A `/register/` URL is the tailnet node-authorisation link: a bearer
-    /// capability for joining this household. The helper already keeps it out
-    /// of its own diagnostics for that reason, and capturing stderr must not be
-    /// the hole that puts it back.
     #[test]
     fn the_helper_complaint_never_carries_a_node_authorisation_url() {
         let noisy = "dial failed for https://controlpond.jarida.io/register/nodekey%3Aabc123 \
@@ -1137,8 +1056,6 @@ mod tests {
         assert!(!said.contains("/register/"), "{said}");
         assert!(!said.contains("nodekey"), "{said}");
         assert!(said.contains("<redacted enrolment URL>"), "{said}");
-        // The rest survives, or redaction has cost us the diagnosis it exists
-        // to make safe.
         assert!(said.contains("dial failed"), "{said}");
         assert!(said.contains("after 3 tries"), "{said}");
     }
@@ -1149,16 +1066,13 @@ mod tests {
         let said = helper_complaint(long.as_bytes());
         assert!(said.len() <= 512, "unbounded: {} bytes", said.len());
         assert!(!said.contains('\n'), "a log line must be one line");
-        // The tail is kept: a helper prints its context first and its reason
-        // last, so truncating from the front keeps the part worth having.
+        // The tail is kept: the helper prints its reason last.
         assert!(said.ends_with("end"), "{said}");
         assert!(said.starts_with("..."), "{said}");
     }
 
     #[test]
     fn saying_nothing_is_reported_as_saying_nothing() {
-        // Distinguishable from a helper that explained itself, rather than
-        // rendering as an empty gap in the sentence.
         assert_eq!(helper_complaint(b""), "and said nothing");
         assert_eq!(helper_complaint(b"   \n  "), "and said nothing");
     }
@@ -1188,8 +1102,6 @@ mod tests {
 
     #[test]
     fn a_half_configured_coordinator_is_not_quietly_completed() {
-        // Completing this from the other side would point the household at a
-        // coordinator it never chose. start() rejects it instead.
         let half = Config {
             enabled: true,
             control_url: "https://control.example".into(),
@@ -1202,9 +1114,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_household_that_never_enabled_remote_access_keeps_no_coordinator() {
-        // The default must not reach configuration on disk: an empty control URL
-        // is what marks a household local-only, and queue() relies on it to stay
-        // silent.
         let data = tempfile::tempdir().unwrap();
         let (runtime, _listener) = Runtime::new(data.path(), 4443).unwrap();
         let stored = runtime.config().unwrap();
@@ -1215,9 +1124,6 @@ mod tests {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
-    /// Remote access is granted because a device was once standing in the
-    /// house, and until this nothing re-checked that. A phone that is lost, or
-    /// belonged to somebody who has left, kept a working route in forever.
     #[tokio::test]
     async fn a_device_that_stops_coming_home_loses_its_remote_access() {
         use pond_core::security::ports::remote_access::{DevicePresence, LAN_PRESENCE_WINDOW_DAYS};
@@ -1237,8 +1143,7 @@ mod tests {
         runtime.sweep_absent_devices().await.unwrap();
         assert!(runtime.pending_revocations().unwrap().is_empty());
 
-        // Age one device past the window by hand: the clock is the input, so
-        // the test sets it rather than waiting a month.
+        // Age one device past the window by hand.
         let mut seen = runtime.presence().unwrap();
         let stale = Utc::now() - chrono::Duration::days(LAN_PRESENCE_WINDOW_DAYS + 1);
         let key = seen.keys().next().unwrap().clone();
@@ -1252,20 +1157,14 @@ mod tests {
             1,
             "exactly the absent device, not the household"
         );
-        // The queue holds the coordinator's name for the device, which is what
-        // `queue` derives; presence holds the pond's own. Comparing them
-        // directly is what caught the id being hashed twice.
+        // The queue holds the coordinator's (hashed) id; presence holds the pond's own.
         assert!(queued.contains(&network_device(&key).unwrap()));
 
-        // The sighting is forgotten with it, or every later sweep re-queues a
-        // revocation that has already been made.
         assert!(!runtime.presence().unwrap().contains_key(&key));
         runtime.sweep_absent_devices().await.unwrap();
         assert_eq!(runtime.pending_revocations().unwrap().len(), 1);
     }
 
-    /// Absence of evidence is not evidence of absence. A device this pond has
-    /// never happened to observe must not lose anything for it.
     #[tokio::test]
     async fn a_device_with_no_sighting_is_never_swept() {
         use pond_core::security::ports::remote_access::DevicePresence;
@@ -1283,9 +1182,6 @@ mod tests {
         assert!(runtime.pending_revocations().unwrap().is_empty());
     }
 
-    /// A household that never enabled remote access has nothing to revoke and
-    /// must not contact coordination to find that out. Same rule the revocation
-    /// queue already follows.
     #[tokio::test]
     async fn a_local_only_household_is_never_swept() {
         use pond_core::security::ports::remote_access::{DevicePresence, LAN_PRESENCE_WINDOW_DAYS};
@@ -1303,8 +1199,6 @@ mod tests {
         assert!(!runtime.directory.join("revocations.json").exists());
     }
 
-    /// The app is told when access lapses so it can say so beforehand, rather
-    /// than the user finding out by losing it.
     #[tokio::test]
     async fn the_lapse_deadline_is_a_window_after_the_last_sighting() {
         use pond_core::security::ports::remote_access::{DevicePresence, LAN_PRESENCE_WINDOW_DAYS};

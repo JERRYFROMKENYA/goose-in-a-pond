@@ -115,9 +115,6 @@ pub(super) async fn caller(
     Ok((device, Sha256::digest(token.as_bytes()).into()))
 }
 fn failed(error: anyhow::Error) -> StatusCode {
-    // Reports the cause. It used to discard it, which is how a replacement that
-    // failed on a stale revision read as "remote recovery operation failed" and
-    // reached the user as "remote access is not set up on this Pond".
     tracing::warn!(%error, "remote recovery operation failed");
     StatusCode::SERVICE_UNAVAILABLE
 }
@@ -149,16 +146,8 @@ async fn request(
         )
         .await
         .map_err(failed)?;
-    // An active enrollment is no longer refused here. The coordinator will not
-    // replace one, so it has to be stood down first -- but that is a step the
-    // pond can take on the household's behalf, and `execute` takes it once a
-    // person has approved. Asking the user to know that, and to perform it
-    // through a sign-out, made the one case replacement exists for the one case
-    // it could not serve.
-    //
-    // It is NOT done here. This route needs only a LAN peer and a bearer token,
-    // so revoking at request time would let anyone who has both knock the
-    // household's phone off the tailnet without approving anything.
+    // Never stand down an active enrollment here; `execute` does it after approval. This route
+    // needs only a LAN peer and a token, so revoking here would let anyone skip the approval.
     let status = old["status"].as_str().unwrap_or("unknown");
     if old["machineKey"].as_str() == Some(&registration.machine_key) {
         tracing::warn!(
@@ -171,9 +160,6 @@ async fn request(
         tracing::warn!(%device, %status, "remote recovery refused: the enrollment carries no usable revision to supersede");
         return Err(StatusCode::CONFLICT);
     };
-    // Captured before any revocation, and still correct after one: revoking
-    // preserves the revision, so the record this replacement supersedes is
-    // pinned from the moment the user was asked about it.
     tracing::info!(%device, %status, "remote recovery awaiting local review");
     payload["expectedRevision"] = serde_json::Value::String(revision.to_owned());
     let id = runtime.recovery.insert(device, hash, payload, generation)?;
@@ -261,18 +247,7 @@ async fn operation(
         if !runtime.config().map_err(failed)?.enabled {
             return Err(StatusCode::CONFLICT);
         }
-        // The coordinator replaces an enrollment that has been stood down, not a
-        // live one, so a device whose record is still active needs revoking
-        // first. Two steps either way; the difference is that the pond takes
-        // them rather than telling the user to sign out and work it out.
-        //
-        // Here rather than at request time, because this runs only after a
-        // person approved it at the pond. Revoking on request alone would hand
-        // anyone with a LAN address and a token a way to drop the household's
-        // remote access without approving anything.
-        //
-        // Revoking preserves the record's revision, so the `expectedRevision`
-        // captured when the user was asked still pins the same record.
+        // The coordinator replaces only a stood-down enrollment, so an active one is revoked first.
         let live = runtime
             .authority(
                 "inspect",
@@ -296,17 +271,11 @@ async fn operation(
                 )
                 .await
                 .map_err(|error| {
-                    // Nothing has changed yet, so the approval can simply be
-                    // used again once coordination is reachable.
                     tracing::warn!(%error, %device, "remote recovery: could not stand down the existing enrollment");
                     StatusCode::SERVICE_UNAVAILABLE
                 })?;
 
-            // Re-read the revision rather than assuming the old one survived.
-            // It does not: standing an enrollment down gives it a new revision,
-            // so the `expectedRevision` captured when the user was asked is
-            // stale by the time the replacement is sent, and the coordinator
-            // refuses it -- after the old enrollment is already gone.
+            // Standing down issues a new revision, so the one captured at request time is stale.
             let Some(revision) = stood_down["revision"].as_str().filter(|v| valid_device(v)) else {
                 tracing::warn!(%device, "remote recovery: the stood-down enrollment reported no usable revision");
                 return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -314,9 +283,8 @@ async fn operation(
             payload["expectedRevision"] = serde_json::Value::String(revision.to_owned());
         }
 
-        // The approved payload is consumed before a possibly ambiguous external write.
-        // A failed response is never replayed. Credentials are checked after taking
-        // the same lock used to queue revocation, and the coordinator checks revision.
+        // The payload was consumed before this ambiguous write and is never replayed; credentials
+        // were checked under the revocation lock, and the coordinator checks the revision.
         let result = runtime
             .authority("replace", payload)
             .await

@@ -3,10 +3,14 @@
 pub mod cleanup;
 pub(crate) mod image_normalize;
 pub mod middleware;
+pub mod music_choice;
+pub mod musickit;
 pub mod network;
 pub mod oauth_callback;
+pub mod player;
 pub mod routes;
 pub mod runs;
+pub mod spotify_focus;
 pub mod thought_filter;
 pub mod tool_context;
 
@@ -117,19 +121,9 @@ pub struct AppState {
     /// Wakes the maintenance sweep to refill after the rebuild route clears the index.
     /// `None` with no sweep to wake; the route still clears, and the next process refills.
     pub index_reindex: Option<Arc<tokio::sync::Notify>>,
-    /// Seeing the inference lane, and asking one of its jobs to run now.
-    ///
-    /// `None` in a process that has no lane — the CLI paths, and every
-    /// integration test that builds an `AppState` by hand. The routes answer
-    /// with "there is no lane here" rather than an empty list, because a
-    /// household looking at six jobs all reading "never run" deserves to know
-    /// whether that is the lane's answer or the absence of one.
+    /// Inference lane jobs and run-now; `None` (CLI, tests) is reported as no lane, not as empty.
     pub lane: Option<Arc<dyn pond_core::user_data::ports::lane_control::LaneControl>>,
-    /// The suggestions the pond composed out of the household'''s own memories.
-    ///
-    /// Not an `Option`: unlike the lane, this is a table, and every process
-    /// that has a database has one. A `None` here would make "no composed
-    /// suggestions" and "this build cannot compose" the same empty list.
+    /// Suggestions composed from the household's memories; not an `Option`, since every DB has one.
     pub suggestion_queue:
         Arc<dyn pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository>,
     /// Sync all connected accounts now rather than on the timer; `None` where nothing can sync.
@@ -207,14 +201,8 @@ pub struct AppState {
     pub notification_sse_semaphore: Arc<tokio::sync::Semaphore>,
     /// Post-inference review that triggers a revision when answer quality falls below threshold.
     pub answer_reviewer: Option<Arc<dyn pond_core::models::ports::answer_reviewer::AnswerReviewer>>,
-    /// Live state of the BATCH extraction engine, written by its lane job in
-    /// `pond-server` and read by `GET /api/v1/memories/extraction-status`.
-    ///
-    /// `None` on CLI paths and in tests, which the route reports as "not
-    /// running" rather than as a zeroed pass that never happened. The two are
-    /// different answers and a household deserves the true one: a pond whose
-    /// embedder never loaded looks identical, from the outside, to one with
-    /// nothing left to extract.
+    /// Batch extraction engine state, written by its lane job, read by the extraction-status route.
+    /// `None` (CLI, tests) is reported as "not running", never as a zeroed pass.
     pub extraction_status: Option<
         Arc<
             tokio::sync::RwLock<
@@ -427,14 +415,11 @@ pub struct ModelStatusEntry {
     /// Companion config filename (.onnx.json). TTS models only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_filename: Option<String>,
-    /// Whether this model can look at pictures on THIS device, as the agent declares it (a Jetson
-    /// may decline a model whose encoder would cost it conversation room). GGUF rows only; a
-    /// static fact, never the live download state, which `GET /models/vision-status` carries.
+    /// Whether the agent says this model reads images on THIS device (GGUF rows only). Static;
+    /// the live download state is in `GET /models/vision-status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reads_images: Option<bool>,
-    /// The picture-support download this model needs, in bytes: the encoder's pinned size.
-    /// Present only when `reads_images` is true, so the Models page can state the number before
-    /// the household spends it.
+    /// Image-support download in bytes (the encoder's pinned size); set only when `reads_images`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_support_bytes: Option<u64>,
 }

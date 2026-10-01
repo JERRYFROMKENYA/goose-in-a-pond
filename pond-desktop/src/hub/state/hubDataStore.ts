@@ -90,19 +90,8 @@ function inferKind(d: Device): DeviceKind | "camera" {
 }
 
 /**
- * A device, carrying only the state something actually reported.
- *
- * These four fields used to default — `on` to false, `locked` to TRUE, the
- * thermostat to 70/68 — and `GET /api/v1/devices` sends identity and
- * capabilities only, never a `metadata` block. So on a real pond the defaults
- * always fired, and the panel's quiet line read "All locked, and everything is
- * off." having read no lock at all. Worse, it could not be falsified: with
- * `locked` hardcoded true, "1 of 2 doors are still unlocked" was unreachable
- * on real data, so unlocking the front door changed nothing on screen.
- *
- * Undefined is the honest value, and every reader downstream treats it as "not
- * reported" rather than as off or locked. Live state comes from the MCP read in
- * `HomeControlsCard`, which is the only thing in this app that knows it.
+ * A device with only the state something reported. `GET /api/v1/devices` sends none, so fields
+ * stay undefined ("not reported", never off/locked); live state is `HomeControlsCard`'s MCP read.
  */
 function deviceFromApi(d: Device, kind: DeviceKind): DeviceData {
   const meta = d.metadata ?? {};
@@ -120,9 +109,7 @@ function deviceFromApi(d: Device, kind: DeviceKind): DeviceData {
     target,
     value,
     room: d.room ?? "Home",
-    // Carried through untouched. Home reads this to decide whether a device is
-    // offered a switch at all; without it every tile would offer a power toggle
-    // to a contact sensor.
+    // Home offers a switch only to devices whose capabilities allow one.
     capabilities: d.capabilities,
   };
 }
@@ -169,13 +156,7 @@ const CATEGORY_TEMPLATE: Record<Exclude<DeviceKind, "other">, Omit<CategoryData,
   plug:   { id: "plugs",   label: "Plugs",    icon: "plug",   color: "#0D9488", bg: "#CCFBF1" },
 };
 
-/**
- * What a chip says when no device under it has reported its state.
- *
- * Said rather than guessed. "0 on" and "All locked" are both claims, and on
- * today's device API — identity and capabilities, no state — they would be
- * claims nothing behind them supports.
- */
+/** Chip text when nothing under it reported state; "0 on" or "All locked" would be a guess. */
 const NOT_REPORTED = "Not reported";
 
 /** The status line for "how many of these are on", said only about the ones that said. */
@@ -189,9 +170,7 @@ function powerStatus(devs: DeviceData[]): string {
 
 function deriveCategories(devs: DeviceData[], cams: CameraData[]): CategoryData[] {
   const out: CategoryData[] = [];
-  // No Security chip. It was pinned first and hardcoded to "Disarmed", with
-  // nothing behind it — an alarm state is exactly the kind of thing a household
-  // must not read off a placeholder. It comes back when something can answer it.
+  // No Security chip until something reports alarm state: never show that from a placeholder.
 
   const byKind: Record<DeviceKind, DeviceData[]> = { light: [], lock: [], thermo: [], plug: [], other: [] };
   for (const d of devs) byKind[d.kind].push(d);
@@ -199,8 +178,7 @@ function deriveCategories(devs: DeviceData[], cams: CameraData[]): CategoryData[
   if (byKind.lock.length) {
     const known = byKind.lock.filter((d) => typeof d.locked === "boolean");
     const locked = known.filter((d) => d.locked).length;
-    // "All locked" needs every lock to have said so — one silent lock and the
-    // chip is speaking for a door nobody read.
+    // "All locked" needs every lock to have reported; one silent lock is a door nobody read.
     const status =
       known.length === 0                                             ? NOT_REPORTED
       : known.length === byKind.lock.length && locked === known.length ? "All locked"
@@ -218,8 +196,7 @@ function deriveCategories(devs: DeviceData[], cams: CameraData[]): CategoryData[
     out.push({ ...CATEGORY_TEMPLATE.light, status: powerStatus(byKind.light) });
   }
   if (cams.length) {
-    // "N live" is a claim about a stream. This counts registrations, which is
-    // all the device list knows.
+    // "paired", not "live": the device list knows registrations, not streams.
     out.push({
       id: "cameras", label: "Cameras", status: `${cams.length} paired`,
       icon: "cctv", color: "#7C3AED", bg: "#EDE9FE",
@@ -233,12 +210,6 @@ function deriveCategories(devs: DeviceData[], cams: CameraData[]): CategoryData[
 
 const SCENE_ICONS = ["sun", "moon", "film", "away", "focus"];
 
-/**
- * Scenes are the household's first five schedules, and nothing when they have
- * none. The empty case used to return the demo file's five — Good Morning,
- * Good Night, Movie Time, Away, Focus — which put five tappable scenes on a
- * pond that had never been given one.
- */
 function scenesFromSchedules(schedules: Schedule[]): SceneData[] {
   return schedules.slice(0, 5).map((s, i) => ({
     id: s.id,
@@ -264,22 +235,7 @@ function recipeIdHash(name: string): number {
   return h;
 }
 
-/**
- * The household's recipes, as routine cards. No recipes means no cards.
- *
- * Two fabrications used to live here and both are gone. An empty recipe list
- * returned the five in `data/routines.ts`, so a fresh pond — and any pond whose
- * server was unreachable — showed Good Morning, Good Night, Movie Time, Away
- * and Focus in the drawer and on Routines, each with a Run control; tapping one
- * wrote the fixture into the household's real `agent_recipes` and ran its
- * prompt, in a house that may have had nothing paired.
- *
- * And a recipe whose name happened to match one of the five had its own
- * description thrown away for the fixture's chips and was labelled "7:00 AM
- * weekdays" — a schedule recipes do not have. Everything below is now derived
- * from the recipe in hand; only the icon and the two colours are decoration,
- * picked by a hash so the same recipe looks the same each launch.
- */
+/** Recipes as routine cards. Icon and colours are hash-picked, so stable across launches. */
 function routinesFromRecipes(recipes: AgentRecipe[]): RoutineDetail[] {
   return recipes.map((r) => {
     const template = ROUTINE_TEMPLATES[recipeIdHash(r.name) % ROUTINE_TEMPLATES.length];
@@ -294,39 +250,21 @@ function routinesFromRecipes(recipes: AgentRecipe[]): RoutineDetail[] {
       iconPath: template.iconPath,
       color:    template.color,
       bg:       template.bg,
-      // A recipe with no description says nothing about itself rather than
-      // borrowing four actions from a file.
       does:     does.length ? does : ["On demand"],
-      // Recipes have no schedule. "7:00 AM weekdays" was never true of one.
+      // Recipes have no schedule.
       time:     "On demand",
       prompt:   `Run routine: ${r.name}`,
     };
   });
 }
 
-/**
- * Turn the weather answer into a slice, and never into a borrowed one.
- *
- * Every `?? MOCK_HOME.weather.x` that used to sit on these lines was the same
- * fabrication as the whole-record fallback, one field at a time: a real answer
- * missing a high and low would silently report yesterday's demo numbers beside
- * a real temperature, which is harder to notice and no more true. An absent
- * field now zeroes, and the forecast strip is simply not drawn rather than
- * showing three invented days.
- */
-/**
- * Which of the four weather states this answer puts us in.
- *
- * Copy above this store must branch on the result and not on `weatherEnabled`
- * alone: "off" earns "set your location", "unreachable" earns a sentence about
- * the pond not being able to reach the weather, and they are not the same
- * message to a household that has already set one.
- */
+/** Branch copy on this, not `weatherEnabled`: "off" and "unreachable" need different words. */
 function weatherStatusFor(answered: boolean, w: WeatherApiResponse | null): WeatherStatus {
   if (!answered) return "unreachable";
   return w?.enabled ? "on" : "off";
 }
 
+/** Missing fields zero out and a missing forecast draws no strip; never borrow demo values. */
 function weatherFromApi(w: WeatherApiResponse | null): WeatherData {
   if (!w || !w.enabled) return NO_WEATHER;
   return {
@@ -407,10 +345,23 @@ function setNowPlayingBackoff(np: NowPlayingApiResponse | null): void {
 }
 
 function nowPlayingFromApi(np: NowPlayingApiResponse | null): NowPlayingData {
+  // Apple Music chosen: the assistant and its page play it, so the card says where, not what.
+  if (np?.service === "apple") {
+    return {
+      track: "",
+      artist: "",
+      elapsed: 0,
+      hue: EMPTY_HOME.nowPlaying.hue,
+      connected: false,
+      playing: false,
+      progressMs: null,
+      durationMs: null,
+      service: "apple",
+      player: np.player ?? "page",
+    };
+  }
   if (!np || !np.connected) {
-    // Not the mock track with `connected` flipped: that put "Weightless /
-    // Marconi Union" on the screen of every fresh install, which is the exact
-    // state most likely to be mistaken for working playback.
+    // Blank, never a mock track: that would pass for working playback.
     return {
       track: "",
       artist: "",
@@ -448,11 +399,11 @@ function nowPlayingFromApi(np: NowPlayingApiResponse | null): NowPlayingData {
     albumArt: np.album_art,
     connected: true,
     playing: np.playing ?? false,
-    // Carried rather than discarded. The fraction above cannot be turned back
-    // into mm:ss, so a card that wants to say 3:26 of 8:08 needs the milliseconds
-    // the snapshot has always sent. Null, not 0, when Spotify did not send them.
+    // For mm:ss (the fraction above can't give it); null, not 0, when Spotify omits them.
     progressMs: typeof np.progress_ms === "number" ? np.progress_ms : null,
     durationMs: typeof np.duration_ms === "number" ? np.duration_ms : null,
+    link: np.link ?? null,
+    ...(np.can ? { can: np.can } : {}),
   };
 }
 
@@ -475,15 +426,7 @@ async function load() {
     const dOK = devices.status === "fulfilled" ? devices.value : [];
     const schOK = schedules.status === "fulfilled" ? schedules.value : [];
     const rcOK = recipes.status === "fulfilled" ? recipes.value : [];
-    // Answered at all, which is a different question from what the answer was.
-    // A 502 from the weather provider, an egress refusal, a 408 from the 30s
-    // abort and a dead socket all arrive here as a rejection, and flattening
-    // them to `null` made every one of them indistinguishable from an honest
-    // `{enabled:false}` — so the card told a household with a location set and
-    // weather switched on to go and set their location. It is also why the
-    // reading below is kept rather than rebuilt: one failed reload used to wipe
-    // a temperature that had been right all day, and the ten-minute poll cannot
-    // put it back until upstream recovers.
+    // A rejected fetch is "unreachable", not `{enabled:false}`, and keeps the last reading.
     const weatherAnswered = weather.status === "fulfilled";
     const wOK = weatherAnswered ? weather.value : null;
     const npOK = nowPlaying.status === "fulfilled" ? nowPlaying.value : null;
@@ -498,15 +441,9 @@ async function load() {
       else ctlDevices.push(deviceFromApi(d, k));
     }
 
-    // No demo house. A pond with nothing paired used to be handed ten invented
-    // devices, three cameras and six rooms, which meant the screen a new
-    // household meets is the one screen guaranteed to be false. Zero devices is
-    // a state, and every surface that shows them has an empty state for it.
     const userName = (sOK?.user_name && sOK.user_name.trim()) || EMPTY_HOME.user;
 
-    // Built field by field rather than spread over MOCK_HOME. The spread kept
-    // whatever it was not asked about — which is how a mock slice survives a
-    // real load without anybody choosing to keep it.
+    // Field by field, never spread over an older object: a spread keeps slices nobody asked for.
     state.data = {
       user: userName,
       devices: ctlDevices,
@@ -524,9 +461,7 @@ async function load() {
     state.loaded = true;
     emit();
   } catch {
-    // Keep whatever the last successful load left behind. There is no fixture
-    // to fall back to any more: before the first load that is the empty home,
-    // and the screens above it draw their empty states.
+    // Keep what the last successful load left (the empty home before the first).
   } finally {
     state.loading = false;
   }
@@ -589,9 +524,7 @@ export async function refreshWeather(): Promise<void> {
     };
     emit();
   } catch {
-    // Keep the last known reading rather than blanking the card — but say that
-    // it is the last known one. Leaving `weatherStatus` on "on" would let a
-    // card go on presenting an hour-old temperature as current.
+    // Keep the last reading but mark it "unreachable", so it isn't presented as current.
     state.data = { ...state.data, weatherStatus: "unreachable" };
     emit();
   }

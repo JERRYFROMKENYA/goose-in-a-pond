@@ -587,6 +587,107 @@ def section_network_mode():
     )
 
 
+def section_music_player():
+    """The music player bridge, on a real server: the routes are registered behind the right
+    doors, the developer-token route reaches the secret store, and the shell's network policy
+    follows the LIVE `network_mode`.
+
+    Not covered here, because it needs a page and a key: a command round trip. The Rust
+    integration tests drive real server-sent events through the real router for that.
+    """
+    print("\n=== music player bridge ===")
+
+    # Extension-only routes: reachable on the host, but the handler wants the internal token.
+    for label, method, path, body in [
+        ("the player status", "GET", "/api/v1/player/status", None),
+        ("a player command", "POST", "/api/v1/player/command", {"service": "apple", "op": "pause"}),
+        ("extension egress", "POST", "/api/v1/extension/egress",
+         {"url": "https://itunes.apple.com/", "extension": "music"}),
+    ]:
+        code, body = call(method, path, body)
+        expect(
+            label + " is for extensions only",
+            code,
+            401,
+            body,
+            ("says why", lambda b: isinstance(b, dict) and "internal token" in json.dumps(b)),
+        )
+
+    # No key has been stored in this scratch pond, so the route must say what to add.
+    code, body = call("GET", "/api/v1/musickit/developer-token")
+    expect(
+        "a developer token is refused until a key is stored, and says what to add",
+        code,
+        400,
+        body,
+        ("names what is missing", lambda b: isinstance(b, dict) and "Team ID" in json.dumps(b)),
+    )
+
+    # The probe asks whether a token could be had, and reaches nothing: with managed mode off and no key,
+    # it says what to add, the same way the token route does.
+    code, body = call("GET", "/api/v1/musickit/developer-token?probe=true")
+    expect(
+        "the probe says what is missing, without trying to fetch anything",
+        code,
+        400,
+        body,
+        ("names what is missing", lambda b: isinstance(b, dict) and "Team ID" in json.dumps(b)),
+        ("points at developer settings", lambda b: isinstance(b, dict) and "Developer settings" in json.dumps(b)),
+    )
+
+    code, body = call("GET", "/api/v1/player/events")
+    expect("the command stream needs a service name", code, 400, body)
+
+    code, body = call("GET", "/api/v1/player/state?service=apple")
+    expect(
+        "with no page attached the player reads as not attached",
+        code,
+        200,
+        body,
+        ("not attached", lambda b: isinstance(b, dict) and b.get("attached") is False),
+        ("no now-playing", lambda b: isinstance(b, dict) and b.get("state") is None),
+    )
+
+    # The shell asks this before letting the player window reach a host, so it must follow the
+    # setting as `PUT /settings` changes it, with no restart.
+    apple = {"url": "https://js-cdn.music.apple.com/musickit/v3/musickit.js", "method": "GET"}
+    code, body = call("PUT", "/api/v1/settings", {"network_mode": "offline"})
+    if not expect("network_mode=offline is applied for the player check", code, 200, body):
+        return
+    try:
+        code, body = call("POST", "/api/v1/player/egress-policy", apple)
+        expect(
+            "an offline pond refuses the player window's request to Apple",
+            code,
+            200,
+            body,
+            ("refused", lambda b: isinstance(b, dict) and b.get("allowed") is False),
+            ("names the host", lambda b: "js-cdn.music.apple.com" in json.dumps(b)),
+        )
+        code, body = call(
+            "POST", "/api/v1/player/egress-policy",
+            {"url": "http://127.0.0.1:4000/api/v1/health", "method": "GET"},
+        )
+        expect(
+            "loopback stays allowed offline",
+            code,
+            200,
+            body,
+            ("allowed", lambda b: isinstance(b, dict) and b.get("allowed") is True),
+        )
+    finally:
+        call("PUT", "/api/v1/settings", {"network_mode": "open"})
+
+    code, body = call("POST", "/api/v1/player/egress-policy", apple)
+    expect(
+        "an open pond allows it",
+        code,
+        200,
+        body,
+        ("allowed", lambda b: isinstance(b, dict) and b.get("allowed") is True),
+    )
+
+
 def section_lane_clock_after_restart():
     """Does the lane still know when a job ran, in a process that did not run it?
 
@@ -1430,6 +1531,7 @@ def main():
         section_secret_store()
         section_redaction()
         section_network_mode()
+        section_music_player()
         # First pass only. It creates a profile by name, which would collide
         # with the row it left behind, and the process counters it reads are
         # zero on a fresh process by design -- so on the restart pass it would

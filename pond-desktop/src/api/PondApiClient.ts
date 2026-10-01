@@ -64,6 +64,8 @@ import {
   type DetectedPlace,
 } from "./types";
 import { voiceTitle } from "../voice/voiceCatalogue";
+import { parseSse, type SseFrame } from "../player/sse";
+import type { PlayerReply, PlayerState } from "../player/types";
 
 // All REST calls MUST go through PondApiClient; no fetch() elsewhere.
 
@@ -171,9 +173,21 @@ export class PondApiClient {
     }
   }
 
+  /** How this client introduces itself when it pairs, and so how the devices list names it. */
+  private deviceName = "Pond Desktop";
+
+  setDeviceName(name: string): void {
+    this.deviceName = name;
+  }
+
   /** Requests read `this.base` per call, so this retargets the whole singleton. */
   setBase(url: string): void {
     this.base = url.replace(/\/$/, "");
+  }
+
+  /** The pond this client talks to, e.g. to link to a page the pond serves. */
+  serverUrl(): string {
+    return this.base;
   }
 
   /** `expiresAt` (RFC3339) arms proactive refresh; omit to keep the expiry, `null` to clear it. */
@@ -229,14 +243,7 @@ export class PondApiClient {
     return h;
   }
 
-  /**
-   * Send one authenticated request and hand back the response unread.
-   *
-   * The half every JSON call and every bytes call share: the proactive token
-   * refresh, the timeout, one coalesced re-pair on a 401, and a non-2xx mapped
-   * to `ApiError`. Split out of `request()` so a caller that wants bytes
-   * rather than JSON inherits all four instead of copying three of them.
-   */
+  /** One authenticated request with the response unread, shared by JSON and bytes calls. */
   private async send(
     method: string,
     path: string,
@@ -478,18 +485,8 @@ export class PondApiClient {
   }
 
   /**
-   * Refresh this client's own row in the device registry.
-   *
-   * The desktop registers itself as an ordinary device when it pairs, and the
-   * registry derives `is_online` from `last_seen` against a five-minute
-   * threshold rather than storing it. Pairing was the only thing that ever
-   * wrote the row, so it aged out minutes into a session and the app reported
-   * the machine rendering the Devices list as unreachable.
-   *
-   * The id has to be the one pairing registered -- the server keys the row on
-   * the `client_id` sent at handshake -- so this goes through `clientId()`
-   * rather than taking an argument. A beat against any other id would succeed
-   * and refresh nothing.
+   * Refreshes this client's registry row, which reads offline five minutes after `last_seen`.
+   * Uses `clientId()`: the row is keyed on the handshake id, and any other id refreshes nothing.
    */
   heartbeatSelf(): Promise<void> {
     return this.markDeviceOnline(this.clientId());
@@ -802,14 +799,7 @@ export class PondApiClient {
     return this.post<ContextIndexRebuild>("/api/v1/context/index/rebuild", {});
   }
 
-  /**
-   * Record that a composed suggestion was tapped.
-   *
-   * Only composed ones: a template suggestion is recomputed on every read and
-   * has no row to settle. Without this the queue never drains and a household
-   * reads the same composed questions forever, which is the complaint the whole
-   * surface was built from, one tier up.
-   */
+  /** Settles a tapped composed suggestion (template ones have no row); without it the queue never drains. */
   markSuggestionTaken(id: string): Promise<{ id: string; settled: boolean }> {
     return this.post(`/api/v1/suggestions/${encodeURIComponent(id)}/taken`, {});
   }
@@ -821,13 +811,7 @@ export class PondApiClient {
     return this.get<LaneStatus>("/api/v1/lane");
   }
 
-  /**
-   * Ask one background job to take its next tick now.
-   *
-   * Wakes rather than runs: the work happens in the job's own loop under the
-   * same single slot every scheduled pass takes, so this returns as soon as the
-   * doorbell has been rung. What happened is read back from `laneStatus`.
-   */
+  /** Wakes one background job's loop and returns at once; read the outcome from `laneStatus`. */
   runLaneJob(job: string): Promise<LaneRunResult> {
     return this.post<LaneRunResult>(
       `/api/v1/lane/jobs/${encodeURIComponent(job)}/run`,
@@ -1049,7 +1033,7 @@ export class PondApiClient {
       {
         challenge_id: init.challenge_id,
         mac,
-        device_name: "Pond Desktop",
+        device_name: this.deviceName,
       },
     );
     if (res.accepted && res.session_token) {
@@ -1260,14 +1244,7 @@ export class PondApiClient {
     );
   }
 
-  /**
-   * What the household might want to ask.
-   *
-   * `sessionId` is OPTIONAL, unlike every proposal call, and that is the point:
-   * `state.sessionId` is null on a cold launch and never persisted, so a Home
-   * screen that waited for one would show nothing on exactly the launch this
-   * fills. Passing one when it exists only sharpens the audience.
-   */
+  /** `sessionId` is optional (null on a cold launch); passing one narrows the audience to personal. */
   listSuggestions(sessionId?: string | null): Promise<SuggestionList> {
     const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
     return this.get<SuggestionList>(`/api/v1/suggestions${q}`);
@@ -1323,8 +1300,7 @@ export class PondApiClient {
               tool_calls: m.tool_calls as SessionMessageToolCall[] | undefined,
               tool_call_id: m.tool_call_id as string | undefined,
               images: m.images as SessionMessage["images"],
-              // Passed through as sent: absent stays absent and `[]` stays
-              // `[]`, the distinction the type documents.
+              // As sent: absent and `[]` mean different things.
               thinking: m.thinking as SessionMessage["thinking"],
               liked: m.liked as boolean | null | undefined,
             }) satisfies Record<keyof SessionMessage, unknown>,
@@ -1501,13 +1477,8 @@ export class PondApiClient {
   }
 
   /**
-   * The bytes of one persisted chat-image attachment (see SessionMessageImage).
-   *
-   * Fetched, never handed to `<img src>`. The route sits on the protected
-   * router and the server accepts only an `Authorization: Bearer` header, which
-   * an image element cannot send, so a bare URL answers 401 on every pond
-   * started without the loopback dev bypass. Callers show the result through
-   * an object URL they own and revoke.
+   * One persisted chat image's bytes. Never use the URL as `<img src>`: the route needs a Bearer
+   * header an image can't send. Callers show it through an object URL they own and revoke.
    */
   async getSessionAttachment(
     sessionId: string,
@@ -1930,6 +1901,8 @@ export class PondApiClient {
   ): Promise<{
     requirements: SecretRequirement[];
     fulfilled: Record<string, boolean>;
+    /** What each `choice` is set to: the stored answer, or the one that applies until one is saved. */
+    values?: Record<string, string>;
   }> {
     return this.get(`/api/v1/extensions/${encodeURIComponent(name)}/secrets`);
   }
@@ -2089,6 +2062,110 @@ export class PondApiClient {
     state: string,
   ): Promise<import("./types").OAuthFlowStatus> {
     return this.get(`/api/v1/oauth/status/${encodeURIComponent(state)}`);
+  }
+
+  // ── Music player bridge ───────────────────────────────────
+
+  /**
+   * The player page's command stream. Long-lived by design, so unlike `streamSse` it has no
+   * timeout: it ends when the server closes it or `signal` aborts. `EventSource` cannot carry the
+   * Authorization header the server requires, hence fetch.
+   */
+  async *streamPlayerEvents(
+    service: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<SseFrame> {
+    await this.ensureTokenFresh();
+    const url = `${this.base}/api/v1/player/events?service=${encodeURIComponent(service)}`;
+    const open = (token: string | null) =>
+      fetch(url, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        signal,
+      });
+
+    let res = await open(this.token);
+    if (res.status === 401) {
+      const fresh = await this.reauthenticate();
+      if (fresh) res = await open(fresh);
+    }
+    if (!res.ok || !res.body) {
+      throw new ApiError(
+        res.status,
+        res.statusText || "The player stream did not open",
+      );
+    }
+    yield* parseSse(res.body, signal);
+  }
+
+  playerReply(reply: PlayerReply): Promise<unknown> {
+    return this.post("/api/v1/player/reply", reply);
+  }
+
+  playerState(service: string, state: PlayerState): Promise<unknown> {
+    return this.post("/api/v1/player/state", { service, state });
+  }
+
+  /** What the player page last reported for a service, and whether a page is attached at all. */
+  async getPlayerState(service: string): Promise<{ attached: boolean; state: PlayerState | null }> {
+    const reply = await this.get<{ attached?: boolean; state?: PlayerState | null }>(
+      `/api/v1/player/state?${new URLSearchParams({ service })}`,
+    );
+    // `request` can hand back an empty or HTML body, so nothing is assumed of the shape.
+    return {
+      attached: reply?.attached === true,
+      state: reply?.state && typeof reply.state === "object" ? reply.state : null,
+    };
+  }
+
+  /**
+   * Whether Apple Music could work at all: a key is stored, or the shared credentials are on. Asked of
+   * the pond alone: no token is signed or fetched and nothing leaves it. Rejects, with the pond's own
+   * words, when nothing could supply a token.
+   */
+  async musickitDeveloperTokenAvailable(): Promise<void> {
+    const reply = await this.get<{ available?: boolean }>(
+      "/api/v1/musickit/developer-token?probe=true",
+    );
+    // `request` can hand back an empty or HTML body; only a plain yes counts.
+    if (reply?.available !== true) throw new Error("Apple Music is not available on this pond.");
+  }
+
+  /** A developer token signed by the host, which holds the key. 400 says the key is not set up. */
+  musickitDeveloperToken(): Promise<{ token: string; expires_at: number }> {
+    return this.get("/api/v1/musickit/developer-token");
+  }
+
+  /**
+   * Whether the pond's network setting lets the player page reach `url`: null when it does, else the
+   * pond's reason. The page asks before it loads a service's script, since in a browser nothing else
+   * stands between it and the internet; the pond also logs the request as the player's.
+   */
+  async playerNetworkAllows(url: string): Promise<string | null> {
+    const reply = await this.post<{ allowed?: boolean; reason?: string }>(
+      "/api/v1/player/egress-policy",
+      { url, method: "GET" },
+    );
+    // `request` can hand back an empty or HTML body; only a plain yes counts as allowed.
+    if (reply?.allowed === true) return null;
+    return typeof reply?.reason === "string" && reply.reason !== ""
+      ? reply.reason
+      : "The pond's network setting does not allow the music player to reach the internet.";
+  }
+
+  /**
+   * The page's access token for a service that signs in as the person (Spotify). 400 says they
+   * have not signed in; `refresh` asks the service for a new token first, for when the SDK found
+   * the last one stale.
+   */
+  async playerUserToken(service: string, refresh = false): Promise<{ token: string }> {
+    const query = new URLSearchParams({ service });
+    if (refresh) query.set("refresh", "true");
+    const reply = await this.get<{ token?: string }>(`/api/v1/player/user-token?${query}`);
+    // `request` can hand back an empty or HTML body; a token that is not a string is not a token.
+    if (typeof reply?.token !== "string" || reply.token === "") {
+      throw new Error(`The pond gave no ${service} token.`);
+    }
+    return { token: reply.token };
   }
 
   async refreshOAuth(provider: string): Promise<void> {

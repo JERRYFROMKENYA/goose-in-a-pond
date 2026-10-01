@@ -43,13 +43,7 @@ export interface DashboardGridProps {
   onTalk: () => void;
   /** The chat session the suggestions belong to. Null before one is opened. */
   sessionId: string | null;
-  /**
-   * Put a question to the pond and go where the answer appears.
-   *
-   * Optional, and the column folds its offers away without it rather than
-   * drawing buttons that would do nothing. Both Home surfaces supply it; a
-   * future embedder that cannot reach chat simply does not.
-   */
+  /** Asks the pond and goes where the answer appears; without it the offers fold away. */
   onAsk?: (prompt: string) => void;
 }
 
@@ -58,23 +52,15 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
   const now = useNow();
   const layout = useDashboardLayout();
 
-  // Two flags, not one. `arranging` is the frames' toolbars; `sheetOpen` is the
-  // panel. Turning Arrange on opens both, but closing the sheet leaves the
-  // toolbars up, because the arrows on the widgets themselves are the faster
-  // way to reorder once the household can see what they are moving.
+  // Separate flags: closing the sheet keeps the frames' toolbars, whose arrows reorder faster.
   const [arranging, setArranging] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [requestedPage, setRequestedPage] = useState(0);
 
   const pageCount = layout.pages.length;
-  // The store refuses to hide the last card left anywhere on Home, and the
-  // sheet's own remove is disabled for it. The frame's x has to agree, or one
-  // Arrange session shows two controls of the same name disagreeing about
-  // whether the act is available and one of them silently does nothing.
+  // The store won't hide the last card on Home, so the frame's x must be disabled for it too.
   const placedCount = placedCards(layout).length;
-  // Clamped at render rather than corrected in an effect: a page that stopped
-  // existing (the household emptied it) must not leave the track pointing past
-  // its own end for a frame.
+  // Clamped at render, not in an effect, so the track never points past its end for a frame.
   const page = Math.min(requestedPage, Math.max(0, pageCount - 1));
 
   function toggleArrange(): void {
@@ -83,14 +69,9 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
     setSheetOpen(next);
   }
 
-  // Before the first load lands, `devices` is this file's demo house. Passing it
-  // to homeLine would put a sentence about ten invented lamps on the screen for
-  // as long as the load takes.
   const devices = home.devicesAreReal ? home.devices : [];
 
-  // homeLine's last resort is a sentence about the sky, and there is no sky to
-  // report when weather is off — the slice is zeroed, so it would read ", 0°
-  // out.". The hour and the name are true without either.
+  // homeLine falls back to the weather, which is zeroed when off (", 0° out."); greet instead.
   const quietLine =
     devices.length === 0 && !home.weatherEnabled
       ? `${greetingForHour(now.getHours())}, ${home.user}.`
@@ -99,11 +80,7 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
   function renderCard(card: PlacedCard): ReactNode {
     switch (card.id) {
       case "weather":
-        // Reused untouched rather than rebuilt to the design's literal
-        // #60A5FA gradient. Its skies are contrast-tested at 4.5:1 by
-        // weatherSky.test.ts against a scrim whose alpha that test proves is no
-        // more opaque than it has to be; an untested gradient would trade a
-        // measured floor for a mockup.
+        // Not the design's #60A5FA gradient: weatherSky.test.ts proves these skies reach 4.5:1.
         return home.weatherEnabled ? (
           <WeatherWidget variant={card.size === "s" ? "card" : "hero"} />
         ) : (
@@ -224,18 +201,8 @@ const SIZE_OPTIONS: { value: CardSize; label: string }[] = [
 ];
 
 /**
- * Arranging Home.
- *
- * Buttons, not a drag. A drag is fewer taps for someone holding a mouse and
- * unusable for everyone else: DESIGN.md §6 makes keyboard operability a floor,
- * and a thumb dragging a card on a 480px-tall panel is a worse gesture than two
- * taps. Drag can be added over this later; it cannot replace it.
- *
- * "Move to page" is its own control rather than a side effect of the arrows.
- * With pages in the model, "up" past the top of a page could silently mean "the
- * previous page" — a move nobody asked for and nobody can see happen from the
- * sheet. Crossing a page is an explicit act with its own button and its own
- * name.
+ * Arranging Home with buttons, not drag (DESIGN.md §6 keyboard floor; drag may only be added on
+ * top). Arrows never cross pages: moving to a page is its own explicit control.
  */
 function ArrangeSheet({
   open,
@@ -250,9 +217,7 @@ function ArrangeSheet({
   const layout = useDashboardLayout();
   const spec = (id: CardId) => CARDS.find((c) => c.id === id);
   const placed = placedCards(layout);
-  // The page an Available card is added to. Adding to page 1 from a sheet that
-  // cannot show the track is the least surprising of the options, and the row
-  // says which page it means.
+  // Available cards are added to page 1; the row says so.
   const addTo = 0;
 
   return (
@@ -268,8 +233,7 @@ function ArrangeSheet({
                 const others = layout.pages
                   .map((_, p) => p)
                   .filter((p) => p !== pageIndex)
-                  // One page beyond the last, so a household can spread out
-                  // without hunting for an "add a page" control.
+                  // Plus one new page past the last, instead of an "add a page" control.
                   .concat(layout.pages.length < MAX_PAGES ? [layout.pages.length] : []);
                 return (
                   <li key={card.id} className="dash__arrange-row">
@@ -337,10 +301,7 @@ function ArrangeSheet({
                             className="dash__page-btn"
                             aria-label={`Move ${c.title} to page ${p + 1}`}
                             onClick={() => {
-                              // Follow the card, not the button. Emptying this
-                              // page drops it and shifts every later page down,
-                              // so `p` is the page that was asked for and the
-                              // return is the page the card is actually on.
+                              // Follow the card, not `p`: an emptied page shifts later ones.
                               const landedOn = moveCardToPage(card.id, p);
                               if (landedOn !== null) onGoToPage(landedOn);
                             }}

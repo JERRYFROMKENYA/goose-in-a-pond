@@ -1,17 +1,4 @@
-//! A stored reminder can be seen and dismissed over HTTP, against a real
-//! database.
-//!
-//! The write path landed the `reminders` table and filled it, and nothing could
-//! read it: a date kept somewhere no surface reaches is a quieter way of losing
-//! it than not keeping it at all. These are the claims that make the table a
-//! place the date actually went.
-//!
-//! One of them is about ROUTING rather than about reminders. `extraction-status`
-//! had to be registered before `/memories/{id}` or axum matched the literal
-//! segment as a memory id, and the same trap is one route away here. It is
-//! asserted from outside, through the built router, because that is the only
-//! place the ordering is real -- `scripts/live-test.sh` makes the same two
-//! assertions against a running server.
+//! A stored reminder can be seen and dismissed over HTTP, against a real database.
 
 use std::sync::Arc;
 
@@ -197,8 +184,7 @@ async fn make_app() -> Harness {
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
-/// One stored reminder, as the extraction pass writes it: no `profile_id`,
-/// which is the state of every row on a live pond.
+/// One reminder as extraction writes it: no `profile_id`, as on every live pond.
 fn reminder(id: &str, about: &str, said_ago: Duration) -> CapturedReminder {
     CapturedReminder {
         id: id.into(),
@@ -258,10 +244,7 @@ fn ids(body: &Value) -> Vec<String> {
 
 // ── The read ─────────────────────────────────────────────────────────────────
 
-/// The claim the whole table rests on: a reminder with no member to address --
-/// every row on a live pond -- is still readable. If this route needed an
-/// audience the way `/proposals` does, the date would be somewhere only SQL
-/// could reach.
+/// Every live row is unowned, so unlike `/proposals` this route needs no audience.
 #[tokio::test]
 async fn a_reminder_nobody_owns_is_still_readable() {
     let h = make_app().await;
@@ -292,9 +275,7 @@ async fn a_reminder_nobody_owns_is_still_readable() {
     );
 }
 
-/// Ordered by when the CONVERSATION happened, not by when the walk got to it. A
-/// backlog run reads a year of history in one night, so capture order says
-/// nothing about which reminder is still worth asking about.
+/// Ordered by when it was said: a backlog run captures a year of history in one night.
 #[tokio::test]
 async fn the_most_recently_said_comes_first() {
     let h = make_app().await;
@@ -328,8 +309,7 @@ async fn dismissing_takes_it_off_the_list_and_only_once() {
     let (_, listed) = get_json(&h.app, "/api/v1/reminders").await;
     assert!(ids(&listed).is_empty(), "a decision is not asked again");
 
-    // The second attempt is a 404 rather than a second success: the pond must
-    // not answer "dismissed" for something it did not dismiss.
+    // 404, not a second success: the pond must not claim a dismissal it didn't make.
     let (status, _) = post_json(&h.app, "/api/v1/reminders/r-1/dismiss").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
@@ -347,10 +327,7 @@ async fn dismissing_something_that_was_never_there_is_a_404() {
 
 // ── Routing ──────────────────────────────────────────────────────────────────
 
-/// The trap `extraction-status` already fell into once: a literal segment
-/// matched as an `{id}`. Asserted through the built router, because the
-/// registration order in `routes.rs` is the only thing standing between these
-/// two answers and nothing in the handler would notice.
+/// Via the built router, since only registration order in `routes.rs` decides the match.
 #[tokio::test]
 async fn a_literal_segment_is_not_matched_as_an_id() {
     let h = make_app().await;
@@ -362,16 +339,13 @@ async fn a_literal_segment_is_not_matched_as_an_id() {
         "this is the status object, not a memory called `extraction-status`: {body}"
     );
 
-    // And the reminder routes resolve to their own handlers rather than to
-    // anything under `/memories`.
+    // `/reminders` resolves to its own handler, not to anything under `/memories`.
     let (status, body) = get_json(&h.app, "/api/v1/reminders").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.get("reminders").is_some(), "{body}");
 }
 
-/// A cap on the page, so a first walk over a year of history cannot be asked for
-/// in one response -- and a `limit` the caller can see, so exactly-full page is
-/// not mistaken for the end of the list.
+/// The echoed `limit` lets a caller tell an exactly-full page from the end of the list.
 #[tokio::test]
 async fn the_page_is_bounded_and_says_what_it_was_asked_for() {
     let h = make_app().await;
@@ -425,12 +399,7 @@ async fn a_session_of(h: &Harness, id: &str, profile_id: &str) -> String {
     id.to_string()
 }
 
-/// A member's reminder reaches that member, and nobody else -- over HTTP.
-///
-/// The adapter's own tests prove the SQL; this proves the ROUTE passes the
-/// caller's scope rather than one that reads everybody's. A route that handed
-/// the repository `Household` would pass every adapter test and still read
-/// Liz's clinic date out to a guest's phone.
+/// The route must pass the caller's scope, not `Household`; the adapter tests cover the SQL.
 #[tokio::test]
 async fn a_members_reminder_reaches_that_member_and_nobody_else() {
     let h = make_app().await;
@@ -454,8 +423,7 @@ async fn a_members_reminder_reaches_that_member_and_nobody_else() {
         "Jerry read Liz's reminder: {body}"
     );
 
-    // A guest cannot dismiss it either, and is told the same 404 as for an id
-    // that does not exist -- so the refusal discloses nothing.
+    // A guest's dismiss gets the same 404 as a missing id, so the refusal discloses nothing.
     let (status, _) = post_json(&h.app, "/api/v1/reminders/r-liz/dismiss").await;
     assert_eq!(
         status,

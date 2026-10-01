@@ -31,12 +31,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      # The scanner action bundles its own Go, and it was older than the
+      # toolchain native/pondnet/go.mod asks for (1.27.1). Its reachability
+      # analysis could not load the standard library, said so in a line nobody
+      # reads -- "Failed to run code analysis (govulncheck) ... loading
+      # packages" -- and fell back to matching the module graph. A blocking gate
+      # that is red for a version skew teaches people to ignore it.
+      #
+      # go-version-file keeps this pinned to whatever go.mod asks for, so the
+      # analysis cannot silently degrade again the next time that line moves.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: native/pondnet/go.mod
+          cache-dependency-path: native/pondnet/go.sum
+
+      # Reachability, which is the question worth blocking on: govulncheck fails
+      # only when this module actually calls a vulnerable symbol, rather than
+      # when a vulnerable module appears anywhere in the requirement graph.
+      - name: govulncheck (reachable vulnerabilities)
+        working-directory: native/pondnet
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      # Membership, kept alongside: this catches a vulnerable dependency that
+      # reachability analysis cannot see, such as one reached only through
+      # reflection or cgo. Its documented exceptions live in osv-scanner.toml.
+      #
       # This new module has its own blocking gate. Existing Rust advisory
       # deferrals must not suppress findings in shipped networking dependencies.
       - name: Embedded networking dependencies
-        uses: google/osv-scanner-action/osv-scanner-action@v2.5.1
+        uses: google/osv-scanner-action/osv-scanner-action@v2.6.0
         with:
-          scan-args: --lockfile=native/pondnet/go.mod
+          scan-args: --config=osv-scanner.toml --lockfile=native/pondnet/go.mod
 
   rust-audit:
     name: Rust — cargo audit (RustSec)
@@ -92,10 +118,24 @@ jobs:
   osv:
     name: All lockfiles — OSV (GitHub Advisory ranges)
     runs-on: ubuntu-latest
-    # Advisory, not blocking, deliberately: osv-scanner exits non-zero on ANY advisory at ANY
-    # severity and this tree cannot reach zero (rsa RUSTSEC-2023-0071 and ttf-parser
-    # RUSTSEC-2026-0192 have no fix; quick-xml and scc need semver-major bumps inside goose). Drop
-    # `continue-on-error` once `osv-scanner.toml` has a reviewed `[[IgnoredVulns]]` entry for each.
+    # Still advisory, and now for a shorter and more specific reason.
+    #
+    # osv-scanner.toml now carries a reviewed entry for every advisory with NO upstream fix --
+    # the ten unmaintained-crate notices, rsa RUSTSEC-2023-0071 and ttf-parser RUSTSEC-2026-0192.
+    # What keeps this job red is the other half: advisories that DO have a fixed version and have
+    # simply not been taken. As of 2026-09-29 that is hickory-proto (8.7), yamux (8.7), quick-xml
+    # (7.5, two entries at two versions), rmcp (8.2/7.5/6.8), opentelemetry_sdk, openssl,
+    # frost-core, serde_with, scc, lru, memmap2, tar, anyhow, event-listener, and esbuild in
+    # pond-desktop.
+    #
+    # Those are upgrades, not exceptions, so they are deliberately absent from osv-scanner.toml:
+    # ignoring an advisory you could patch converts a real finding into a silent one. Several are
+    # not one-line bumps -- rmcp is pinned to =1.5.0 in [workspace.dependencies] so the Goose
+    # submodule and pond-mcp-server resolve to one rmcp, and quick-xml and scc need semver-major
+    # bumps inside Goose itself.
+    #
+    # Drop `continue-on-error` when that list is empty, not before: turning it into a gate today
+    # would block every merge on work that has to happen in the submodule first.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
@@ -111,6 +151,7 @@ jobs:
         uses: google/osv-scanner-action/osv-scanner-action@v2.6.0
         with:
           scan-args: |-
+            --config=osv-scanner.toml
             --lockfile=Cargo.lock
             --lockfile=pond-desktop/package-lock.json
             --lockfile=extensions/music/package-lock.json

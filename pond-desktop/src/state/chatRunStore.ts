@@ -74,13 +74,7 @@ function friendlyToolStatus(rawName: string): string {
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;
 }
 
-/**
- * A replayed bubble's images, still on the server.
- *
- * Kept beside the transcript rather than on the bubble: until the bytes arrive
- * there is nothing a surface can render, and a bubble carrying the attachment
- * URL instead is exactly what both surfaces used to put in `<img src>`.
- */
+/** A replayed bubble's server-side images, kept off the bubble until their bytes arrive. */
 interface HistoryImages {
   /** The bubble, by local id. One that is gone when the bytes land gets none. */
   messageId: number;
@@ -135,17 +129,8 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
 }
 
 /**
- * Fetch the images a replayed transcript refers to, and give each bubble
- * object URLs it can display.
- *
- * Not the attachment URL itself: that route is protected, `<img src>` cannot
- * send the bearer token, and so every history image was a 401 on any pond
- * without the loopback dev bypass. The bytes come through `PondApiClient`,
- * which carries the token, and the URLs join `ownedPreviews`, under the same
- * rule as a live send's composer previews.
- *
- * An image that cannot be fetched is left out and said so on the console; the
- * rest of its bubble still loads.
+ * Gives replayed bubbles object URLs for their images. Fetched through `PondApiClient` because the
+ * attachment route needs the bearer token, which `<img src>` can't send. A failed image is skipped.
  */
 async function loadHistoryImages(
   pending: readonly HistoryImages[],
@@ -164,10 +149,7 @@ async function loadHistoryImages(
         else console.warn("Could not load a history image (non-fatal):", r.reason);
       }
       if (blobs.length === 0) return;
-      // Made HERE, after the wait, and only for a bubble still on screen. A URL
-      // made earlier would strand whenever the conversation is left while its
-      // bytes are in flight: no surviving message would show it, so
-      // `revokeOwnedPreviews` would never be asked about it.
+      // Made after the wait, and only for a bubble still shown, or `revokeOwnedPreviews` would never free it.
       if (!state.messages.some((m) => m.id === messageId)) return;
       const urls = blobs.map((b) => URL.createObjectURL(b));
       for (const url of urls) state.ownedPreviews.add(url);
@@ -190,10 +172,7 @@ export interface ChatRunSnapshot {
   readonly sessionId: string | undefined;
   /** Monotonic. Anything that must happen once per finished turn keys on it. */
   readonly completedTurns: number;
-  /** A turn the server refused before persisting anything (409/415/... --
-   *  any status but 408, which a network hiccup can also produce and which
-   *  therefore does NOT mean "nothing was saved"). A composer watches this to
-   *  put the draft back in the box; `takeRefusedDraft` is how it consumes it. */
+  /** A turn refused before anything was saved; a composer restores it via `takeRefusedDraft`. */
   readonly refusedDraft: RefusedDraft | null;
 }
 
@@ -201,11 +180,9 @@ export interface ChatRunSnapshot {
 export interface RefusedDraft {
   text: string;
   attachments: PreparedImage[];
-  /** The server's `error` field -- the state sentence, e.g. "Picture support
-   *  is not ready yet." A composer appends its own client-side clause. */
+  /** The server's `error` sentence; a composer appends its own clause. */
   message: string;
-  /** The server's `code`, e.g. "vision_not_ready" -- absent for a plain
-   *  ApiError that carried no structured body. */
+  /** The server's `code`, e.g. "vision_not_ready"; absent when the error had no structured body. */
   code?: string;
 }
 
@@ -243,9 +220,7 @@ interface InternalState {
   /** How far this client has read. What a reattach resumes from. */
   lastSeq: number;
   bridge: ChatRunBridge | null;
-  /** See `RefusedDraft` -- set by `runTurn`'s catch, consumed and cleared by
-   *  `takeRefusedDraft`. Never both this and a bubble on screen for the same
-   *  turn: the refusal path removes the bubbles it just added. */
+  /** Never set while the same turn's bubbles are on screen: the refusal path removes them. */
   refusedDraft: RefusedDraft | null;
   snapshot: ChatRunSnapshot;
   subs: Set<Subscriber>;
@@ -386,18 +361,13 @@ export interface SendTurn {
   /** Composer preview object URLs; the store revokes them, since the bubble outlives the tray. */
   previewUrls?: string[];
   /**
-   * The composer's own prepared images, kept verbatim. When present this is
-   * the source of truth -- `images` and `previewUrls` are DERIVED from it and
-   * any values passed alongside it are ignored -- because a refused turn has
-   * to hand the composer back something it can re-render as a tray again
-   * (width/height/byteSize), not just the wire pair and a bare preview URL.
+   * The composer's prepared images. When present, `images` and `previewUrls` are derived from it
+   * and ignored if passed: a refused turn must hand back something the tray can re-render.
    */
   attachments?: PreparedImage[];
 }
 
-/** Take the pending refused-turn draft, if any, and clear it. A composer
- *  calls this from an effect on `run.refusedDraft` so StrictMode's double
- *  effect (or two mounted composers) cannot both restore the same draft. */
+/** Takes and clears the refused draft, so a double effect or a second composer can't restore it twice. */
 export function takeRefusedDraft(): RefusedDraft | null {
   const draft = state.refusedDraft;
   if (draft) {
@@ -654,7 +624,6 @@ async function consume(
 
 async function runTurn(turn: SendTurn): Promise<void> {
   const text = turn.text.trim();
-  // `attachments`, when given, is the source of truth -- see SendTurn's doc.
   const attachments = turn.attachments ?? [];
   const images: ImageAttachment[] = turn.attachments
     ? attachments.map((a) => ({ data: a.data, mime_type: a.mime_type }))
@@ -699,8 +668,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
     agentMsgId: agentMsg.id,
   };
 
-  // Set only on a refusal (see below), so `finally` can skip the completed-
-  // turn bookkeeping for a turn that never actually ran.
+  // Lets `finally` skip completed-turn bookkeeping for a refused turn, which never ran.
   let refused = false;
 
   try {
@@ -720,26 +688,18 @@ async function runTurn(turn: SendTurn): Promise<void> {
     );
   } catch (e) {
     if (stale()) return;
-    // A status the server actually returned before the first frame --
-    // 400/409/413/415/503 and the rest, but never 408, which a client-side
-    // timeout also produces and which therefore does NOT mean the server
-    // refused the turn (it may still be running it). Every real refusal
-    // happens before persist_user_message, so nothing was saved: the turn
-    // goes back to the composer as a draft rather than sitting on screen as
-    // an error bubble nobody can act on.
+    // Any status but 408, which a client timeout also yields while the run may live on. Refusals
+    // precede persist_user_message, so nothing was saved: the turn goes back to the composer as a draft.
     if (e instanceof ApiError && e.status !== 408) {
       refused = true;
       mutate((prev) =>
         prev.filter((m) => m.id !== userMsg.id && m.id !== agentMsg.id),
       );
-      // Handed back, not revoked -- the composer's tray needs these previews
-      // to render again.
+      // Handed back, not revoked: the composer's tray renders them again.
       for (const url of previewUrls) state.ownedPreviews.delete(url);
       state.refusedDraft = { text, attachments, message: e.message, code: e.code };
     } else {
-      // Loud on the console as well as in the bubble: with no surface
-      // mounted the bubble is the only record, and it is not read until
-      // someone comes back.
+      // Also logged: with no surface mounted, the bubble isn't read until someone comes back.
       console.warn("Chat turn failed:", e);
       patchLastAgent((last) => ({
         ...last,

@@ -51,13 +51,7 @@ fn parse_dt(s: &str) -> chrono::DateTime<chrono::Utc> {
         .unwrap_or_else(|_| chrono::Utc::now())
 }
 
-/// Same parse, but an unreadable stamp reads as absent rather than as now.
-///
-/// The extraction cursor's stamp orders the backlog, and [`parse_dt`]'s
-/// fallback would silently move a conversation with a malformed stamp to the
-/// *back* of the queue -- i.e. a row the engine cannot read the time of would
-/// be the last one it ever got to. `None` sorts to the front instead, which is
-/// where a conversation of unknown status belongs.
+/// Like [`parse_dt`], but a bad stamp is `None`: "now" would push it to the back of the backlog.
 fn parse_dt_opt(s: Option<String>) -> Option<chrono::DateTime<chrono::Utc>> {
     let s = s?;
     chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
@@ -591,10 +585,7 @@ impl SessionStorage for SqliteSessionStorage {
             .join(" ");
         let unattributed = IdentificationSource::ALL_RANKED.len();
 
-        // The strength write's statement, plus the one clause that makes it a
-        // claim: the session is unattributed, or already this member's. Inside
-        // the UPDATE, not read first, for the reason the trait gives -- a
-        // read-then-write lets a second device slip in between.
+        // In the UPDATE, not read first: a read-then-write would let a second device slip in.
         let sql = format!(
             "UPDATE sessions SET \
                profile_id                = ?, \
@@ -854,10 +845,7 @@ impl SessionStorage for SqliteSessionStorage {
         &self,
         session_id: &str,
     ) -> Result<ExtractionCursor, SessionStorageError> {
-        // Deliberately not guarded on session existence, like `count_messages`:
-        // a session that is not there has not been examined, and that is the
-        // answer the walk wants rather than an error it would have to decide
-        // what to do with.
+        // No existence check, like `count_messages`: a missing session is simply unexamined.
         let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
             "SELECT extracted_through_id, extracted_at, extraction_attempts \
              FROM sessions WHERE id = ?",
@@ -877,32 +865,21 @@ impl SessionStorage for SqliteSessionStorage {
         })
     }
 
-    /// Move (or clear) the extraction watermark.
-    ///
-    /// Same `updated_at` reasoning as [`set_derived_title`] and
-    /// [`set_generated_title`], and it matters more here: this writer runs on
-    /// EVERY window of every conversation in the backlog. If it stamped
-    /// `updated_at`, the pass's own activity watcher would read its own
-    /// bookkeeping as somebody coming back, cancel the pass, and push the idle
-    /// clock forward -- so the engine would cancel itself mid-run, forever, and
-    /// the idle gate that admitted it would never open again.
+    /// Must not stamp `updated_at`: the pass's watcher would take that as activity and cancel it.
     async fn set_extraction_cursor(
         &self,
         session_id: &str,
         through_message_id: Option<&str>,
     ) -> Result<(), SessionStorageError> {
         match through_message_id {
-            // A watermark that moved is a watermark nothing has failed against
-            // yet, so the attempt count goes with it.
+            // A moved watermark has no failures against it yet, so attempts reset.
             Some(id) => sqlx::query(
                 "UPDATE sessions SET extracted_through_id = ?, \
                      extracted_at = datetime('now'), extraction_attempts = 0 WHERE id = ?",
             )
             .bind(id)
             .bind(session_id),
-            // Back to unstarted, stamp included: a conversation that has to be
-            // re-walked from message one has not been examined, and keeping the
-            // stamp would sort it to the back of a backlog it has not started.
+            // Clear the stamp too, or a re-walk would sort to the back of the backlog.
             None => sqlx::query(
                 "UPDATE sessions SET extracted_through_id = NULL, \
                  extracted_at = NULL, extraction_attempts = 0 WHERE id = ?",
@@ -916,9 +893,7 @@ impl SessionStorage for SqliteSessionStorage {
     }
 
     async fn note_extraction_attempt(&self, session_id: &str) -> Result<u32, SessionStorageError> {
-        // Increment and read back in one statement. Two statements would race
-        // nothing today -- one lane slot, one writer -- but the RETURNING form
-        // is the same cost and does not depend on that staying true.
+        // RETURNING keeps increment-and-read atomic without relying on there being one writer.
         let attempts: Option<i64> = sqlx::query_scalar(
             "UPDATE sessions SET extraction_attempts = extraction_attempts + 1 \
              WHERE id = ? RETURNING extraction_attempts",
@@ -1791,13 +1766,7 @@ mod tests {
         );
     }
 
-    /// The extraction cursor round-trips, and clearing it really does mean
-    /// unstarted rather than "examined, found nothing".
-    ///
-    /// The two states are told apart by the STAMP, not by the id: the backlog
-    /// is ordered `extracted_at IS NULL` first, so a cleared cursor that kept
-    /// its stamp would sort a conversation that has to be re-walked from
-    /// message one to the back of a queue it has not started.
+    /// Checks the stamp, not the id: the backlog orders `extracted_at IS NULL` first.
     #[tokio::test]
     async fn the_extraction_cursor_round_trips_and_clears_to_unstarted() {
         let (s, _tmp) = make_storage().await;
@@ -1824,22 +1793,13 @@ mod tests {
             "clearing the cursor must clear the stamp with it"
         );
 
-        // A session that does not exist has not been examined. That is a real
-        // answer, not a missing one, and the walk depends on getting it rather
-        // than an error it would have to decide what to do with.
         assert_eq!(
             s.extraction_cursor("never-existed").await.unwrap(),
             ExtractionCursor::unstarted()
         );
     }
 
-    /// Attempts count against the watermark, and moving the watermark clears
-    /// them.
-    ///
-    /// The give-up rung depends on both halves. Without the increment a model
-    /// that never emits parseable JSON re-reads one window forever; without the
-    /// reset, three failures anywhere in a conversation's past would
-    /// permanently disqualify it.
+    /// The give-up rung needs both: no increment loops forever, no reset disqualifies for good.
     #[tokio::test]
     async fn extraction_attempts_count_against_the_watermark_and_reset_when_it_moves() {
         let (s, _tmp) = make_storage().await;
@@ -1849,9 +1809,7 @@ mod tests {
         assert_eq!(s.note_extraction_attempt("sess-1").await.unwrap(), 2);
         assert_eq!(s.extraction_cursor("sess-1").await.unwrap().attempts, 2);
 
-        // An attempt must NOT move the watermark: the window was read, not
-        // examined, and advancing past it would lose a real conversation to a
-        // parser failure.
+        // An attempt must not move the watermark: a parse failure would skip a real chat.
         assert_eq!(
             s.extraction_cursor("sess-1")
                 .await
@@ -1865,14 +1823,11 @@ mod tests {
             .unwrap();
         assert_eq!(s.extraction_cursor("sess-1").await.unwrap().attempts, 0);
 
-        // A missing session reports zero rather than erroring, so the give-up
-        // rung reads "no failures here" for a conversation that has been
-        // deleted underneath the walk.
+        // A conversation deleted under the walk reads as no failures, not an error.
         assert_eq!(s.note_extraction_attempt("gone").await.unwrap(), 0);
     }
 
-    /// Writing the extraction cursor must not bump `sessions.updated_at`: the idle gate reads it,
-    /// so the pass would see its own bookkeeping as activity and cancel itself.
+    /// The idle gate reads `updated_at`, so a bump would make the pass cancel itself.
     #[tokio::test]
     async fn extraction_cursor_writes_are_not_mistaken_for_user_activity() {
         let (s, _tmp) = make_storage().await;
@@ -1905,9 +1860,7 @@ mod tests {
             "clearing the cursor must not read as user activity either"
         );
 
-        // Vacuity control: this storage really does bump `updated_at` when
-        // something real happens, so the three assertions above are decisions
-        // and not a column nobody writes.
+        // Vacuity control: a real message does bump `updated_at`.
         s.add_message(
             "sess-1".to_string(),
             SessionMessage::new(
@@ -2886,13 +2839,7 @@ mod tests {
         }
     }
 
-    /// An implicit device claim never moves a session to a different member.
-    ///
-    /// THE DEFECT: `resolve_turn_scope` persisted the paired-device rung with
-    /// the strength-only write, and resolves scope for read routes too. So
-    /// Liz's phone opening the proposals for Jerry's session -- bound to him
-    /// by face, or by his own "this is Jerry" -- took it, because
-    /// `PairedDevice` outranks both. This is the one write that must not.
+    /// `PairedDevice` outranks `Face` and `Explicit`, so strength alone would let it take over.
     #[tokio::test]
     async fn a_device_claim_never_takes_a_session_bound_to_another_member() {
         for held in [IdentificationSource::Face, IdentificationSource::Explicit] {
@@ -2920,9 +2867,7 @@ mod tests {
         }
     }
 
-    /// The control: a device claim binds a session nobody holds. Without this,
-    /// a claim that refused everything would pass the test above -- and would
-    /// quietly stop the batch extractor attributing any paired-device chat.
+    /// Control: a claim that refused everything would pass the test above.
     #[tokio::test]
     async fn a_device_claim_binds_an_unattributed_session() {
         let (s, _tmp) = make_storage().await;
@@ -2942,8 +2887,6 @@ mod tests {
         );
     }
 
-    /// And it still strengthens the SAME member's binding: a face match
-    /// upgraded to the device proof, which is the case the claim exists for.
     #[tokio::test]
     async fn a_device_claim_strengthens_the_same_members_binding() {
         let (s, _tmp) = make_storage().await;

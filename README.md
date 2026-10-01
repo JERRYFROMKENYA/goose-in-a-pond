@@ -92,6 +92,7 @@ bash scripts/giap.sh install     # first-time install on this host (-y to skip p
 bash scripts/giap.sh build       # web UI + pond-server, correct features for this host
 bash scripts/giap.sh doctor      # health report; exits 1 on any FAIL
 bash scripts/giap.sh status      # detection banner only
+bash scripts/giap.sh node        # find, or download and verify, the Node this repo needs
 bash scripts/giap.sh --dry-run … # print every command instead of running it
 ```
 
@@ -106,7 +107,7 @@ service units competing for one port, and a stray `target/debug` binary that
 
 - **Rust** stable (install via [rustup](https://rustup.rs)) — `giap.sh install` will fetch it if missing
 - **Git** with submodule support
-- **Node ≥ 20** to build the web UI (older Node can still run the server; the UI must then be built elsewhere and copied in)
+- **Node** `^22.12 || ^24 || >=26` for the desktop app and the tests (`.nvmrc` says 22); **≥ 20.19** is enough to build the web UI, so an older Node can still run the server. Not sure what you have? `bash scripts/giap.sh node` checks, uses one you already have (nvm, fnm, volta, asdf), or downloads one after asking. See [Node](docs/developer/installation.md#node)
 - Voice models are downloaded for you by `pond-server setup`
 
 ### Building by hand

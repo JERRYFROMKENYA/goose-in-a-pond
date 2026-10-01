@@ -39,11 +39,7 @@ export interface DeviceData {
   value?: number;
   target?: number;
   room: string;
-  /**
-   * What the backend says this device can do, verbatim from `GET /api/v1/devices`.
-   * A contact sensor's list is empty, and that is the only thing that stops Home
-   * offering it a power switch it cannot perform.
-   */
+  /** Verbatim from `GET /api/v1/devices`; an empty list is what keeps a switch off a contact sensor. */
   capabilities?: string[];
 }
 
@@ -84,26 +80,22 @@ export interface NowPlayingData {
   error?: string;
   /** Human-readable explanation for `error`. */
   message?: string;
-  /**
-   * Position and length in milliseconds, exactly as Spotify sent them.
-   *
-   * `elapsed` is the fraction derived from the same two numbers and is what the
-   * rail binds to; these are what mm:ss labels need, and they are null rather
-   * than 0 whenever nobody reported them — a zero here would be read as the
-   * start of a track.
-   */
+  /** Position and length in ms from Spotify; null when unreported, since 0 would read as a track's start. */
   progressMs: number | null;
   durationMs: number | null;
+  /** The item's page on Spotify, linked from the card as Spotify's design guidelines ask. */
+  link?: string | null;
+  /** The household's chosen service; absent is Spotify, which is all these controls drive. */
+  service?: "apple" | "spotify";
+  /** The chosen player: the player page, or the service's own app. */
+  player?: "page" | "app";
+  /** What Spotify allows right now; absent means everything. */
+  can?: { pause: boolean; resume: boolean; next: boolean; previous: boolean };
 }
 
 /**
- * What the pond last said about weather, which is not the same question as
- * whether weather is switched on.
- *
- * "off" is a household decision; "unreachable" is a 502 from the provider, an
- * egress refusal, a timeout or a dead socket; "unknown" is the state before
- * anything has been asked. Collapsing the last two into "off" is how a panel
- * ends up telling a household to set a location that is already set.
+ * "off" is a household decision; "unreachable" a provider 502, egress refusal or timeout; "unknown"
+ * not yet asked. Treating the last two as "off" asks for a location that is already set.
  */
 export type WeatherStatus = "on" | "off" | "unreachable" | "unknown";
 
@@ -116,16 +108,7 @@ export interface HomeData {
   categories: CategoryData[];
   scenes: SceneData[];
   nowPlaying: NowPlayingData;
-  /**
-   * The pond answered with a location and weather turned on. False also covers
-   * "has not answered yet", which is why nothing keyed on it may render a
-   * temperature: the slice is zeroed in that state, not merely stale.
-   *
-   * It is a narrower question than it looks — read `weatherStatus` before
-   * writing copy about it. A card that says "set your location" off this
-   * boolean alone says it to a household whose location is set and whose
-   * provider answered 502.
-   */
+  /** Weather is on and answered; false includes "not answered yet". Write copy off `weatherStatus`. */
   weatherEnabled: boolean;
   /** Why `weatherEnabled` reads the way it does. */
   weatherStatus: WeatherStatus;
@@ -133,14 +116,7 @@ export interface HomeData {
   devicesAreReal: boolean;
 }
 
-/**
- * The slice that is rendered when there is no weather to render.
- *
- * Nothing may paint from this: it is zeroes, and a zero here is a temperature.
- * It exists so `WeatherData` stays a required field instead of becoming a null
- * that every caller has to re-check, and it is shared so the store and the
- * pre-load seed cannot drift into two different ideas of "no weather".
- */
+/** Placeholder so `weather` stays non-null. Never paint from it: a zero here is a temperature. */
 export const NO_WEATHER: WeatherData = {
   temp: 0,
   cond: "",
@@ -167,25 +143,8 @@ const SILENT_PLAYER: NowPlayingData = {
 };
 
 /**
- * What a household sees before their pond has answered.
- *
- * Empty, not plausible. The store used to seed the demo house below, so the
- * first screen of a fresh install listed six rooms and ten devices nobody
- * owned, and every consumer had to remember to check `devicesAreReal` to avoid
- * repeating them. One consumer forgot, which is the whole reason this exists:
- * an empty fixture is the only one that cannot be mistaken for a house.
- *
- * `user` survives because it claims nothing about this home — it is a name to
- * greet.
- *
- * `gooseSuggestions` used to survive beside it on the same argument, and it is
- * gone: four hardcoded "Goose, ..." strings with ZERO readers anywhere in the
- * app. It read exactly like the field a suggestion engine should populate, and
- * populating it would have rendered nowhere. The real thing is
- * `GET /api/v1/suggestions`, which derives its offers from what this pond can
- * actually do. One of the four was not even honest: "is the front door locked?"
- * implies a lock the pond can read, and device state is the one thing the
- * registry does not know.
+ * What a household sees before their pond has answered: empty, so nothing can pass for a real
+ * house. `user` stays because a name to greet claims nothing about the home.
  */
 export const EMPTY_HOME: HomeData = {
   user: "Jerry",

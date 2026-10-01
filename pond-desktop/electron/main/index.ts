@@ -37,8 +37,7 @@ let quitting = false;
 const repoRoot = resolve(app.getAppPath(), "..");
 
 function emit<E extends ShellEvent>(name: E, payload?: ShellEvents[E]): void {
-  if (!win || win.isDestroyed()) return;
-  win.webContents.send(`giap:${name}`, payload);
+  if (win && !win.isDestroyed()) win.webContents.send(`giap:${name}`, payload);
 }
 
 /** The port pond-server says it bound, and when; read from the server's data dir, not userData. */

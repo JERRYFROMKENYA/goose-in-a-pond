@@ -44,9 +44,7 @@ async fn make_app() -> Harness {
         onboarding_repo: Arc::new(pond_infra::onboarding::SqlxOnboardingRepository::new(
             pool.clone(),
         )),
-        // The real adapter: the whole point is that the route reaches
-        // `issue_pairing_code_for`, and a mock would answer whatever it was
-        // told to.
+        // Real adapter, not a mock: the route must reach `issue_pairing_code_for`.
         handshake: handshake.clone(),
         whisper_url: "http://127.0.0.1:9000".into(),
         transcribe_audio: None,
@@ -294,10 +292,7 @@ async fn session_token(h: &Harness) -> String {
 async fn companion_never_serves_dashboard_and_missing_peer_fails_closed() {
     let h = make_app().await;
 
-    // The assertion that actually says the dashboard is ABSENT from this
-    // router, rather than merely shadowed by the middleware: a caller holding a
-    // real session token still gets nothing, because `build_companion_router`
-    // registers no static fallback and no `/dev` pages at all.
+    // A real token still gets 404: the routes are absent, not merely shadowed by middleware.
     let token = session_token(&h).await;
     for path in DASHBOARD_PATHS {
         assert_eq!(
@@ -307,17 +302,8 @@ async fn companion_never_serves_dashboard_and_missing_peer_fails_closed() {
         );
     }
 
-    // Unauthenticated, the refusal comes earlier and reads 401. This asserted
-    // 404 until `431f3de9` narrowed non-API paths from `Exposure::Always` to
-    // `Exposure::HostOnly` -- anonymous static assets and dev pages became
-    // loopback-only, which is strictly better and is why they no longer reach
-    // the router to be missing from it. The companion has no peer address at
-    // all here, so it is not loopback and the token check answers first.
-    //
-    // 401 is not a weaker answer than 404 and it discloses nothing: EVERY
-    // non-API path on this listener answers the same way whether or not it
-    // exists, so the code cannot be used to probe for one. The pass above is
-    // what pins the absence; this one pins that nothing is served anonymously.
+    // Anonymous: non-API paths are `Exposure::HostOnly` and a missing peer isn't loopback, so
+    // the token check answers 401 first; every path gets it, so it can't probe for a route.
     for path in DASHBOARD_PATHS {
         assert_eq!(
             get(&h.companion, path, None).await,

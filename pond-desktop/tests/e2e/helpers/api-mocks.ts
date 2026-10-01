@@ -22,15 +22,7 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: { token: "e2e-test-token", session_id: "e2e-session" } }),
   );
 
-  // Direct tool invoke (Hub device control bypasses the LLM).
-  //
-  // The device-control tools answer for real, because the card under test reads
-  // rather than assumes: it writes with `set_device_state` and then ASKS with
-  // `get_device_state`, and displays the answer. A mock that returned a bare
-  // "ok" to the read would put every tile in its "Not reporting" branch, which
-  // is correct behaviour against a backend that says nothing and no test of a
-  // toggle at all. The switch position is held here so the re-read reflects the
-  // write, the same way a real device would.
+  // Direct tool invoke; holds switch state so the card's re-read reflects its write.
   const power = new Map<string, boolean>();
   await page.route("**/api/v1/tools/invoke", (route) => {
     const body = route.request().postDataJSON() as {
@@ -160,11 +152,7 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
   await page.route("**/api/v1/models/**", (route) =>
     route.fulfill({ json: { status: "ok" } }),
   );
-  // Picture support for the active chat model. Registered AFTER the models/**
-  // catch-all above on purpose: Playwright resolves the LAST-registered
-  // matching route first, so without this the catch-all's {status:"ok"} (no
-  // `state`) would win, and useVisionStatus's shape guard would settle every
-  // test to "unknown" rather than exercising a real state.
+  // Must follow the models/** catch-all: Playwright tries the last-registered matching route first.
   await page.route("**/api/v1/models/vision-status", (route) =>
     route.fulfill({
       json: { model: "", state: { kind: "unknown" }, size_bytes: null, message: null },
@@ -237,21 +225,13 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     route.fulfill({ json: [] }),
   );
 
-  // Home's left column, both halves. Neither was mocked before, so every E2E
-  // run exercised the column's ERROR path and called it the quiet state -- the
-  // two are pixel-identical by design, which is exactly why the gap survived.
-  //
-  // Proposals: empty, which is the honest default. The reviewer has never
-  // yielded one on real hardware, so a fixture with rows in it would assert a
-  // state no pond has reached.
+  // Home's left column (unmocked, its error path looks just like the quiet state). Proposals
+  // stay empty: none has been produced on real hardware.
   await page.route("**/api/v1/proposals*", (route) =>
     route.fulfill({ json: { profile_id: "p-jerry", proposals: [] } }),
   );
 
-  // Suggestions: two real ones, so the offers half is actually rendered rather
-  // than skipped past. Both are shapes the engine really emits, with a measured
-  // number in each reason -- a fixture whose `because` was a template would let
-  // a regression that dropped the number through.
+  // Two real engine shapes, each `because` with a measured number, so the offers half renders.
   await page.route("**/api/v1/suggestions*", (route) =>
     route.fulfill({
       json: {
@@ -279,16 +259,8 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
-  // The inference lane. Mocked for the same reason `now-playing` is: the
-  // Settings screen reads it on mount, and an unmocked route leaves the
-  // browser to reach 127.0.0.1:4000 -- a live pond-server on a developer's
-  // machine, nothing at all in CI -- and the failure lands on whichever
-  // unrelated test happens to assert a clean console.
-  //
-  // The fixture is the shape a REAL pond answers with, not a tidy one: two
-  // jobs with no loop in this process (no embedder), one that has never run,
-  // and one blocked on quiet. A fixture where all six were present and happy
-  // would let a regression that drops the `present` distinction through.
+  // The lane: Settings reads it on mount, and an unmocked route hits 127.0.0.1:4000. Shaped like
+  // a real pond (jobs absent, never run, blocked) so the `present` distinction stays tested.
   await page.route("**/api/v1/lane", (route) =>
     route.fulfill({
       json: {
@@ -346,14 +318,7 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
-  // Warmup.
-  //
-  // Opening Chat asks the pond to precompile the prompt prefix. It was the only
-  // endpoint the shell reaches that this file did not answer, so the request
-  // went to the real 127.0.0.1:4000 and was refused -- two console errors that
-  // tripped the strict console gate in hub-visual-verify and looked, for a
-  // while, like a Vite HMR port conflict. It is neither: it is a route that was
-  // added to the client and never to the mock.
+  // Warmup: opening Chat requests it, and an unmocked call trips the strict console gate.
   await page.route("**/api/v1/warmup", (route) =>
     route.fulfill({ json: { warmed: false, reason: "no model in the test environment" } }),
   );

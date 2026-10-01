@@ -1,11 +1,4 @@
-// The store behind Home's arrangement, on both of its axes.
-//
-// Rewritten from the flat-order version rather than dropped: every behaviour
-// the old names encoded is still here, re-aimed at `pages`, plus one case per
-// failure mode the second axis introduced. The single most important addition
-// is the v1 migration — without it a silent reset of every household's Home
-// ships undetected, because a v1 payload is a perfectly valid object that a v2
-// reader would simply find no `pages` in.
+// Home's layout store. The v1 cases matter most: a missed migration resets every Home silently.
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -54,12 +47,6 @@ describe("the default", () => {
 });
 
 describe("a layout written by an older release", () => {
-  /**
-   * The migration, and the reason it is a migration rather than a reconcile: a
-   * v1 `{order, hidden}` is a valid object, so a v2 reader looking for `pages`
-   * would fall through to the default and reset an arrangement the household
-   * made, with nothing failing anywhere to say so.
-   */
   it("keeps the arrangement a v1 release wrote", () => {
     store({ order: ["devices", "weather"], hidden: ["nowPlaying"] });
     const l = getDashboardLayout();
@@ -73,11 +60,6 @@ describe("a layout written by an older release", () => {
     expect(l).not.toEqual(DEFAULT_LAYOUT);
   });
 
-  /**
-   * A stored layout outlives the release that wrote it. Five cards left the
-   * catalogue in this change, and every one of them has to fall out of a stored
-   * layout on read rather than needing a migration of its own.
-   */
   it("drops cards this release no longer has", () => {
     store({
       version: 2,
@@ -128,7 +110,6 @@ describe("a layout written by an older release", () => {
     expect(ids()).toEqual([["devices", "weather"]]);
   });
 
-  /** The per-list dedupe the flat model used would not have caught this one. */
   it("does not repeat a card listed on two different pages", () => {
     store({
       version: 2,
@@ -232,16 +213,7 @@ describe("arranging", () => {
     expect(ids()).toEqual([["weather", "devices", "nowPlaying"]]);
   });
 
-  /**
-   * The page a card is SENT to and the page it LANDS on are two different
-   * facts, and only the store holds the second one.
-   *
-   * Emptying the source page drops it, which shifts every page after it down
-   * one — so a card sent to page 2 from a page 1 it was alone on ends up on
-   * page 1. The caller follows the card with the return value; following its own
-   * argument scrolls the track to a page the card is not on, which is the bug
-   * this pair exists for.
-   */
+  // Emptying the source page shifts later pages down, so a card sent to page 2 can land on page 1.
   it("reports the page a card landed on, not the page it was sent to", () => {
     store({
       version: 2,
@@ -272,8 +244,7 @@ describe("arranging", () => {
   it("makes one new page beyond the last, up to the limit", () => {
     moveCardToPage("weather", 2);
     expect(ids()).toEqual([["devices"], ["nowPlaying"], ["weather"]]);
-    // A fourth page is past MAX_PAGES, so the move is refused rather than
-    // silently dropping the card.
+    // A fourth page is past MAX_PAGES, so the move is refused.
     moveCardToPage("devices", 3);
     expect(ids()).toEqual([["devices"], ["nowPlaying"], ["weather"]]);
   });

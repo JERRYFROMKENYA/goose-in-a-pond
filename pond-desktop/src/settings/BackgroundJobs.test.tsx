@@ -38,8 +38,6 @@ afterEach(cleanup);
 beforeEach(() => vi.clearAllMocks());
 
 describe("what a job is waiting for", () => {
-  /// The sentence is the whole screen. Each reason names something the
-  /// household can act on rather than repeating the gate's own vocabulary.
   it("says each wait in words somebody can act on", () => {
     expect(describeWait(job({ blocked_by: "still_active" })))
       .toBe("Waiting for the house to be quiet");
@@ -52,9 +50,6 @@ describe("what a job is waiting for", () => {
     expect(describeWait(job({ blocked_by: null }))).toBe("Ready");
   });
 
-  /// `present` and `registered` outrank the reason, because a job with no loop
-  /// in this process has no reason -- reporting "Ready" for one would be the
-  /// exact confusion this screen was built to end.
   it("puts having no loop here above any other explanation", () => {
     expect(describeWait(job({ present: false, blocked_by: "still_active" })))
       .toBe("Not running on this pond");
@@ -62,16 +57,13 @@ describe("what a job is waiting for", () => {
     expect(describeWait(job({ would_run_next: true }))).toBe("Next to run");
   });
 
-  /// A gate added on the server must not render as "Ready" on an older app.
-  /// That direction of failure is the one that misleads the person debugging.
+  // A newer server's gate must not read as "Ready" on an older app.
   it("passes an unfamiliar reason through rather than calling it ready", () => {
     const said = describeWait(job({ blocked_by: "some_new_gate" }));
     expect(said).toContain("some_new_gate");
     expect(said).not.toBe("Ready");
   });
 
-  /// "Never" is the most important value on the screen, not a missing one: a
-  /// job that has not run on a pond that has been up for hours IS the symptom.
   it("says plainly when a job has never run", () => {
     expect(describeLastRun(null)).toBe("Hasn't run yet");
     expect(describeLastRun(30)).toBe("Ran just now");
@@ -81,9 +73,6 @@ describe("what a job is waiting for", () => {
 });
 
 describe("the watcher", () => {
-  /// `slot_busy` could only ever say something was running. The point of the
-  /// watcher is which one, because "the pond is busy" and "the memory engine
-  /// is reading your conversations" tell a household different things.
   it("names the job holding the slot, not just that one is", async () => {
     vi.mocked(api.laneStatus).mockResolvedValue(
       lane([job()], {
@@ -106,10 +95,6 @@ describe("the watcher", () => {
     await screen.findByText(/Nothing is running/);
   });
 
-  /// A pass four minutes in and one that started two seconds ago read
-  /// identically without this, and on a small board that difference is whether
-  /// something is stuck. Under a few seconds it says nothing rather than
-  /// "for 0 seconds" on a line that reprints every five.
   it("says how long, once that is worth saying", () => {
     expect(describeElapsed(null)).toBe("");
     expect(describeElapsed(0)).toBe("");
@@ -119,9 +104,6 @@ describe("the watcher", () => {
     expect(describeElapsed(60)).toBe(", for 1 minute");
   });
 
-  /// A tick that fails must not blank the panel or raise an error over the last
-  /// good answer. A watcher that flickers to "could not read" whenever one
-  /// request misses is worse than one showing a five-second-old truth.
   it("keeps the last good answer when a poll misses", async () => {
     vi.useFakeTimers();
     try {
@@ -143,9 +125,7 @@ describe("the watcher", () => {
     }
   });
 
-  /// `request<T>` can hand back `undefined` or a parsed `index.html` while the
-  /// server is starting. A one-shot call meets that rarely; a polled one meets
-  /// it every time the pond restarts under a panel left open.
+  // `request<T>` can return undefined or a parsed index.html while the server starts.
   it("ignores a tick that is not a lane answer", async () => {
     vi.useFakeTimers();
     try {
@@ -166,8 +146,6 @@ describe("the watcher", () => {
     }
   });
 
-  /// The panel is left open on a wall for days. An interval that survived the
-  /// unmount would keep asking a question nobody is looking at the answer to.
   it("stops asking once it is off the screen", async () => {
     vi.useFakeTimers();
     try {
@@ -188,10 +166,6 @@ describe("the watcher", () => {
 });
 
 describe("the history beside the instant", () => {
-  /// The blind spot this closes. A job that is eligible and losing every
-  /// tie-break has `blocked_by: null` — identical on screen to one about to
-  /// run — and on a real pond that is the difference between a defect and a
-  /// setting.
   it("says a job has been waiting behind another, which the instant cannot", () => {
     const losing = job({
       blocked_by: null,
@@ -229,9 +203,7 @@ describe("the list", () => {
     expect(screen.getByText("Look for something to suggest")).toBeTruthy();
   });
 
-  /// Disabled rather than hidden. A household troubleshooting a pond with no
-  /// embedder needs to see that the job exists and is not running here; a
-  /// missing row says neither.
+  // Disabled, not hidden: the row must still show the job exists.
   it("offers no button for a job with nothing to wake", async () => {
     vi.mocked(api.laneStatus).mockResolvedValue(
       lane([job({ job: "memory_extraction", present: false })]),
@@ -258,8 +230,6 @@ describe("the list", () => {
     await screen.findByText("Asked — it runs at its next turn");
   });
 
-  /// The button wakes; it does not run. Saying "Done" would be a claim about
-  /// work that has not happened yet, and on a busy slot may not for a while.
   it("promises a turn, not a result", async () => {
     vi.mocked(api.laneStatus).mockResolvedValue(lane([job()]));
     vi.mocked(api.runLaneJob).mockResolvedValue({
@@ -275,8 +245,7 @@ describe("the list", () => {
     expect(said.textContent).not.toMatch(/done|finished|complete/i);
   });
 
-  /// `woken: false` is not an error and must not read as one -- a pond with no
-  /// embedder genuinely has no extraction loop.
+  // `woken: false` is not an error: a pond with no embedder has no extraction loop.
   it("says so when there was nothing to wake", async () => {
     vi.mocked(api.laneStatus).mockResolvedValue(lane([job()]));
     vi.mocked(api.runLaneJob).mockResolvedValue({
@@ -291,8 +260,6 @@ describe("the list", () => {
     await screen.findByText("Nothing here to run");
   });
 
-  /// A process with no lane and a lane with no jobs are different facts, and an
-  /// empty panel would say the second while meaning the first.
   it("distinguishes a pond with no lane from a lane with nothing to do", async () => {
     vi.mocked(api.laneStatus).mockResolvedValue({ lane: false, jobs: [] });
     render(<BackgroundJobs />);
@@ -300,14 +267,11 @@ describe("the list", () => {
     await screen.findByText(/not running the background jobs/i);
   });
 
-  /// The list IS the screen: a failed read must not render as "no background
-  /// jobs", which is the one thing it must never say by accident.
   it("says the read failed rather than showing an empty list", async () => {
     vi.mocked(api.laneStatus).mockRejectedValue(new Error("offline"));
     render(<BackgroundJobs />);
 
-    // `status` rather than `alert`: this panel shares a page with the settings
-    // error banner, and only one thing on a screen gets to interrupt.
+    // `status`, not `alert`: the settings error banner is this page's one alert.
     const said = await screen.findByRole("status");
     expect(said.textContent).toContain("offline");
     expect(screen.queryByRole("alert")).toBeNull();

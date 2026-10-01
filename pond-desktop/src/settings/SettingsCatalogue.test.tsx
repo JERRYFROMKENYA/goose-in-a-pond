@@ -376,8 +376,7 @@ describe("SettingsCatalogue", () => {
     expect(values).not.toContain("base");
   });
 
-  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-  // so the switch these two tests drove is commented out; restore them with it.
+  // Commented out with the guess-ahead switch (speculative decoding left the engine); restore with it.
   // it("offers the guess-ahead switch under Models, drawn from the server value", async () => {
   //   // Passed explicitly both ways -- the catalogue reads an ABSENT key as
   //   // OFF (`Boolean(value)`), so a test relying on the default-true rather
@@ -494,9 +493,7 @@ describe("summariseRetitle", () => {
     expect(summariseRetitle(retitleReply())).toBe("Renaming — names appear as it goes");
   });
 
-  /// The distinction the copy exists for: a pond whose titling loop never
-  /// spawned has nothing to wake, and a person told "it did not work" would
-  /// press the button again expecting a different answer.
+  // "Failed" would invite a retry that can't help: there's nothing here to wake.
   it("separates nothing-here-to-run from a failure", () => {
     expect(summariseRetitle(retitleReply({
       started: false,
@@ -506,10 +503,7 @@ describe("summariseRetitle", () => {
       .toBe("Nothing here to run");
   });
 
-  /// The button used to hold the request open through every model call so it
-  /// could report a count. On the Orin that was minutes against a 30 s client
-  /// timeout, so the count it promised arrived as an error. Claiming a result
-  /// this reply cannot contain is the specific regression to guard.
+  // The reply returns before any model call (minutes on the Orin, vs a 30 s timeout), so has no count.
   it("never claims a count it could not have", () => {
     for (const reply of [
       retitleReply(),
@@ -540,8 +534,7 @@ describe("the rename-now button", () => {
     expect(mockApi.updateSettings).not.toHaveBeenCalled();
   });
 
-  /// The request is short now, but it is still a request, and a double press
-  /// would ask the lane twice for a pass it is already going to run.
+  // A double press would ask the lane twice for one pass.
   it("says it is asking and cannot be pressed again mid-request", async () => {
     let release!: (v: unknown) => void;
     mockApi.retitleSessions.mockReturnValue(new Promise((r) => { release = r; }));
@@ -581,9 +574,7 @@ describe("the rename-now button", () => {
   });
 });
 
-// The server's `suggestions_muted` is a `Vec<String>`. Sent as the raw string it
-// was refused with a 422, and that refusal took every other edit in the same
-// Save with it -- so touching this one box made Settings unsavable.
+// `suggestions_muted` is a `Vec<String>`: a raw string gets a 422 that fails the whole Save.
 describe("parseText: list-valued text boxes", () => {
   it("sends the hidden-suggestions box as a list, not the string it was typed as", () => {
     expect(parseText("suggestions_muted", "weather_today, devices_online")).toEqual([
@@ -593,15 +584,13 @@ describe("parseText: list-valued text boxes", () => {
   });
 
   it("reads an emptied box as the empty list, which is what 'clear to unmute' means", () => {
-    // `""` against a baseline of `[]` is what made the page dirty with a change
-    // it could never save.
+    // `""` against a `[]` baseline would dirty the page with an unsavable change.
     expect(parseText("suggestions_muted", "")).toEqual([]);
     expect(parseText("suggestions_muted", " , ")).toEqual([]);
   });
 
   it("leaves an ordinary text field a string -- the control for the two above", () => {
-    // Without this, a parseText that split EVERY field would pass both tests
-    // and send the assistant's name as an array.
+    // Catches a parseText that splits every field.
     expect(parseText("assistant_name", "Goose, the pond")).toBe("Goose, the pond");
   });
 });

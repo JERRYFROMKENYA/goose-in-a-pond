@@ -1,26 +1,8 @@
-//! Which vision encoder a chat model needs, how to tell a good copy from a bad one, and what
-//! to tell the household while it is not ready.
+//! Which `mmproj` encoder a chat model needs, how to validate it, and what the household is told.
 //!
-//! A Gemma 4 model reads pictures through a separate file, an `mmproj` encoder of about a
-//! gigabyte. Everything about choosing it, checking it and describing its state is decided
-//! here, so the adapters that fetch and stamp it only apply these decisions, and CI's fast
-//! pass runs every one of them.
-//!
-//! # Why the table is keyed by (family, qat-ness), unlike the drafter's
-//!
-//! [`super::drafter::drafter_for`] maps qat and non-qat spellings of one family to ONE drafter,
-//! because a drafter is tied to the architecture. Encoders are not: the qat releases ship their
-//! own vision-to-text projector. The two files have IDENTICAL byte sizes and differ in
-//! `mm.input_projection` (57% of its bytes, values 10-20% apart), so nothing short of the
-//! sha256 tells them apart, and the wrong one loads without any error and answers about photos
-//! through weights the model was not trained with. Each row therefore pins its own repo,
-//! revision and LFS oid.
-//!
-//! # What is I/O and what is not
-//!
-//! Reading a header is cheap and bounded (about 85 KB), so [`validate_encoder_header`] lives
-//! here. Hashing a gigabyte is not, so the adapter hashes and writes the `.verified` sidecar;
-//! this module only builds, parses and judges it.
+//! Keyed by family AND qat-ness: a qat release's projector has the non-qat one's exact size and
+//! loads without error, so only each row's pinned sha256 tells the wrong one apart. Hashing is
+//! the adapter's job; this module reads headers (~85 KB) and judges the `.verified` sidecar.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,13 +14,11 @@ use super::gguf::{parse_gguf_layout_file, GgufInfo};
 /// One pinned encoder file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderSpec {
-    /// Directory under `models/mmproj/`, lowercase (the Orin's ext4 is case-sensitive). Also
-    /// the key for the adapter's status map, in-flight set and single-flight lock.
+    /// Directory under `models/mmproj/`, lowercase (the Orin's ext4 is case-sensitive).
     pub dir: &'static str,
     /// Hugging Face repository the file comes from.
     pub repo: &'static str,
-    /// The commit the file is fetched at. Pinned, so an upstream re-upload cannot swap the
-    /// bytes under a validated install.
+    /// Pinned commit, so an upstream re-upload can't swap bytes under a validated install.
     pub revision: &'static str,
     /// File name inside the repository, and on disk.
     pub filename: &'static str,
@@ -58,12 +38,6 @@ pub struct EncoderSpec {
 pub const GEMMA4_ARCH: &str = "gemma4";
 
 /// Every encoder GIAP provisions.
-///
-/// Read from the Hugging Face API on 2026-09-24: `revision` is the repository head, `sha256`
-/// and `size_bytes` are the tree listing's `lfs.oid` and `lfs.size` for `mmproj-BF16.gguf` at
-/// that revision. The two non-qat oids equal the sha256 of the complete files already on the
-/// development Mac. The 12b row's projector and projection width were read from a range-read
-/// of its header (`gemma4uv`, 3840), which the vendored mtmd knows.
 pub const ENCODER_SPECS: &[EncoderSpec] = &[
     EncoderSpec {
         dir: "gemma-4-e2b-it",
@@ -122,16 +96,8 @@ pub const ENCODER_SPECS: &[EncoderSpec] = &[
     },
 ];
 
-/// The encoder `chat_model` needs, if GIAP knows one.
-///
-/// Biased to `None`: a false positive tells a blind model it can see, and a missing row only
-/// costs a feature. Matched on substrings of the lowercased name, so the settings spelling
-/// (`gemma-4-E2B-it-qat-UD-Q4_K_XL`), the registry stem (`gemma-4-E2B-it-qat`) and the
-/// owner/quant form (`unsloth/gemma-4-E4B-it-GGUF:IQ4_XS`) all land on one row.
-///
-/// Refused outright: drafters (`mtp-*`, `*-assistant*`), which are Gemma-named but are not chat
-/// models; the `-mobile` releases; the 12B-A4B mixture of experts; and every family without a
-/// pinned row (E1B, 26B, 27B, 31B), whose encoders nobody has checked.
+/// The encoder `chat_model` needs, biased to `None`: a false positive tells a blind model it
+/// can see. Matched on lowercase substrings so every spelling of one model finds its row.
 pub fn encoder_for(chat_model: &str) -> Option<EncoderSpec> {
     let m = chat_model.to_ascii_lowercase();
     if !m.contains("gemma-4") && !m.contains("gemma4") {
@@ -161,12 +127,10 @@ pub fn encoder_for(chat_model: &str) -> Option<EncoderSpec> {
     encoder_by_dir(dir)
 }
 
-/// The row whose [`EncoderSpec::dir`] is `dir`.
 pub fn encoder_by_dir(dir: &str) -> Option<EncoderSpec> {
     ENCODER_SPECS.iter().find(|s| s.dir == dir).copied()
 }
 
-/// Where an encoder lives under a pond's data directory.
 pub fn encoder_path(data_dir: &Path, spec: &EncoderSpec) -> PathBuf {
     data_dir
         .join("models")
@@ -175,10 +139,7 @@ pub fn encoder_path(data_dir: &Path, spec: &EncoderSpec) -> PathBuf {
         .join(spec.filename)
 }
 
-/// Whether `spec` can project into a chat model with this architecture and width.
-///
-/// Both, because a width alone is not a pairing: DeepSeek-R1-Distill-Qwen-1.5B has
-/// `embedding_length` 1536, the same as the E2B encoder's projection.
+/// Whether `spec` pairs by arch AND width; DeepSeek-R1-Distill-Qwen-1.5B shares E2B's 1536.
 pub fn pairs_with(spec: &EncoderSpec, model_arch: &str, model_embedding_length: u32) -> bool {
     model_arch == GEMMA4_ARCH && model_embedding_length == spec.projection_dim
 }
@@ -193,10 +154,7 @@ pub fn pairs_with_gguf(spec: &EncoderSpec, info: &GgufInfo) -> bool {
 
 // ── Validation ──────────────────────────────────────────────────────────────
 
-/// Why a file at an encoder's path cannot be used as that encoder.
-///
-/// Every variant except [`Self::Missing`] means "something is at the path and it is wrong":
-/// the adapter quarantines it (renames, never deletes) before linking a fresh copy.
+/// Why an encoder file is unusable; all but [`Self::Missing`] are renamed aside, never deleted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EncoderInvalid {
     /// Nothing at the path (or a dangling link).
@@ -220,21 +178,14 @@ pub enum EncoderInvalid {
     /// The header describes more tensor data than the file holds: a download that stopped.
     #[error("encoder is truncated: {have} of {need} bytes present")]
     Truncated { need: u64, have: u64 },
-    /// The right shape but not the pinned bytes: a sidecar or hash disagrees with the pin, or
-    /// the tensor table does not account for the file.
+    /// Not the pinned bytes: hash or sidecar mismatch, or a tensor table that doesn't fit.
     #[error("encoder file is not the pinned file")]
     WrongFile,
 }
 
-/// Check the file at `path` against `spec` from its header and length alone.
-///
-/// Cheap and read-only: one `metadata` and a walk of the header and tensor table, about 85 KB
-/// for a Gemma 4 encoder. Returns the file's length on success. It does NOT prove the bytes are
-/// the pinned ones (qat and non-qat pass it alike); the `.verified` sidecar does that.
-///
-/// Order: the header before the length, so a download that stopped reports [`EncoderInvalid::
-/// Truncated`] with how much is present rather than a bare size mismatch. A file LONGER than
-/// the pin is refused first, since it cannot be a truncation of it.
+/// Check `path` against `spec` from header and length alone (~85 KB read); returns the length.
+/// Passes qat and non-qat alike: only the `.verified` sidecar proves the pinned bytes. The header
+/// goes before the exact-size check so a stopped download reports [`EncoderInvalid::Truncated`].
 pub fn validate_encoder_header(path: &Path, spec: &EncoderSpec) -> Result<u64, EncoderInvalid> {
     let meta = std::fs::metadata(path).map_err(|_| EncoderInvalid::Missing)?;
     if !meta.is_file() {
@@ -260,8 +211,7 @@ pub fn validate_encoder_header(path: &Path, spec: &EncoderSpec) -> Result<u64, E
         return Err(EncoderInvalid::WrongProjector);
     }
     let Some(need) = layout.data_end else {
-        // A right-looking header whose table cannot be summed: it is not the pinned file,
-        // whose table this parser reads in full.
+        // This parser sums the pinned file's whole table, so an unsummable one is another file.
         return Err(EncoderInvalid::WrongFile);
     };
     if need > len {
@@ -283,11 +233,7 @@ pub fn validate_encoder_header(path: &Path, spec: &EncoderSpec) -> Result<u64, E
 
 // ── Identity sidecar ────────────────────────────────────────────────────────
 
-/// `<file>.verified`: the record that a file's sha256 was computed once and matched.
-///
-/// It lets every later readiness check stay header-cheap. It is trusted only while the file's
-/// size and mtime are what they were when it was hashed, so a file replaced in place (same
-/// name, new bytes) is hashed again rather than inheriting the old verdict.
+/// `<file>.verified`: proof the sha256 matched once, trusted only while size and mtime hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncoderSidecar {
     pub sha256: String,
@@ -371,8 +317,7 @@ pub enum OnDisk {
     Verified { bytes: u64 },
 }
 
-/// Inspect `path` as `spec`: header, length and sidecar, nothing more. The pure read that
-/// readiness checks and model lists use; only the adapter's ensure path hashes or repairs.
+/// Inspect `path` as `spec` from header, length and sidecar; never hashes or repairs.
 pub fn encoder_on_disk(path: &Path, spec: &EncoderSpec) -> OnDisk {
     let bytes = match validate_encoder_header(path, spec) {
         Ok(b) => b,
@@ -403,8 +348,7 @@ pub enum FailReason {
     Other,
 }
 
-/// Where a model's picture support stands. Serialised as `{"kind": "...", ...}` for the API
-/// and the desktop's closed union.
+/// Where a model's picture support stands. The desktop mirrors it as a closed union.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EncoderState {
@@ -479,11 +423,8 @@ impl EncoderState {
 
 // ── Retry policy ────────────────────────────────────────────────────────────
 
-/// Waits between attempts, after the 1st, 2nd, 3rd and every later consecutive failure.
-///
-/// A fixed ladder rather than exponential growth: the file is a gigabyte on a household link,
-/// so hammering helps nobody, and two hours is short enough that a fix upstream or a restored
-/// connection is picked up the same evening.
+/// Waits after the 1st, 2nd, 3rd and every later consecutive failure. Capped at two hours so a
+/// restored connection is picked up the same evening.
 pub const RETRY_SCHEDULE: [Duration; 4] = [
     Duration::from_secs(60),
     Duration::from_secs(5 * 60),
@@ -497,10 +438,7 @@ pub fn retry_after(attempt: u32) -> Duration {
     RETRY_SCHEDULE[i.min(RETRY_SCHEDULE.len() - 1)]
 }
 
-/// Consecutive-failure bookkeeping for [`retry_after`].
-///
-/// Resets on success, and when the network mode changes: a household that just opened the
-/// network should not wait out a two-hour step earned while it was closed.
+/// Failure count for [`retry_after`]; resets on success and on a network-mode change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RetryBackoff {
     failures: u32,
@@ -541,11 +479,8 @@ impl RetryBackoff {
 
 // ── Failure classification ──────────────────────────────────────────────────
 
-/// The state a failed ensure lands in, from what the adapter knows about the failure.
-///
-/// A network-mode refusal is not a failure and wins over everything: it is the household's
-/// own choice, and the copy says how to change it. `wrong_file` wins over an I/O kind: bytes
-/// that arrived and were wrong say more than how the connection ended.
+/// The state a failed ensure lands in. Precedence: a network-mode refusal (the household's own
+/// choice), then `wrong_file` (it says more than how the connection ended), then the I/O kind.
 pub fn classify_failure(
     denied: Option<&crate::shared::services::egress::EgressDenied>,
     io_kind: Option<std::io::ErrorKind>,
@@ -585,11 +520,8 @@ pub fn classify_failure(
     }
 }
 
-/// [`classify_failure`] over an error chain, by type and never by message text.
-///
-/// Looks for, anywhere in the chain: an `EgressDenied` (Blocked); an [`EncoderInvalid`] (the
-/// file that arrived was wrong); a `std::io::Error` (its kind; HTTP clients carry the socket's
-/// error as a source). Anything else is [`FailReason::Other`], which claims nothing.
+/// [`classify_failure`] over an error chain, by type and never by message text. HTTP clients
+/// carry the socket's `std::io::Error` as a source, so the whole chain is searched.
 pub fn classify_error(err: &anyhow::Error, retry_at_unix_ms: u64) -> EncoderState {
     use crate::shared::services::egress::EgressDenied;
     let mut denied = None;
@@ -611,8 +543,7 @@ pub fn classify_error(err: &anyhow::Error, retry_at_unix_ms: u64) -> EncoderStat
 
 // ── Registry stamp plan ─────────────────────────────────────────────────────
 
-/// One registry row, as the stamp plan needs to see it. Paths are as the adapter resolved
-/// them (canonicalised), so two spellings of one file compare equal.
+/// One registry row for the stamp plan; paths are canonicalised so spellings compare equal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowView<'a> {
     pub id: &'a str,
@@ -632,8 +563,7 @@ pub enum StampDecision<'a> {
         mmproj_path: &'a Path,
         size_bytes: u64,
     },
-    /// Not declared, or not valid: no such row may carry an encoder, since the engine loads a
-    /// stamped encoder eagerly at every model load.
+    /// Not declared or invalid: unstamp, as the engine eagerly loads any stamped encoder.
     Clear,
 }
 
@@ -650,11 +580,8 @@ pub enum RowChange {
     },
 }
 
-/// The changes that make every row naming `target_path` agree with `decision`.
-///
-/// Every row, not one: a GGUF is registered under the settings spelling and the canonical stem,
-/// and they share one engine slot, so whichever loads first decides whether the encoder loads.
-/// Rows already in the wanted state produce nothing, so an empty plan means "do not save".
+/// Changes that make every row naming `target_path` agree with `decision`; empty means no save.
+/// Every row: the settings spelling and canonical stem share one engine slot.
 pub fn stamp_plan(
     rows: &[RowView<'_>],
     target_path: &Path,
@@ -682,8 +609,7 @@ pub fn stamp_plan(
         .collect()
 }
 
-/// Clear every row, whatever GGUF it names, that is stamped with `encoder_path`: run after an
-/// encoder is quarantined, so no row points the engine at the renamed file's old path.
+/// Clear every row stamped with `encoder_path`, for use after that encoder is quarantined.
 pub fn unstamp_plan(rows: &[RowView<'_>], encoder_path: &Path) -> Vec<RowChange> {
     rows.iter()
         .filter(|r| r.mmproj_path == Some(encoder_path))
@@ -694,9 +620,7 @@ pub fn unstamp_plan(rows: &[RowView<'_>], encoder_path: &Path) -> Vec<RowChange>
 }
 
 // ── Household copy ──────────────────────────────────────────────────────────
-//
-// Every string here is pinned by a test. Sizes are bytes / 1,048,576 labelled "MB". The model
-// is named by `EncoderSpec::label`, never by a filename.
+// Pinned by tests. Name models by `EncoderSpec::label`, never by filename.
 
 /// Bytes as the whole megabytes the copy shows.
 pub fn mb(bytes: u64) -> u64 {
@@ -711,16 +635,14 @@ pub const NOT_DECLARED_MESSAGE: &str = "This model cannot look at pictures. To s
 pub const MESH_MESSAGE: &str = "Pictures cannot be sent to another pond yet. Switch back to a \
      model on this device to send one.";
 
-/// The refusal for a picture the server could not decode (415). `index_one_based` counts the
-/// turn's pictures from 1, as the household does.
+/// The refusal for a picture the server could not decode (415).
 pub fn image_unreadable_message(index_one_based: usize) -> String {
     format!(
         "Picture {index_one_based} could not be read. Save it as a JPEG or PNG and attach it again."
     )
 }
 
-/// What "Network reach" shows for a stored `network_mode`. Only the two restrictive modes can
-/// block, so anything that is not `offline` reads as the allowlist.
+/// What "Network reach" shows for a mode that blocked: only `offline` and the allowlist can.
 fn network_reach_label(mode: &str) -> &'static str {
     if mode.eq_ignore_ascii_case("offline") {
         "Offline"
@@ -730,10 +652,7 @@ fn network_reach_label(mode: &str) -> &'static str {
 }
 
 /// The not-on-this-device line, naming a model that CAN read pictures here when one exists.
-///
-/// `measured` is the list of encoder dirs this device has been measured to carry
-/// (`device_budget::DEVICE_MEASURED_VISION`); with none, no model can, and the copy says so
-/// rather than sending the household to a model that would refuse too.
+/// `measured`: encoder dirs this device is measured to carry (`DEVICE_MEASURED_VISION`).
 pub fn not_on_this_device_message(label: Option<&str>, measured: &[&str]) -> String {
     let alternative = measured
         .iter()
@@ -753,8 +672,7 @@ pub fn not_on_this_device_message(label: Option<&str>, measured: &[&str]) -> Str
     }
 }
 
-/// The line for a failed fetch. The client appends "It tries again at HH:MM." from
-/// `retry_at_unix_ms`, so this never states a time.
+/// The line for a failed fetch; never states a time, as the client appends the retry time.
 pub fn failed_message(reason: FailReason, spec: Option<&EncoderSpec>) -> String {
     match reason {
         FailReason::ConnectionDropped => {
@@ -778,8 +696,7 @@ pub fn failed_message(reason: FailReason, spec: Option<&EncoderSpec>) -> String 
     }
 }
 
-/// The status line for `state`, or `None` where the desktop shows nothing (ready, not
-/// declared, unknown). `measured` is as for [`not_on_this_device_message`].
+/// The status line for `state`; `None` for ready, not declared and unknown.
 pub fn status_message_with(
     state: &EncoderState,
     spec: Option<&EncoderSpec>,
@@ -862,13 +779,8 @@ pub struct VisionRefusal {
     pub message: String,
 }
 
-/// Whether an image turn for `provider` may go ahead, given the model's picture-support state.
-///
-/// `None` (the backend does not report) and `Unknown` pass, and so does `Ready`: unknown fails
-/// OPEN to the adapter's own backstop, since refusing on no information would block every
-/// backend that does not implement the port. Under the mesh provider any REPORTED state
-/// refuses with the mesh line, because the wire drops images whatever the local model could
-/// do (the goose adapter reports `NotDeclared` there).
+/// Whether an image turn may go ahead. Unknown fails open (the adapter has its own backstop);
+/// under the mesh provider any reported state refuses, as the wire drops images.
 pub fn refusal_for(
     state: Option<&EncoderState>,
     spec: Option<&EncoderSpec>,
@@ -902,9 +814,7 @@ mod tests {
 
     // ── The table ───────────────────────────────────────────────────────────
 
-    /// Every row, pinned. These numbers came off the Hugging Face API and, for the non-qat rows,
-    /// off the complete files on the development Mac (`shasum -a 256`, 2026-09-24). A change
-    /// here is a change of which bytes every pond downloads and trusts.
+    /// Every row, pinned: a change here changes which bytes every pond downloads and trusts.
     /// (dir, repo, revision, size, sha256, projector, projection_dim, label)
     type PinnedRow = (
         &'static str,
@@ -952,9 +862,6 @@ mod tests {
         }
     }
 
-    /// The fact the table's shape exists for: qat and non-qat encoders are the same size and
-    /// different files. A table that let them share a row, or a check by size alone, would
-    /// attach the wrong projector with no error anywhere.
     #[test]
     fn qat_and_non_qat_encoders_share_a_size_and_not_an_identity() {
         for family in ["gemma-4-e2b-it", "gemma-4-e4b-it"] {
@@ -1004,8 +911,6 @@ mod tests {
 
     // ── Which model gets which encoder ──────────────────────────────────────
 
-    /// Every model file on both machines, as its settings spelling, registry stem and
-    /// owner/quant form. `None` is the answer for everything GIAP has not pinned.
     #[test]
     fn every_model_on_both_machines_resolves_to_the_right_row() {
         let cases: &[(&str, Option<&str>)] = &[
@@ -1063,8 +968,6 @@ mod tests {
         }
     }
 
-    /// Drafters are shared across qat-ness and encoders are not; the two mappings must stay
-    /// separate functions with different answers for the same name.
     #[test]
     fn a_qat_model_shares_its_drafter_but_not_its_encoder() {
         use crate::models::domain::drafter::drafter_for;
@@ -1147,8 +1050,7 @@ mod tests {
         assert_eq!(validate_encoder_header(&p, &spec), Ok(bytes.len() as u64));
     }
 
-    /// The Orin's defect: a download that ended early, with a perfect header. Its length is the
-    /// only tell, and the header says how long it should be.
+    /// The header is intact; only the length it predicts gives the truncation away.
     #[test]
     fn a_download_that_stopped_is_truncated_not_ready() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1253,8 +1155,7 @@ mod tests {
         );
     }
 
-    /// A file whose table accounts for less than the file holds is not the pinned file, even
-    /// at the pinned length.
+    /// This holds even at the pinned length.
     #[test]
     fn a_table_that_does_not_account_for_the_file_is_the_wrong_file() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1271,8 +1172,7 @@ mod tests {
         );
     }
 
-    /// A models/mmproj link into hf_cache blobs validates as the blob; a dangling one is Missing,
-    /// which is what lets the link be replaced without quarantining anything.
+    /// A dangling link is `Missing`, so it is replaced without quarantining anything.
     #[cfg(unix)]
     #[test]
     fn links_are_followed_and_a_dangling_link_is_missing() {
@@ -1928,8 +1828,7 @@ mod tests {
         );
     }
 
-    /// The model is named by its label everywhere, never by a file name, and no line carries
-    /// a character outside plain ASCII (the house forbids emoji in copy; ASCII rules them out).
+    /// ASCII-only because copy may carry no emoji.
     #[test]
     fn no_line_names_a_file_or_leaves_ascii() {
         let mut lines = vec![NOT_DECLARED_MESSAGE.to_string(), MESH_MESSAGE.to_string()];

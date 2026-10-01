@@ -56,8 +56,7 @@ pub fn interfaces() -> std::io::Result<Vec<Interface>> {
     let mut addresses = if_addrs::get_if_addrs()?;
     #[cfg(unix)]
     {
-        // if-addrs omits interface flags. Read them to reject renamed point-to-point
-        // tunnels and down interfaces, independently of the defensive name filter.
+        // if-addrs omits flags; read them to drop down and point-to-point interfaces by any name.
         let allowed = attached_interface_names()?;
         addresses.retain(|i| is_tailnet(i.ip()) || allowed.contains(&i.name));
     }

@@ -25,8 +25,7 @@ pub struct LaneSlot<'a> {
 /// as infinitely starved in `select_next` and would win every tie forever.
 impl Drop for LaneSlot<'_> {
     fn drop(&mut self) {
-        // Lock order is safe: `acquire` releases `last_run` before it takes the slot. Wall clock,
-        // not `Instant`: the stamp outlives the process (see `InferenceLane::last_run`).
+        // Lock order is safe: `acquire` releases `last_run` before it takes the slot.
         let at = Utc::now();
         match self.lane.last_run.lock() {
             Ok(mut last_run) => {
@@ -38,24 +37,13 @@ impl Drop for LaneSlot<'_> {
             }
         }
 
-        // And to disk, through a channel, because `drop` cannot await. An
-        // unbounded sender never blocks and never yields, which is what makes
-        // it safe here: the alternative -- spawning a task -- needs a runtime
-        // that a test dropping this guard is not guaranteed to be inside.
-        //
-        // The send is deliberately unchecked. A closed channel means the writer
-        // task is gone, which happens at shutdown; the in-memory clock above
-        // has already advanced, so the lane keeps scheduling correctly and only
-        // a restart loses this one stamp.
+        // Persisted via an unbounded send, as `drop` can't await or assume a runtime to spawn on.
+        // Unchecked: a closed channel means shutdown, and loses only this stamp.
         if let Some(runs) = &self.lane.runs {
             let _ = runs.send((self.job, at));
         }
 
-        // And the holder, in the same Drop for the same reason: a job that
-        // returned early -- or panicked -- must not leave the watcher saying it
-        // is still running. Cleared unconditionally rather than compared
-        // against `self.job`, because the only way a different job could be in
-        // there is a bug, and holding a stale name is worse than clearing one.
+        // Cleared in Drop (panics too), unconditionally: a stale holder is worse than none.
         match self.lane.holder.lock() {
             Ok(mut holder) => *holder = None,
             Err(poisoned) => *poisoned.into_inner() = None,
@@ -74,38 +62,16 @@ struct Registration {
     exempt_from_activity_gate: bool,
 }
 
-/// One job's doorbell, and whether anybody is home to hear it.
-///
-/// Created for every job up front, whether or not its loop exists in this
-/// process, so `wake` can tell "no loop here" from "unknown job" without a
-/// second lookup. `present` is set by the loop's owner at spawn time via
-/// [`InferenceLane::claim`].
+/// A job's doorbells, made for every job so `wake` can tell "no loop here" from "unknown job".
 struct Wake {
-    /// Rung by a person pressing Run now. A tick on this bell waives the quiet
-    /// period, the interval floor and the activity gate.
+    /// A Run-now press: waives the quiet period, interval floor and activity gate.
     by_hand: Arc<tokio::sync::Notify>,
-    /// Rung by the lane itself when this job is the one that should run next.
-    ///
-    /// A SECOND bell, and that separation is the whole point. There was one,
-    /// and `Cadence::for_tick` zeroed every gate for anything that rang it — so
-    /// a nudge sent on it would make every scheduled tick read as a person
-    /// standing at the panel, and the pond would do background work in the
-    /// middle of a conversation.
+    /// The lane's nudge; kept apart from `by_hand` so a nudge never waives the gates.
     scheduled: Arc<tokio::sync::Notify>,
     present: std::sync::atomic::AtomicBool,
 }
 
-/// What the lane was last told about the household, and when.
-///
-/// The lane is handed `saw_activity_since_start` and `idle_for` by whichever
-/// job is ticking; it does not own the activity clock and must not, because
-/// then it would need the session store and stop being a decision. So it
-/// REMEMBERS the last reading, and the status snapshot extrapolates from it.
-///
-/// The extrapolation is bounded and one-directional: idle only grows unless
-/// somebody came back, and if they did, the next tick corrects it. The shortest
-/// poll on the lane is 60s, so a snapshot is at worst that stale — and it says
-/// so rather than presenting a stale reading as live.
+/// The last activity reading a job handed the lane, which owns no activity clock of its own.
 #[derive(Clone, Copy)]
 struct Observation {
     at: Instant,
@@ -113,32 +79,13 @@ struct Observation {
     idle_for: Duration,
 }
 
-/// What has happened to one job since this process started.
-///
-/// # Why counters and not log lines
-///
-/// The status route can already say why a job is refused RIGHT NOW
-/// (`LaneJobStatus::blocked_by`), and that is an instant, not a history. It
-/// cannot tell "eligible and losing the tie-break 1,340 times" from "switched
-/// off" — the two look identical in a snapshot, and the first is the defect
-/// step one was written for.
-///
-/// The obvious alternative was to log every refusal. Seven jobs on polls from
-/// 30 seconds up is on the order of ten thousand lines a day, written to the
-/// same eMMC the GGUFs live on, to answer a question a `u32` answers. So the
-/// refusal sites stay at `trace!` and this carries the history instead. The
-/// GRANT moves to `info!`: about twenty-six lines a day on the pond measured
-/// today, and the one line whose absence was the whole symptom.
-///
-/// Kept OUTSIDE `Registration`, which `acquire` overwrites on every single
-/// tick — counters stored there would reset before anybody could read them.
+/// Per-job counts since boot, instead of logging every refusal to the eMMC. Kept outside
+/// `Registration`, which `acquire` overwrites every tick.
 #[derive(Debug, Clone, Default)]
 struct Tally {
     /// Times this job took the slot.
     granted: u32,
-    /// Times the lane rang this job's scheduled bell because it should have
-    /// been running. The measurement for step one: on a pond where this stays
-    /// at zero while `lost_to` climbs, the nudge is not reaching anybody.
+    /// Times the lane rang this job's scheduled bell.
     nudged: u32,
     /// Times it asked while another job held the slot.
     slot_busy: u32,
@@ -147,7 +94,7 @@ struct Tally {
     no_activity_since_start: u32,
     still_active: u32,
     interval_floor: u32,
-    /// Who beat it, and how often. The answer to "why am I never picked?".
+    /// Who beat it, and how often.
     lost_to: std::collections::BTreeMap<LaneJob, u32>,
 }
 
@@ -155,50 +102,24 @@ struct Tally {
 pub struct InferenceLane {
     slot: tokio::sync::Mutex<()>,
     /// Std, so [`LaneSlot`]'s `Drop` can lock it; never held across an await. Wall clock, not
-    /// `Instant`: it's seeded from `lane_job_runs`, and `Instant::now() - age` can panic after a
-    /// fresh boot. It can go backwards; `elapsed_since` handles that.
+    /// `Instant`: seeded from `lane_job_runs`, and `Instant::now() - age` can panic after boot.
     last_run: std::sync::Mutex<HashMap<LaneJob, DateTime<Utc>>>,
-    /// Where released slots are written down. `None` on a lane with no log --
-    /// every test, and any pond whose log failed to open.
+    /// Run log sink; `None` in tests and when the log failed to open.
     runs: Option<tokio::sync::mpsc::UnboundedSender<(LaneJob, DateTime<Utc>)>>,
-    /// Which job holds the slot right now, and since when.
-    ///
-    /// The lane could already say the slot was BUSY -- `try_lock` answers
-    /// that -- but not by whom, which is the one thing somebody watching this
-    /// screen wants to know. "Something is using the model" and "the memory
-    /// engine is using the model" are different sentences to a household
-    /// wondering why the pond is slow.
-    ///
-    /// Std, held only for a write or a copy, never across an await. Set where
-    /// the slot is taken and cleared in `LaneSlot`'s `Drop`, so it cannot drift
-    /// from the guard: every path out of a job body, panic included, clears it.
+    /// Which job holds the slot, and since when. Std, never held across an await; set on taking
+    /// the slot and cleared in `LaneSlot`'s `Drop`, so it can't drift from the guard.
     holder: std::sync::Mutex<Option<(LaneJob, Instant)>>,
     registry: tokio::sync::Mutex<HashMap<LaneJob, Registration>>,
-    /// One doorbell per job. Fixed at construction and never mutated, so no
-    /// lock: the only mutable part is each slot's `present` flag, which is an
-    /// atomic.
+    /// Fixed at construction, so no lock; only each `present` flag changes, atomically.
     wake: HashMap<LaneJob, Wake>,
-    /// Std, and held only for a copy. Written on every `acquire`, read by the
-    /// status snapshot.
+    /// Std, held only for a copy; written on every `acquire`, read by the status snapshot.
     observed: std::sync::Mutex<Option<Observation>>,
     /// What has happened to each job since boot. See [`Tally`].
     tallies: std::sync::Mutex<HashMap<LaneJob, Tally>>,
 }
 
-/// How long ago `then` was, from `now`, without ever panicking or wrapping.
-///
-/// The lane's clock is wall time now, so both directions of skew are reachable
-/// and neither may take the pond down:
-///
-/// - **Backwards** (`then` is in the future): an NTP step, or a board with no
-///   RTC that boots at the epoch and syncs a moment later. Answering
-///   `Duration::ZERO` reads as "it just ran", which holds the job behind its
-///   interval floor until the clock is believable again. The other direction --
-///   treating a future stamp as a long wait -- would let every job fire at
-///   once on exactly the boot where the pond has least to spare.
-/// - **Forwards** by a lot: the same board after its first sync. The stamps
-///   look ancient and the jobs look starved, which is the honest reading: a lot
-///   of real time probably did pass.
+/// Saturating elapsed time between wall-clock stamps. A future `then` (NTP step, RTC-less boot)
+/// reads as zero, holding the job behind its floor rather than firing every job at once.
 fn elapsed_since(now: DateTime<Utc>, then: DateTime<Utc>) -> Duration {
     now.signed_duration_since(then)
         .to_std()
@@ -207,37 +128,12 @@ fn elapsed_since(now: DateTime<Utc>, then: DateTime<Utc>) -> Duration {
 
 impl InferenceLane {
     /// A lane with no memory of previous processes and nowhere to write.
+    #[cfg(test)]
     pub fn new() -> Arc<Self> {
         Self::restored(HashMap::new(), None)
     }
 
-    /// How long since this job last ran, from the same clock `acquire` reads.
-    ///
-    /// For a job whose own gate runs BEFORE it asks for the slot. The reviewer
-    /// is the one: its gate layers three refusals the lane knows nothing about
-    /// -- the orchestrator toggle, a run already in flight, and the daily cap
-    /// on interrupting a household -- so it decides whether there is anything
-    /// worth doing before it asks for the machine.
-    ///
-    /// The point of exposing this rather than letting it keep its own clock is
-    /// that two clocks disagreeing is worse than one being wrong. It kept an
-    /// `Option<Instant>` in its own stack frame, which meant its interval floor
-    /// reset on every restart while the lane's did not -- so the two halves of
-    /// one decision could answer differently about the same run.
-    pub fn since_last_run(&self, job: LaneJob) -> Option<Duration> {
-        let last_run = self
-            .last_run
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        last_run.get(&job).map(|t| elapsed_since(Utc::now(), *t))
-    }
-
-    /// A lane seeded from the durable log, writing new runs back to it.
-    ///
-    /// Taking the history by value rather than reading the port here keeps this
-    /// crate's lane free of the repository, and keeps the one fallible step --
-    /// the load -- at the wiring site where a failure can be logged and
-    /// downgraded to `new()`.
+    /// Seeded from the durable log and writing new runs back; the caller does the fallible load.
     pub fn restored(
         last_run: HashMap<LaneJob, DateTime<Utc>>,
         runs: Option<tokio::sync::mpsc::UnboundedSender<(LaneJob, DateTime<Utc>)>>,
@@ -266,8 +162,6 @@ impl InferenceLane {
         })
     }
 
-    /// Count something that happened to a job. One place, so a poisoned lock is
-    /// recovered once rather than at seven call sites.
     fn tally(&self, job: LaneJob, f: impl FnOnce(&mut Tally)) {
         let mut tallies = self
             .tallies
@@ -276,17 +170,7 @@ impl InferenceLane {
         f(tallies.entry(job).or_default());
     }
 
-    /// Take this job's doorbell, and record that a loop for it exists here.
-    ///
-    /// Called once, at spawn time, by whoever owns the loop — NOT on every
-    /// tick. A loop that is spawned conditionally (extraction needs an embedder,
-    /// the index sweep needs an embedder and a vector model) simply never
-    /// claims, and the status route then reports `present: false` for it rather
-    /// than leaving a household pressing a button that has nothing to ring.
-    ///
-    /// The returned pair is what the loop selects on beside its own sleep: one
-    /// bell a person rings, one the lane rings. `wait_for_tick` takes both and
-    /// reports which rang, because they mean different things about the gates.
+    /// Takes `job`'s bells and marks its loop present; call once at spawn, never per tick.
     pub fn claim(&self, job: LaneJob) -> Bells {
         let slot = self
             .wake
@@ -306,15 +190,9 @@ impl InferenceLane {
         &self,
         job: LaneJob,
         enabled: bool,
-        // The job's STANDING cadence — never a waived one. This is what lands
-        // in the shared registry and what every other job's tick will evaluate
-        // this job against, so a value that is only true for one tick must not
-        // reach it. See `Cadence::new`.
+        // The STANDING cadence, never a waived one: it lands in the shared registry.
         cadence: Cadence,
-        // True only on a hand-asked tick, and applied ONLY to this job's own
-        // gate, below. Deliberately not part of `Cadence`: it was, and one press
-        // of Run now then stamped "exempt from everything" into the registry for
-        // up to a whole poll period.
+        // Hand-asked tick: applies to this job's own gate only, never the registry.
         waive: bool,
         saw_activity_since_start: bool,
         idle_for: Duration,
@@ -332,9 +210,7 @@ impl InferenceLane {
             );
         }
 
-        // Remembered before the decision, so a snapshot taken between two ticks
-        // still has the freshest reading any job has taken -- including from a
-        // tick that went on to refuse every job.
+        // Recorded first, so a tick that refuses every job still updates the snapshot.
         if let Ok(mut observed) = self.observed.lock() {
             *observed = Some(Observation {
                 at: Instant::now(),
@@ -365,10 +241,7 @@ impl InferenceLane {
             // Ties break by position, so undo HashMap order; `LaneJob: Ord` is declaration order.
             states.sort_unstable_by_key(|s| s.job);
 
-            // The waiver, applied to exactly one entry: the job that is asking.
-            // Patched here rather than written into the registry so it lasts
-            // for this decision and no longer -- and so a hand-asked tick can
-            // never make a job look eligible to somebody else's tick.
+            // Waiver on the asker's copy only, so it never reaches another job's tick.
             if waive {
                 if let Some(asker) = states.iter_mut().find(|s| s.job == job) {
                     asker.interval_floor = Duration::ZERO;
@@ -377,10 +250,7 @@ impl InferenceLane {
                 }
             }
 
-            // The asker's OWN verdict, recomputed. `select_next` returns the
-            // single reason that explains the most jobs, which is the right
-            // thing for "why is nothing happening" and the wrong thing for
-            // "why am I never picked" -- the question these counters answer.
+            // The asker's own verdict; `select_next` gives the reason that covers most jobs.
             let mine = states.iter().find(|s| s.job == job).map(|s| {
                 consolidation_schedule::should_run(consolidation_schedule::GateInputs {
                     enabled: s.enabled,
@@ -397,9 +267,7 @@ impl InferenceLane {
                 saw_activity_since_start,
                 idle_for,
                 jobs: &states,
-                // This call IS somebody asking, so an equal wait goes to them
-                // rather than to whichever job happens to be declared first and
-                // asleep. See `LaneInputs::asking`.
+                // Ties go to the asker, not the first-declared job asleep.
                 asking: Some(job),
             });
             (decision, mine)
@@ -419,20 +287,8 @@ impl InferenceLane {
         match decision {
             LaneDecision::Run(winner) if winner == job => {}
             LaneDecision::Run(winner) => {
-                // THE ANSWER IS COMPUTED AND THROWN AWAY -- that was the defect.
-                //
-                // The lane names the job that should run, and the caller, which
-                // is not that job, returns `None`. The winner is asleep on its
-                // own timer, which may be fifteen minutes away, and nothing
-                // tells it. Measured on a real pond: 28 hand-wakes against 26
-                // grants, because a tick whose winner was not the caller
-                // produced no run, no reschedule and no retry.
-                //
-                // So ring the winner's SCHEDULED bell. That bell buys an early
-                // look and nothing else: `Tick::Scheduled` applies every gate
-                // exactly as `Tick::Poll` does, so the winner re-enters through
-                // the same quiet period and interval floor and may still be
-                // refused. What it cannot now do is sleep through its own turn.
+                // Wake the winner, which may be asleep on a long poll. Its scheduled bell buys
+                // an early look only: `Tick::Scheduled` applies every gate.
                 if let Some(slot) = self.wake.get(&winner) {
                     slot.scheduled.notify_one();
                     self.tally(winner, |t| t.nudged += 1);
@@ -457,15 +313,10 @@ impl InferenceLane {
 
         match self.slot.try_lock() {
             Ok(guard) => {
-                // INFO, not debug. About twenty-six lines a day on the pond
-                // measured today, and the one line whose absence was the whole
-                // symptom -- a shipped log that never said the lane granted
-                // anything, because at `debug` it never reached the file.
+                // Info, not debug: ~26 lines a day, and `debug` never reaches the shipped log.
                 tracing::info!(job = job.as_str(), "inference lane: slot acquired");
                 self.tally(job, |t| t.granted += 1);
-                // Recorded here rather than by the caller, so it cannot be
-                // forgotten by a job body: taking the guard and being named as
-                // the holder are the same event.
+                // Set here, not by the caller, so the holder always matches the guard.
                 if let Ok(mut holder) = self.holder.lock() {
                     *holder = Some((job, Instant::now()));
                 }
@@ -487,18 +338,7 @@ impl InferenceLane {
     }
 }
 
-/// What one tick uses for its cadence, once it is known whether a person asked
-/// for it.
-///
-/// A hand-asked tick is not background work. The idle gate exists to stop
-/// chores stealing the machine from somebody who is using it, and here the
-/// person using it IS the reason to run — so quiet and the interval floor both
-/// drop to zero, and the activity gate is waived. The index sweep has worked
-/// this way since the Reindex button shipped; this is that rule, named, so the
-/// other five jobs get it identically rather than each re-deriving it.
-///
-/// What it does NOT touch is the slot. Exclusion is the lane's one hard
-/// guarantee and a button must not be able to buy its way past it.
+/// A job's standing gates, as the shared registry holds them; a Run-now waiver never lands here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cadence {
     pub interval_floor: Duration,
@@ -507,18 +347,6 @@ pub struct Cadence {
 }
 
 impl Cadence {
-    /// A job's STANDING cadence — what it always wants, on any tick.
-    ///
-    /// There used to be a `for_tick(asked, ..)` that returned zeros when a
-    /// person had pressed Run now, and the job then passed those zeros to
-    /// `acquire`, which wrote them into the SHARED registry. So one press
-    /// stamped "always eligible, exempt from every gate" onto that job for up
-    /// to its whole poll period, and every OTHER job's tick then evaluated it
-    /// as runnable in the middle of a conversation.
-    ///
-    /// The waiver is now a separate argument to `acquire`, applied only while
-    /// evaluating the asker's own gate. The registry never sees it, so it
-    /// cannot outlive the tick that earned it.
     pub fn new(
         interval_floor: Duration,
         idle_threshold: Duration,
@@ -539,19 +367,12 @@ pub struct Bells {
 }
 
 impl Bells {
-    /// The bell a PERSON rings, for a caller that needs it on its own.
-    ///
-    /// One caller: `AppState::index_reindex`, which the Reindex button rings
-    /// after clearing the index. It is the hand bell and not the scheduled one
-    /// because somebody is standing there watching an empty panel — the quiet
-    /// period exists to keep chores off the machine while a person is using it,
-    /// and here the person IS the reason to run.
+    /// The bell a person rings, for callers that need it alone (the Reindex button).
     pub fn hand_bell(&self) -> Arc<tokio::sync::Notify> {
         self.by_hand.clone()
     }
 
-    /// Wait on both, and say which rang. The sweep has its own `select!` with a
-    /// cancellation arm, so it cannot use `wait_for_tick`.
+    /// Which bell rang; for the sweep, whose own `select!` can't use `wait_for_tick`.
     pub async fn rang(&self) -> Tick {
         tokio::select! {
             _ = self.by_hand.notified() => Tick::HandAsked,
@@ -565,12 +386,9 @@ impl Bells {
 pub enum Tick {
     /// The job's own timer. Every gate applies.
     Poll,
-    /// A person pressed Run now. Quiet, floor and the activity gate are waived
-    /// — the person IS the activity — but never the slot.
+    /// Run now: quiet, floor and activity gate are waived, never the slot.
     HandAsked,
-    /// The lane rang: this job is the one that should run next. Every gate
-    /// applies, exactly as on `Poll`. The bell buys an early LOOK, never a
-    /// relaxed rule.
+    /// The lane's nudge that this job should run next; every gate applies, as on `Poll`.
     Scheduled,
 }
 
@@ -581,12 +399,7 @@ impl Tick {
     }
 }
 
-/// Sleep until this job's next tick, and report whether a person asked for it.
-///
-/// Every lane loop waits here instead of on a bare `sleep`, which is what makes
-/// "run it now" possible at all: without a doorbell to select on, the shortest
-/// wait a button could produce is the job's own poll — fifteen minutes for the
-/// index sweep.
+/// Every lane loop waits here, not on a bare `sleep`, so a bell can cut its poll short.
 pub async fn wait_for_tick(poll: Duration, bells: &Bells) -> Tick {
     tokio::select! {
         _ = tokio::time::sleep(poll) => Tick::Poll,
@@ -595,36 +408,17 @@ pub async fn wait_for_tick(poll: Duration, bells: &Bells) -> Tick {
     }
 }
 
-/// Seeing the lane, and asking it to run something now.
-///
-/// The port's own docs carry the reasoning; what is worth saying here is where
-/// each answer comes from, because they have three different freshnesses:
-///
-///   `present`    construction time, from `claim`. Never stale.
-///   `enabled`, the two cadences, `blocked_by`
-///                that job's LAST tick. Up to its own poll old — 15 minutes for
-///                the index sweep.
-///   `idle_for`, `saw_activity_since_start`
-///                the last tick of ANY job, extrapolated. At worst 60s old,
-///                because the shortest poll on the lane is 60s.
-///
-/// A snapshot therefore describes what the next tick would decide, not what is
-/// true to the millisecond, and the route says so rather than implying live
-/// numbers.
+/// Snapshot freshness: `present` is exact; per-job fields are as of that job's last tick;
+/// `idle_for` and `saw_activity_since_start` come from any job's last tick, extrapolated.
 #[async_trait::async_trait]
 impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
     async fn snapshot(&self) -> LaneSnapshot {
         use pond_core::user_data::services::consolidation_schedule::{self as sched, GateInputs};
 
-        // No job has ticked yet. Reporting `idle_for: 0` and
-        // `saw_activity: false` is the honest reading of that: nothing has
-        // observed the household, and the "never on startup" guard is exactly
-        // what a process in this state is subject to.
+        // No tick yet: nothing has observed the household, so no activity and zero idle.
         let observed = self.observed.lock().ok().and_then(|o| *o);
         let (saw_activity_since_start, idle_for) = match observed {
-            // Idle only grows unless somebody came back, and if they did the
-            // next tick corrects this downward. Growing it is the direction
-            // that cannot invent quiet the pond has not had.
+            // Extrapolated; if somebody came back, the next tick corrects it.
             Some(o) => (o.saw_activity_since_start, o.idle_for + o.at.elapsed()),
             None => (false, Duration::ZERO),
         };
@@ -648,9 +442,7 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Utc::now();
 
-        // Only registered jobs go to `select_next` — a job whose loop has never
-        // ticked has told the lane nothing, and inventing a default cadence for
-        // it would put a job in the decision that never asked to be there.
+        // Registered jobs only: an unticked job has no cadence, and a default would invent one.
         let mut states: Vec<JobState> = registry
             .iter()
             .map(|(&job, reg)| JobState {
@@ -668,14 +460,11 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
             saw_activity_since_start,
             idle_for,
             jobs: &states,
-            // Nobody is asking: this is a read. Naming a job here would make
-            // `would_run` report whoever the status route happened to mention.
+            // A read, not an ask: naming a job would bias `would_run` toward it.
             asking: None,
         });
 
-        // Every job in ALL order, present or not. A job missing from the list
-        // would be a job nobody can see is missing, which is the failure this
-        // whole surface exists to end.
+        // Every job in ALL order, present or not, so a missing loop is visible.
         let jobs = LaneJob::ALL
             .iter()
             .map(|&job| {
@@ -722,11 +511,7 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
                     present,
                     registered: state.is_some(),
                     enabled: state.is_some_and(|s| s.enabled),
-                    // From the clock, not from `state`. A job whose loop has
-                    // not ticked yet this process is unregistered, but the
-                    // durable log may well know when it last ran -- and
-                    // reporting "never" because a loop is still starting is
-                    // exactly the lie this clock was made durable to end.
+                    // From the clock, not `state`: the log dates a job before its loop ticks.
                     since_last_run_secs: last_run
                         .get(&job)
                         .map(|t| elapsed_since(now, *t).as_secs()),
@@ -746,17 +531,9 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
             },
             idle_for_secs: idle_for.as_secs(),
             saw_activity_since_start,
-            // `try_lock` rather than `lock`: this is a status read and must not
-            // queue behind the job it is reporting on. Taking it proves nobody
-            // else holds it, and the guard is dropped at the end of the
-            // expression -- it is the raw mutex guard, not `LaneSlot`, so
-            // nothing records a run.
             running: running.map(|(job, _)| job),
             running_for_secs: running.map(|(_, since)| since.elapsed().as_secs()),
-            // Derived from the holder rather than from `try_lock`. The old
-            // version took the real mutex to answer a status question, which
-            // meant a read could briefly hold the thing it was reporting on;
-            // and it could only ever say BUSY, never by whom.
+            // From the holder: a status read must never take the slot itself.
             slot_busy: running.is_some(),
         }
     }
@@ -768,10 +545,7 @@ impl pond_core::user_data::ports::lane_control::LaneControl for InferenceLane {
         if !slot.present.load(std::sync::atomic::Ordering::Relaxed) {
             return WakeOutcome::NotPresent;
         }
-        // `notify_one`, matching the Reindex precedent: there is one loop per
-        // job, and this variant holds a permit if the loop is mid-pass, so a
-        // press during a run still gets a fresh tick afterwards rather than
-        // being swallowed.
+        // `notify_one` keeps a permit, so a press mid-pass still gets a tick afterwards.
         slot.by_hand.notify_one();
         tracing::info!(job = job.as_str(), "inference lane: woken by hand");
         WakeOutcome::Woken
@@ -786,21 +560,8 @@ mod tests {
     const LONG_IDLE: Duration = Duration::from_secs(3600);
 
     // ── Standing down without leaving a hole ─────────────────────────────
-    /// A job that has something to say "not now" about must still ASK.
-    ///
-    /// This is the invariant every lane loop keeps by construction and the
-    /// reason none of the reviewer's own refusals is an early return. A job
-    /// that stops calling `acquire` leaves its last registration behind; the
-    /// clock keeps running; and because a never-run or long-ago-run job carries
-    /// the longest apparent wait, the stale entry then wins every tie-break it
-    /// is offered. Step 1 made that strictly worse: the losing job now NUDGES
-    /// the winner, so the lane would wake a job that has already decided not to
-    /// run, over and over, while the job that actually wanted the slot refused
-    /// itself.
-    ///
-    /// `acquire(enabled: false)` is how a job says "not me" without leaving
-    /// that hole -- it refreshes the registration and takes the job out of the
-    /// running in the same call.
+    /// A job saying "not now" must still ask, via `acquire(enabled: false)`: a job that stops
+    /// asking leaves a stale registration that wins every tie-break.
     #[tokio::test]
     async fn a_job_that_stands_down_neither_wins_nor_is_nudged() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -809,9 +570,7 @@ mod tests {
         let standing_down = lane.claim(LaneJob::ProactiveReview);
         let _wants_it = lane.claim(LaneJob::MemoryExtraction);
 
-        // Extraction runs once, so it has a real -- and therefore SHORTER --
-        // wait than the job that has never run. Without the stand-down, the
-        // never-run reviewer wins on `Duration::MAX` and on declaration order.
+        // Extraction runs once, so without the stand-down the never-run reviewer would win.
         drop(
             ask(&lane, LaneJob::MemoryExtraction)
                 .await
@@ -848,8 +607,7 @@ mod tests {
             "the job that wants the slot wins it, despite the shorter wait"
         );
 
-        // And the doorbell stays silent. A nudge here would be the lane waking
-        // a job to decline again.
+        // No nudge: that would wake a job only to decline again.
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(50),
@@ -861,11 +619,7 @@ mod tests {
         );
     }
 
-    /// The control: the same reviewer, asking in earnest, DOES win.
-    ///
-    /// Without this, the test above would pass if `ProactiveReview` were simply
-    /// unable to win a tie-break for some other reason -- a missing doorbell, a
-    /// registry that ignores it, a declaration-order accident.
+    /// Control for the test above: rules out the reviewer being unable to win at all.
     #[tokio::test]
     async fn the_same_job_asking_in_earnest_takes_the_slot() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -895,7 +649,6 @@ mod tests {
     }
 
     // ── The durable clock ────────────────────────────────────────────────
-    /// The clock is wall time now, so both directions of skew are reachable.
     #[test]
     fn a_clock_that_went_backwards_reads_as_just_ran_not_as_a_long_wait() {
         let t = DateTime::from_timestamp(1_760_000_000, 0).unwrap();
@@ -905,10 +658,7 @@ mod tests {
             Duration::from_secs(90),
             "ordinary forward time"
         );
-        // An NTP step, or a board with no RTC that boots at the epoch. The
-        // saturating direction matters: `Duration::MAX` here would make every
-        // job maximally starved on exactly the boot with least to spare, and a
-        // panicking subtraction would take the pond down.
+        // NTP step or RTC-less boot: must not saturate to `Duration::MAX` or panic.
         assert_eq!(
             elapsed_since(t, t + Duration::from_secs(90)),
             Duration::ZERO,
@@ -916,13 +666,7 @@ mod tests {
         );
     }
 
-    /// THE DEFECT STEP 3 EXISTS FOR.
-    ///
-    /// `should_run` skips the interval floor entirely when `since_last_run` is
-    /// `None`, because a job that has never run cannot be too soon. That is the
-    /// right reading of "never" and the wrong reading of "ran a minute ago, in
-    /// the process before this one" — so before the clock was durable, every
-    /// restart handed all seven jobs a free pass through their own floors.
+    /// `should_run` skips the floor for `None`, so a restart must not read as "never ran".
     #[tokio::test]
     async fn a_restart_does_not_hand_a_job_a_free_pass_through_its_interval_floor() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -934,8 +678,7 @@ mod tests {
         );
         let _bell = lane.claim(LaneJob::Consolidation);
 
-        // A day's floor, one minute since the last run. Asking registers the
-        // cadence; the answer must be no.
+        // A day's floor, a minute after the last run; asking also registers the cadence.
         let refused = lane
             .acquire(
                 LaneJob::Consolidation,
@@ -969,11 +712,7 @@ mod tests {
         );
     }
 
-    /// The control for the test above: with no stamp, the same job runs.
-    ///
-    /// Without this, that assertion would still pass if the floor were being
-    /// enforced by something other than the restored clock — a disabled job, a
-    /// busy slot, a gate that refuses everything.
+    /// Control for the test above: shows the restored stamp is what refuses it.
     #[tokio::test]
     async fn without_a_restored_stamp_the_same_job_takes_the_slot() {
         let lane = InferenceLane::new();
@@ -993,21 +732,12 @@ mod tests {
         );
     }
 
-    /// A restored job must not outrank a job that really has never run.
-    ///
-    /// `select_next` ranks `None` as `Duration::MAX`. Before the clock was
-    /// durable, every job was `None` after a restart and the tie-break fell
-    /// through to declaration order — so the lane's ordering was decided by the
-    /// enum, not by need.
+    /// `select_next` ranks a never-run job's `None` as `Duration::MAX`.
     #[tokio::test]
     async fn a_job_that_never_ran_still_outranks_one_restored_from_disk() {
         use pond_core::user_data::ports::lane_control::LaneControl;
 
-        // Titling is declared BEFORE memory extraction, so if the restored
-        // stamp were ignored titling would win on declaration order and this
-        // test would pass for the wrong reason. Restoring titling — the job
-        // that would otherwise win — is what makes the assertion about the
-        // clock.
+        // Titling is declared first: restoring it means only the clock can make extraction win.
         let lane = InferenceLane::restored(
             HashMap::from([(LaneJob::Titling, Utc::now() - Duration::from_secs(60))]),
             None,
@@ -1015,8 +745,7 @@ mod tests {
         let _t = lane.claim(LaneJob::Titling);
         let _m = lane.claim(LaneJob::MemoryExtraction);
 
-        // Register both without running either, by asking while the slot is
-        // held by a third job.
+        // Register both without running either: a third job holds the slot.
         let _other = lane.claim(LaneJob::Consolidation);
         let held = ask(&lane, LaneJob::Consolidation).await.expect("free slot");
         assert!(ask(&lane, LaneJob::Titling).await.is_none());
@@ -1031,13 +760,6 @@ mod tests {
         );
     }
 
-    /// Releasing the slot posts the run to the writer, once, naming the job.
-    ///
-    /// The send is in `Drop`, which is the only place that can see every path
-    /// out of a job body. A version that recorded at the grant instead would
-    /// stamp runs that then panicked, and one that recorded in the job bodies
-    /// would miss every early return — the failure the guard already exists to
-    /// prevent for the in-memory clock.
     #[tokio::test]
     async fn releasing_the_slot_posts_the_run_to_the_writer() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1053,7 +775,6 @@ mod tests {
         assert!(rx.try_recv().is_err(), "one release, one message");
     }
 
-    /// A refused tick is not a run, and must not be written down as one.
     #[tokio::test]
     async fn a_tick_that_won_nothing_posts_nothing() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1063,19 +784,12 @@ mod tests {
 
         let held = ask(&lane, LaneJob::Consolidation).await.expect("free slot");
         assert!(ask(&lane, LaneJob::Titling).await.is_none());
-        // Only consolidation's own release should arrive, and only after it is
-        // dropped -- nothing from the refusal.
         assert!(rx.try_recv().is_err(), "a refusal is not a run");
         drop(held);
         assert_eq!(rx.try_recv().unwrap().0, LaneJob::Consolidation);
     }
 
-    /// A restored job reports its age before its loop has ticked once.
-    ///
-    /// Boot order is: wire the lane, then start the loops. In the window
-    /// between, every job is unregistered — and reporting "never" for a job the
-    /// log can date is the exact lie the durable clock was added to end, shown
-    /// on the one screen somebody opens to ask why nothing is running.
+    /// Boot wires the lane before starting loops, so every job starts unregistered.
     #[tokio::test]
     async fn a_restored_job_reports_its_age_before_its_loop_has_ticked() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1100,11 +814,7 @@ mod tests {
         );
     }
 
-    /// A lane with nowhere to write still keeps its own clock.
-    ///
-    /// Every test above this file's wiring uses `InferenceLane::new()`, and a
-    /// pond whose log failed to open gets the same lane. Neither may be a lane
-    /// that stops scheduling.
+    /// Tests and ponds whose run log failed to open both use this writer-less lane.
     #[tokio::test]
     async fn a_lane_with_no_writer_still_advances_its_own_clock() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1126,10 +836,6 @@ mod tests {
     }
 
     // ── Running a job by hand ────────────────────────────────────────────
-    /// Which gates a tick waives, by where it came from.
-    ///
-    /// The scheduled bell buys an EARLY LOOK and nothing else: it applies every
-    /// gate exactly as the job's own timer does. Only a person waives them.
     #[test]
     fn only_a_person_waives_the_gates() {
         assert!(Tick::HandAsked.waives());
@@ -1140,15 +846,6 @@ mod tests {
         );
     }
 
-    /// THE DEFECT THIS STEP EXISTS FOR.
-    ///
-    /// A tick whose winner is not the caller used to compute the right answer
-    /// and throw it away: no run, no reschedule, no retry, and the winner
-    /// asleep on a timer up to fifteen minutes out. Measured on a real pond:
-    /// 28 hand-wakes against 26 grants, because essentially every grant came
-    /// from a person pressing a button.
-    ///
-    /// Now the loser rings the winner's SCHEDULED bell on its way out.
     #[tokio::test]
     async fn a_losing_tick_wakes_the_job_that_should_have_run() {
         let lane = InferenceLane::new();
@@ -1163,10 +860,7 @@ mod tests {
                 .expect("free slot"),
         );
 
-        // Consolidation has to be REGISTERED to be pickable -- `claim` only
-        // records that a loop exists; the registry is written by `acquire`.
-        // Asking while another job holds the slot registers it without running
-        // it, so it keeps the never-run wait that makes it the winner below.
+        // `claim` doesn't register; asking while the slot is held registers it without a run.
         let held = ask(&lane, LaneJob::Titling).await.expect("free slot");
         assert!(
             lane.acquire(
@@ -1183,9 +877,7 @@ mod tests {
         );
         drop(held);
 
-        // Now: consolidation never ran, extraction ran a moment ago. So the
-        // lane names consolidation, and extraction -- asking on its own 60s
-        // timer -- loses.
+        // Consolidation never ran and extraction just did, so extraction loses.
         let lost = lane
             .acquire(
                 LaneJob::MemoryExtraction,
@@ -1198,8 +890,7 @@ mod tests {
             .await;
         assert!(lost.is_none(), "the asker is not the winner");
 
-        // The winner's scheduled bell now holds a permit, so its own loop wakes
-        // at once rather than sleeping out its poll.
+        // The winner's bell holds a permit, so its loop wakes at once.
         let woke = tokio::time::timeout(Duration::from_secs(5), async {
             wait_for_tick(Duration::from_secs(3600), &winner_bells).await
         })
@@ -1212,13 +903,6 @@ mod tests {
         );
     }
 
-    /// THE DISTINCTION THE COUNTERS EXIST TO MAKE.
-    ///
-    /// A snapshot cannot tell a job that is eligible and losing the tie-break
-    /// from one that is switched off — `blocked_by` is `None` for BOTH, since
-    /// losing is not a gate refusal. On a real pond that is the difference
-    /// between a defect and a setting, and it took a log-file archaeology dig
-    /// to answer it once.
     #[tokio::test]
     async fn losing_and_being_switched_off_are_different_numbers() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1228,8 +912,7 @@ mod tests {
         let _l = lane.claim(LaneJob::MemoryExtraction);
         let _t = lane.claim(LaneJob::Titling);
 
-        // Extraction runs once so it has a real wait; consolidation registers
-        // without running, so it stays infinitely starved and wins from here.
+        // Extraction gets a real wait; consolidation registers unrun, so it wins from here.
         drop(ask(&lane, LaneJob::MemoryExtraction).await.expect("free"));
         let held = ask(&lane, LaneJob::Titling).await.expect("free");
         let _ = lane
@@ -1244,7 +927,6 @@ mod tests {
             .await;
         drop(held);
 
-        // Extraction loses three ticks in a row.
         for _ in 0..3 {
             assert!(lane
                 .acquire(
@@ -1272,7 +954,6 @@ mod tests {
             Some((LaneJob::Consolidation, 3)),
             "and it can say to whom"
         );
-        // The instant says nothing is wrong, which is exactly the blind spot.
         assert_eq!(
             extraction.blocked_by, None,
             "losing is not a gate refusal, so the snapshot alone cannot see it"
@@ -1283,7 +964,7 @@ mod tests {
             "and no gate refused it either"
         );
 
-        // The winner was nudged once per loss -- the measurement for step one.
+        // The winner was nudged once per loss.
         let consolidation = snapshot
             .jobs
             .iter()
@@ -1292,8 +973,6 @@ mod tests {
         assert_eq!(consolidation.history.nudged, 3);
     }
 
-    /// A job refused by its own gate counts under that reason, and nowhere
-    /// else. Without this the two paths could both land in `lost_to`.
     #[tokio::test]
     async fn a_gate_refusal_is_counted_under_its_own_reason() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1330,8 +1009,7 @@ mod tests {
         assert_eq!(job.history.granted, 0);
     }
 
-    /// The control: a tick the caller WINS must not ring anybody. Without this,
-    /// a nudge on every tick would be indistinguishable from the fix.
+    /// Control for the losing-tick test: rules out nudging on every tick.
     #[tokio::test]
     async fn a_winning_tick_nudges_nobody() {
         let lane = InferenceLane::new();
@@ -1342,7 +1020,6 @@ mod tests {
         assert!(won.is_some(), "the only registered asker wins");
         drop(won);
 
-        // Nothing rang for extraction, so this must time out.
         let nudged = tokio::time::timeout(Duration::from_millis(300), async {
             wait_for_tick(Duration::from_secs(3600), &others).await
         })
@@ -1350,13 +1027,6 @@ mod tests {
         assert!(nudged.is_err(), "a winning tick must not wake anybody else");
     }
 
-    /// The registry poisoning the nudge would have amplified.
-    ///
-    /// One press of Run now used to write `floor: 0, idle: 0, exempt: true`
-    /// into the SHARED registry, where it sat for up to that job's whole poll
-    /// period — so every other job's tick then evaluated it as eligible in the
-    /// middle of a conversation. The waiver is now a separate argument applied
-    /// to the asker's own gate and never stored.
     #[tokio::test]
     async fn a_hand_asked_tick_does_not_poison_the_shared_registry() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1391,9 +1061,6 @@ mod tests {
         assert_eq!(titling.idle_threshold_secs, quiet.as_secs());
     }
 
-    /// A job whose loop never spawned -- no embedder, no orchestrator, a CLI
-    /// process -- has nothing to wake, and the button must say so rather than
-    /// reporting success into the void.
     #[tokio::test]
     async fn waking_a_job_with_no_loop_reports_it_rather_than_pretending() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1404,21 +1071,16 @@ mod tests {
             WakeOutcome::NotPresent
         );
 
-        // Vacuity control for the assertion above: claiming is what changes the
-        // answer, so if `wake` were hardcoded to `NotPresent` this would fail.
+        // Control: a `wake` hardcoded to `NotPresent` would fail here.
         let _bell = lane.claim(LaneJob::MemoryExtraction);
         assert_eq!(
             lane.wake(LaneJob::MemoryExtraction).await,
             WakeOutcome::Woken
         );
-        // And only that job. A doorbell wired to every loop would make one
-        // button run all six.
+        // Only the claimed job: one button must not wake every loop.
         assert_eq!(lane.wake(LaneJob::Titling).await, WakeOutcome::NotPresent);
     }
 
-    /// The doorbell has to reach a loop that is already asleep on its poll, or
-    /// the shortest wait a button could produce is the job's own cadence --
-    /// fifteen minutes for the index sweep.
     #[tokio::test]
     async fn a_wake_cuts_short_a_poll_the_loop_is_already_asleep_on() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1429,9 +1091,7 @@ mod tests {
         // An hour, so a pass can only come from the doorbell.
         let ticking =
             tokio::spawn(async move { wait_for_tick(Duration::from_secs(3600), &bell).await });
-        // Yield until the task is parked on the select; without this the notify
-        // can land before there is a waiter and `notify_one`'s permit is what
-        // saves the test rather than the mechanism under test.
+        // Park the task first, or `notify_one`'s stored permit would pass the test instead.
         tokio::task::yield_now().await;
 
         lane.wake(LaneJob::Titling).await;
@@ -1446,9 +1106,6 @@ mod tests {
         );
     }
 
-    /// Exclusion is the lane's one hard guarantee, and a button must not buy
-    /// its way past it. `Cadence::for_tick` waives the POLITENESS gates; the
-    /// slot is not one of them.
     #[tokio::test]
     async fn a_hand_asked_job_still_cannot_take_a_slot_another_job_holds() {
         let lane = InferenceLane::new();
@@ -1458,8 +1115,7 @@ mod tests {
             .await
             .expect("the first asker wins the free slot");
 
-        // Everything a hand-asked extraction tick would pass in: no floor, no
-        // quiet, exempt from the activity gate. It still gets nothing.
+        // Every gate waived; the held slot still refuses it.
         let asked = lane
             .acquire(
                 LaneJob::MemoryExtraction,
@@ -1478,7 +1134,6 @@ mod tests {
         drop(held);
     }
 
-    /// The watcher's whole point: not that something is running, but what.
     #[tokio::test]
     async fn the_snapshot_names_the_job_holding_the_slot() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1499,18 +1154,12 @@ mod tests {
         assert_eq!(busy.running, Some(LaneJob::Titling));
         assert!(busy.running_for_secs.is_some(), "and for how long");
 
-        // Dropping the guard clears it, on the same Drop that records the run.
-        // A job that returned early -- or panicked -- must not leave the
-        // watcher saying it is still going.
         drop(held);
         let after = lane.snapshot().await;
         assert!(!after.slot_busy);
         assert_eq!(after.running, None, "the holder is cleared with the guard");
     }
 
-    /// The status route's answer has to name every job, including the ones with
-    /// no loop here -- a job missing from the list is a job nobody can see is
-    /// missing.
     #[tokio::test]
     async fn the_snapshot_names_every_job_present_or_not() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1543,9 +1192,7 @@ mod tests {
         assert!(!other.present, "an unclaimed job has no loop here");
     }
 
-    /// `present` and `registered` are different facts and the panel renders them
-    /// differently: a loop that exists but has not ticked has told the lane
-    /// nothing, and "no data" must not read as "switched off".
+    /// `present` means a loop exists; `registered` means it has asked at least once.
     #[tokio::test]
     async fn asking_once_is_what_makes_a_job_registered() {
         use pond_core::user_data::ports::lane_control::LaneControl;
@@ -1577,8 +1224,7 @@ mod tests {
             job,
             true,
             Cadence::new(Duration::ZERO, IDLE_THRESHOLD, false),
-            // Never waived: these tests are about the shared gate and the
-            // tie-break between jobs, both of which a waiver skips entirely.
+            // Not waived, for the same reason.
             false,
             true,
             LONG_IDLE,

@@ -60,11 +60,7 @@ impl LlmProvider for StubProvider {
     }
 }
 
-/// A lane that records what it was asked to wake, and answers how it was told.
-///
-/// `snapshot` is unreachable from this route and panics rather than returning a
-/// plausible empty one: a snapshot nobody asked for would be a silent way for a
-/// future handler to read state this stub never had.
+/// `snapshot` panics rather than return a plausible empty state no route should read.
 struct StubLane {
     woken: Arc<std::sync::Mutex<Vec<LaneJob>>>,
     outcome: WakeOutcome,
@@ -88,7 +84,6 @@ async fn make_app(
     (app, storage, tmp)
 }
 
-/// The same app, with a lane whose wakes the caller can read back.
 async fn make_app_with_lane(
     provider: Option<Arc<dyn LlmProvider>>,
     outcome: Option<WakeOutcome>,
@@ -260,7 +255,6 @@ async fn retitle(app: &axum::Router) -> (StatusCode, Value) {
     (status, json)
 }
 
-/// The press asks the titling job to run, and says so.
 #[tokio::test]
 async fn a_press_asks_the_titling_job_for_its_next_pass() {
     let provider = StubProvider::new("Wake word fires twice");
@@ -280,8 +274,7 @@ async fn the_press_decodes_nothing_in_the_request() {
     let provider = StubProvider::new("A name nobody asked for");
     let (app, storage, _tmp, _) =
         make_app_with_lane(Some(provider.clone()), Some(WakeOutcome::Woken)).await;
-    // Three conversations all sitting on their fallback names: the sweep would
-    // have renamed every one of them, inline, before answering.
+    // Fallback-named sessions, which an inline sweep would retitle before answering.
     for id in ["sess-1", "sess-2", "sess-3"] {
         seed(&storage, id, 8).await;
     }
@@ -296,8 +289,6 @@ async fn the_press_decodes_nothing_in_the_request() {
     );
 }
 
-/// A pond whose titling loop never spawned has nothing to wake, and the button
-/// must be able to say that rather than claim a pass it did not start.
 #[tokio::test]
 async fn a_job_with_no_loop_says_so_rather_than_claiming_it_started() {
     let provider = StubProvider::new("unused");
@@ -314,7 +305,6 @@ async fn a_job_with_no_loop_says_so_rather_than_claiming_it_started() {
     );
 }
 
-/// And a process with no lane at all is a third answer, not the second one.
 #[tokio::test]
 async fn a_process_with_no_lane_is_a_different_answer_from_a_missing_loop() {
     let provider = StubProvider::new("unused");
@@ -332,9 +322,7 @@ async fn a_process_with_no_lane_is_a_different_answer_from_a_missing_loop() {
     );
 }
 
-/// Checked in the handler rather than left to the job, because the job's answer
-/// to "no model configured" is to skip its tick in silence — right for a
-/// background loop and useless to somebody who just pressed a button.
+/// Checked in the handler because the job silently skips a tick with no model.
 #[tokio::test]
 async fn without_a_model_the_button_says_so_rather_than_failing_quietly() {
     let (app, _storage, _tmp, woken) = make_app_with_lane(None, Some(WakeOutcome::Woken)).await;
@@ -378,10 +366,7 @@ async fn asking_for_one_conversation_replaces_even_a_name_typed_by_hand() {
         .await
         .unwrap();
 
-    // The sweep leaves it alone...
-    // The sweep's own refusal is no longer reachable through a route -- it
-    // belongs to the titling job now -- and is asserted where it lives, in
-    // `session_title.rs`'s `a_user_named_session_costs_no_inference_at_all`.
+    // The sweep leaves it alone (asserted in `session_title.rs`)...
     assert_eq!(provider.calls(), 0);
 
     // ...and asking for this one specifically does not.
@@ -411,11 +396,7 @@ async fn asking_for_one_conversation_rebuilds_a_name_that_still_fits() {
         .await
         .unwrap();
 
-    // Nothing has changed since that name was written, so the sweep declines.
-    // As above: the sweep declining a name that still fits is
-    // `session_title.rs`'s business, and its suite asserts it. What this test
-    // is for is the other half of the asymmetry -- that asking for ONE
-    // conversation rebuilds it anyway.
+    // The sweep would decline this still-fitting name (`session_title.rs` asserts it).
 
     let (status, body) = retitle_one(&app, "sess-1").await;
     assert_eq!(status, StatusCode::OK);

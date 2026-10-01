@@ -115,11 +115,7 @@ export const SETTINGS: SettingsGroup[] = [
     ],
   },
   {
-    // Its own group rather than a row under System, because what it holds is
-    // not a system fact -- it is the work the pond does on its own, which is
-    // the same thing "Automations" means on the classic surface. The two
-    // taxonomies are separate structures and always have been; this is the one
-    // heading it is worth spending to make them agree on.
+    // Its own group, matching the classic surface's "Automations": work the pond does on its own.
     group: "Automations",
     rows: [
       {

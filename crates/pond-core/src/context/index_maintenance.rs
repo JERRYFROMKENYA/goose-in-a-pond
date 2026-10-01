@@ -180,14 +180,8 @@ pub async fn run_index_maintenance(
         }
     }
 
-    // 2c. Memory fragments that have no vector. The store's OWN column, not the
-    //     index's: `search_similar` reads `memories.embedding` directly, so a row
-    //     with a NULL there is unreachable semantically no matter how healthy the
-    //     index is, and step 1's adoption cannot help because there is nothing to
-    //     copy. The only other filler is `run_backfill`, spawned once at boot --
-    //     so before this step, every row consolidation minted, every row
-    //     `update_content` rewrote, and every row whose embed failed stayed
-    //     invisible until the next restart.
+    // 2c. Memory rows with no `memories.embedding`, which `search_similar` reads directly (not
+    //     the index); otherwise only the one-shot boot backfill fills it.
     if !cancel.is_cancelled() {
         report.memories_indexed = run_memory_embedding_sweep(
             memories,
@@ -495,11 +489,7 @@ mod tests {
         }
     }
 
-    /// A memory row with no vector, which NOTHING else repairs after boot.
-    ///
-    /// The startup backfill is a one-shot spawn; adoption only copies vectors
-    /// that already exist. So a fragment consolidation minted at 02:00 was
-    /// unreachable by semantic search until somebody restarted the pond.
+    /// Nothing else repairs a vectorless memory row after boot.
     #[tokio::test]
     async fn a_pass_embeds_a_memory_row_the_startup_backfill_has_already_missed() {
         use crate::user_data::domain::memory::{MemoryFragment, MemorySegment};
@@ -537,8 +527,7 @@ mod tests {
         );
     }
 
-    /// The memory sweep obeys the same one-bite rule as the context step, or a
-    /// household with a large store hands the lane slot to the embedder.
+    /// Same one-bite rule as the context step, or a large store monopolises the lane slot.
     #[tokio::test]
     async fn a_scheduled_pass_takes_one_bite_of_the_memory_backlog() {
         use crate::user_data::domain::memory::{MemoryFragment, MemorySegment};

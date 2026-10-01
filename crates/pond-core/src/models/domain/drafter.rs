@@ -44,9 +44,7 @@ pub fn drafter_path(data_dir: &std::path::Path, spec: &DrafterSpec) -> std::path
     data_dir.join("models").join("gguf").join(spec.filename)
 }
 
-// Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98), so
-// the switch and its registry reconcile are commented out rather than deleted; restore them
-// together if it returns.
+// Speculation left the engine; switch and reconcile kept commented out, to restore together.
 // // ── The speculation switch ──────────────────────────────────────────────────
 //
 // /// Default on: an install that has never touched the setting keeps speculative decoding, and

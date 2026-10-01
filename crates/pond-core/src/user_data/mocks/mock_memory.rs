@@ -59,11 +59,7 @@ pub struct MockMemoryRepository {
     lifecycle_updates: Arc<RwLock<Vec<(String, MemoryLifecycle)>>>,
     superseded: Arc<RwLock<Vec<(String, String)>>>,
     segment_updates: Arc<RwLock<Vec<(String, MemorySegment, f32)>>>,
-    /// Recorded in full rather than as a projection, because the batch
-    /// extraction engine READS its own audit rows back: the window key it logs
-    /// on a finished window is what stops a re-walk paying for stretches it has
-    /// already mined. A mock whose `get_events` returned nothing would make that
-    /// guard untestable and, worse, make it look tested.
+    /// Full rows, not a projection: batch extraction reads its window keys back via `get_events`.
     events: Arc<RwLock<Vec<MemoryEvent>>>,
     consolidation_runs: Arc<RwLock<Vec<RecordedConsolidationRun>>>,
 }
@@ -96,9 +92,6 @@ impl MockMemoryRepository {
     }
 
     /// Audit events recorded, in order: (kind, memory id, data).
-    ///
-    /// The projection the existing assertions are written against; the rows
-    /// themselves come back through [`MemoryRepository::get_events`].
     pub async fn events(&self) -> Vec<(MemoryEventKind, String, Option<String>)> {
         self.events
             .read()
@@ -261,8 +254,7 @@ impl MemoryRepository for MockMemoryRepository {
         Ok(())
     }
 
-    /// Newest first, like the SQLite adapter, so a caller that takes the first
-    /// match takes the most recent one in both.
+    /// Newest first, like the SQLite adapter.
     async fn get_events(&self, memory_id: Option<&str>, limit: usize) -> Result<Vec<MemoryEvent>> {
         let events = self.events.read().await;
         Ok(events

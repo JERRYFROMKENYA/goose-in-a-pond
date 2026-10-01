@@ -1,101 +1,12 @@
-//! The locked baseline for the memory-extraction write gate.
+//! Locked baseline for the memory-extraction write gate.
 //!
-//! It exists because no claim of the form "retrievability improved" is
-//! falsifiable without a number taken over fixtures the change cannot quietly
-//! edit. This file produces that number by replaying a synthetic household
-//! history through the real write gate and then asking the only question that
-//! matters of what lands in the store: if the household asked this, would the
-//! answer be in the prompt?
-//!
-//! It also produces the number the date rule is judged by. `date_leak_rate` was
-//! 0.158 against the per-turn extractor, which had no date rule at all, and is
-//! asserted to be zero now -- with the vacuity control that the fixtures must
-//! still CONTAIN dates, because a zero over date-free fixtures says nothing.
-//! That control is per CLASS and not only in aggregate: the first zero was
-//! measured over fixtures whose every date was one the stripper already
-//! handled, so an ISO date, a spelled ordinal, a spelled clock hour and a
-//! decade could all be stored whole with the gate reporting zero. Turns t30-t34
-//! and t37-t38 carry one of each, and the baseline test names them.
-//!
-//! There is a SECOND vacuity control, and it runs the other way. A zero is also
-//! purchasable by destroying every weekday the gate sees: take "each Saturday"
-//! out of "The user swims each Saturday morning" and nothing leaks, while the
-//! engine has thrown away the habit it exists to find and stored "The user
-//! swims morning." So t33-t36 plant recurrences and near-dates that must reach
-//! the store WHOLE, and the baseline test names those too. A recurrence names
-//! no day on any calendar; a numbered day of the month does, even when it
-//! repeats. [`recurrence_positions`] is where this auditor draws that line, and
-//! it had to learn it: an auditor that calls a habit a date forces the gate to
-//! destroy the habit to keep the number at zero.
-//!
-//! And a THIRD control, which changed direction when the date stripper was
-//! deleted. t39-t42 are the four classes the detector gets WRONG. While a
-//! stripper existed they had to be refused, because what it made of them --
-//! "The user prefers model of the tractor.", "The user keeps the oven." -- read
-//! well enough to pass every other rung and was invisible to `date_leak_rate`
-//! by construction. Nothing edits a note now, so a false positive costs the
-//! whole fact: four of the eight must be STORED word for word, and the four
-//! that are still refused are the boundary this design draws deliberately. A
-//! year used as a name is the same four digits as a year used as a date, and
-//! the model is the only thing that can tell them apart.
-//!
-//! What is real here, and what is not:
-//!
-//! - REAL: `BatchExtractionService` in its shipped writing mode -- the write
-//!   gate. `fact_defect` including its date rung, the lexical and semantic
-//!   dedup bands, the `names_subject` demotion, the tier and segment a kind
-//!   maps to. Nothing reaches the store without passing them, in production or
-//!   here, and the engine is driven through `run_pass` rather than through a
-//!   private helper, so window carving and the cursor are exercised too.
-//! - REAL: `rank_by_relevance`, the similarity/importance/recency blend that
-//!   decides which memories survive the per-turn token budget, and
-//!   `CompactionProfile`, which sets that budget from the context window.
-//! - REAL: the retrieval shape of `GooseAgent::topical_memories` -- a recency
-//!   pool unioned with a semantic pool, merged by id, ranked, then truncated.
-//!   Reproduced rather than called, because the adapter pulls the Goose
-//!   submodule and this test lives in the fast-crate pass.
-//! - STAND-IN: the model. `replies.jsonl` holds recorded outputs in the schema
-//!   the current extraction prompt asks for. This measures a ranker over
-//!   replies the author wrote; it cannot validate the model, which is what the
-//!   live-ignored GGUF runs are for.
-//! - NOT MEASURED AT ALL: the parser. `replies.jsonl` was recorded in the
-//!   schema the OLD per-turn prompt asked for -- `{"facts":[{content, segment,
-//!   importance}]}` -- and the batch parser cannot read it, by design: an
-//!   object carrying neither `memories` nor `reminders` is `Unparseable`
-//!   there, which is what stops a cursor advancing past a window nobody read.
-//!
-//!   So [`as_window_extraction`] translates the fixtures into the new shape at
-//!   load time, and what this harness measures is everything DOWNSTREAM of the
-//!   parser. That is deliberate on two counts. The parser has its own tests, in
-//!   the crate that owns it. And the Phase 0 fixtures are still here
-//!   byte-identical -- t01 to t29 have never been edited, only added to, which
-//!   is what keeps a later claim of "recall improved on identical fixtures"
-//!   meaning something. The five turns appended for the date classes are dated
-//!   across the existing history rather than piled at the end of it, so they do
-//!   not dominate the recency term.
-//!
-//!   The old mirror of the production parser is gone with it, and with it the
-//!   third copy of `strip_thinking` this file used to carry.
-//! - STAND-IN: the embedder. [`HashEmbedder`] is deterministic bag-of-tokens
-//!   over `content_tokens`, the production dedup tokeniser. It gives the
-//!   semantic path a real, stable signal with no model download and no network.
-//!   It is NOT a source of any claim about a particular embedding model.
-//!
-//! Every number the baseline test prints is also compared against
-//! `fixtures/memory-reachability/baseline.json`, and a value that moves fails
-//! the build. That is the whole point of the file: a later phase claiming
-//! "recall@5 improved" has to show the number moving, in a file, in the same
-//! commit, with a reason -- rather than asserting it against a memory of what
-//! the number used to be.
-//!
-//! The recorded metrics are the POST-CUTOVER ones. The per-turn extractor they
-//! were first taken over no longer exists, so its numbers could not be kept
-//! live without keeping it alive; they are preserved in `baseline.json`'s
-//! `history`, which is where a comparison between the two pipelines belongs.
-//!
-//! `include_str!` rather than a runtime read, for the same reason the
-//! personal-context corpus does it: a fixture that moves must fail the build,
-//! not silently produce an empty corpus that passes every assertion below.
+//! Replays a synthetic household history through the real gate and checks every metric
+//! against `fixtures/memory-reachability/baseline.json`. Real: the batch engine (via
+//! `run_pass`), `rank_by_relevance`, `CompactionProfile`. Stand-ins: the model
+//! (`replies.jsonl`), the embedder ([`HashEmbedder`]) and a copy of
+//! `GooseAgent::topical_memories` (the adapter needs Goose). The parser is not measured: the
+//! fixtures keep the old schema and [`as_window_extraction`] translates them. Never edit
+//! t01-t29, only append, and date new turns across the history so recency stays comparable.
 //!
 //! Print the baseline with:
 //!     cargo test -p pond-infra --test memory_reachability_corpus -- --nocapture
@@ -140,31 +51,23 @@ const QUERIES: &str = include_str!("fixtures/memory-reachability/queries.jsonl")
 const EXPECTATIONS: &str = include_str!("fixtures/memory-reachability/expectations.jsonl");
 const BASELINE: &str = include_str!("fixtures/memory-reachability/baseline.json");
 
-/// `memory_extraction_max_facts`'s shipped default. Held as a constant rather
-/// than read from `Settings` so the baseline is a property of the corpus and
-/// not of whatever the settings default happens to be on the day.
+/// `memory_extraction_max_facts`'s default, pinned so the baseline doesn't track `Settings`.
 const MAX_FACTS_PER_TURN: usize = 3;
 
-/// `agent_memory_limit`'s shipped default: how many fragments reach the prompt.
-/// The "5" in recall@5.
+/// `agent_memory_limit`'s default: fragments reaching the prompt (the 5 in recall@5).
 const INJECTION_LIMIT: usize = 5;
 
-/// `MEMORY_CANDIDATE_FANOUT` and `MEMORY_CANDIDATE_FLOOR` from `goose_agent.rs`,
-/// which decide how wide a pool the ranker gets to choose from.
+/// `MEMORY_CANDIDATE_FANOUT` and `MEMORY_CANDIDATE_FLOOR` from `goose_agent.rs`.
 const CANDIDATE_FANOUT: usize = 8;
 const CANDIDATE_FLOOR: usize = 40;
 
-/// The bands the batch engine will dedup and reinforce on. Recorded here at
-/// Phase 0 so the histogram that calibrates them is measured against the same
-/// numbers the design proposes, rather than against whatever they became.
+/// Same/Related band thresholds as designed, pinned here rather than read from the engine.
 const SAME_BAND: f32 = 0.94;
 const RELATED_BAND: f32 = 0.78;
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
-/// The corpus's anchored moment, not the wall clock: every recency score below
-/// would drift with the calendar otherwise, and a baseline that changes daily
-/// is not a baseline.
+/// The corpus's anchored "now"; the wall clock would make recency scores drift daily.
 fn corpus_now() -> DateTime<Utc> {
     let m: Value = serde_json::from_str(MANIFEST).expect("manifest");
     m["corpus_now"]
@@ -269,14 +172,8 @@ fn expectations() -> Vec<Expectation> {
 
 // ── The stand-in embedder ───────────────────────────────────────────────────
 
-/// Deterministic bag-of-tokens embedding, so the semantic path has a real and
-/// stable signal without a model download.
-///
-/// Tokenised with `content_tokens`, the production dedup tokeniser, so the
-/// vector sees the same words the lexical dedup pass does. "user" is dropped on
-/// top of that: every well-formed fact in this corpus names the user by
-/// construction, so keeping it would add the same constant to every pair and
-/// lift the whole band histogram by a number that means nothing.
+/// Deterministic bag-of-tokens embedding over `content_tokens`, minus "user": every fact
+/// names the user, so it would lift every pair's cosine by the same meaningless amount.
 struct HashEmbedder {
     dims: usize,
 }
@@ -295,9 +192,7 @@ impl EmbeddingProvider for HashEmbedder {
             if token == "user" {
                 continue;
             }
-            // FNV-1a, spelled out rather than hashed with DefaultHasher: that
-            // one is explicitly not stable across releases, and a baseline that
-            // moves when the toolchain moves is not a baseline.
+            // FNV-1a by hand: `DefaultHasher` isn't stable across Rust releases.
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
             for b in token.as_bytes() {
                 h ^= *b as u64;
@@ -325,11 +220,7 @@ impl EmbeddingProvider for HashEmbedder {
 
 // ── The recorded extractor ──────────────────────────────────────────────────
 
-/// Answers each window with the facts recorded for the turn inside it.
-///
-/// Every window here is exactly one turn, because the corpus is driven one turn
-/// at a time -- see [`build_corpus`]. The key is the window id, which is the
-/// last message in the window, which is that turn's assistant message.
+/// Answers each one-turn window (see [`build_corpus`]) with that turn's recorded facts.
 struct RecordedExtractor {
     by_window: BTreeMap<String, WindowExtraction>,
 }
@@ -348,25 +239,8 @@ impl ConversationExtractor for RecordedExtractor {
     }
 }
 
-/// Translate one recorded reply into the shape the batch engine reads.
-///
-/// The fixtures are in the OLD schema and are kept that way on purpose: a
-/// baseline is only a baseline while the corpus underneath it is unchanged.
-/// The batch parser refuses that schema outright -- an object carrying neither
-/// `memories` nor `reminders` is `Unparseable`, which is what keeps a cursor
-/// from advancing past a window nobody read -- so the translation happens here
-/// and what this harness measures is everything after the parser.
-///
-/// The seven stored segments map onto the five the catalogue allows. Two of the
-/// old labels have no equivalent and are NOT dropped:
-///
-/// - `project` becomes `routine`. An ongoing piece of work somebody returns to
-///   across days is the closest the five values come to it.
-/// - `knowledge` and `identity` become `context`. That is also what the new
-///   prompt would elicit for them, and it puts them where the subject gate can
-///   see them: a "knowledge" fact that never names the household is exactly the
-///   shape that put five biography facts into the identity segment, and under
-///   this mapping it is demoted rather than admitted.
+/// Translate an old-schema recorded reply into what the batch engine reads (its parser
+/// rejects that schema). `identity`/`knowledge` map to `context` so the subject gate sees them.
 fn as_window_extraction(raw: &str) -> WindowExtraction {
     let mut extraction = WindowExtraction::default();
     for value in recorded_facts(raw) {
@@ -382,8 +256,7 @@ fn as_window_extraction(raw: &str) -> WindowExtraction {
             .and_then(|s| s.as_str())
             .and_then(as_kind)
         else {
-            // A label outside the catalogue is what the parser counts as
-            // rejected, so it is counted the same way here.
+            // The parser counts an unknown label as rejected; match it.
             extraction.rejected += 1;
             continue;
         };
@@ -395,11 +268,7 @@ fn as_window_extraction(raw: &str) -> WindowExtraction {
     extraction
 }
 
-/// Read a stored segment name, for the expectations file.
-///
-/// The seven the STORE holds, not the five the model may choose: an
-/// expectation says where a fact ended up, and `knowledge` is a place facts end
-/// up by demotion even though nothing may ask for it.
+/// Parse an expected segment: any of the seven stored ones, as demotion can land in `knowledge`.
 fn parse_segment(s: &str) -> Option<MemorySegment> {
     match s.to_lowercase().as_str() {
         "identity" => Some(MemorySegment::Identity),
@@ -425,12 +294,7 @@ fn as_kind(segment: &str) -> Option<MemoryKind> {
     }
 }
 
-/// Pull the facts array out of a recorded reply.
-///
-/// Fixture parsing, not a mirror of the production parser: it reads a file this
-/// repository wrote, in a schema this repository chose, and the only reason it
-/// has to cope with a `<think>` block at all is that one recorded reply has one
-/// in it.
+/// Pull the facts array out of a recorded reply; fixture parsing, not the production parser.
 fn recorded_facts(raw: &str) -> Vec<Value> {
     let cleaned = match (raw.find("<think>"), raw.find("</think>")) {
         (Some(open), Some(close)) => format!("{}{}", &raw[..open], &raw[close + 8..]),
@@ -454,26 +318,12 @@ fn facts_array(text: &str) -> Option<Vec<Value>> {
     v.as_array().cloned()
 }
 
-/// What the write gate would store for a recorded fact, if it stores it.
-///
-/// The model's own sentence, whitespace collapsed and an invented label prefix
-/// dropped. Nothing else: there is no longer a step that edits a note on its
-/// way to the store, so this is very nearly the identity function and is kept
-/// as a function only because `normalise_fact_content` is still real.
-///
-/// It used to run the date stripper too, which is why attribution needed it at
-/// all. The DATE AUDIT still deliberately does not use it -- it scans the
-/// stored row with its own independent scanner, because a gate that grades its
-/// own homework proves nothing.
+/// What the write gate stores for a recorded fact: whitespace collapsed, label prefix dropped.
 fn as_stored(content: &str) -> String {
     normalise_fact_content(content)
 }
 
-/// The write gate's verdict on a recorded fact.
-///
-/// One call now. The date rule is a rung inside `fact_defect` rather than a
-/// rewrite in front of it, so there is no second verdict to combine and no
-/// order to get wrong. See `memory_extraction`'s own gate, which this mirrors.
+/// The write gate's verdict on a recorded fact; mirrors `memory_extraction`'s gate.
 fn write_gate_verdict(content: &str) -> Option<FactDefect> {
     fact_defect(&normalise_fact_content(content))
 }
@@ -519,14 +369,7 @@ const WEEKDAYS: &[&str] = &[
 
 const RELATIVE: &[&str] = &["tomorrow", "yesterday", "tonight", "today"];
 
-/// Spelled days of the month and spelled clock hours.
-///
-/// Both are flagged only with a word in front of them -- "on the fourteenth"
-/// and "at six" -- because both words have an ordinary non-date reading that
-/// the corpus actually contains: "waters the beds FIRST thing every morning" is
-/// a stored routine, and "SIX chickens" is a count. An auditor that flagged
-/// them bare would report a leak on a row carrying no date, which is the one
-/// direction a measurement whose target is zero must not err in.
+/// Spelled days and hours are dates only after a lead word ("on the fourteenth", "at six").
 const SPELLED_DAYS: &[&str] = &[
     "first",
     "second",
@@ -575,12 +418,7 @@ fn is_day_number(w: &str) -> bool {
         && (1..=31).contains(&w.parse().unwrap_or(0))
 }
 
-/// The pieces of a number written with separators, for the year test.
-///
-/// The token is kept whole by the tokeniser so that this can tell "2027-11-03"
-/// from "2019.1". A dot with two parts is how software is numbered and is not a
-/// date in any notation a household writes; everything else hands back its
-/// parts, and a single plain number hands back itself.
+/// Parts of a separated number for the year test; none for a dotted version like "2019.1".
 fn numeric_parts(w: &str) -> Vec<&str> {
     for sep in ['-', '/', '.'] {
         if !w.contains(sep) {
@@ -595,22 +433,13 @@ fn numeric_parts(w: &str) -> Vec<&str> {
     vec![w]
 }
 
-/// Which token positions name a weekday or month that RECURS.
-///
-/// A recurrence is a habit, not a date: it names no day on any calendar, there
-/// is no appointment to make from it, and nothing in it can go stale. "The user
-/// swims each Saturday" is precisely what the extractor was asked to capture.
-///
-/// Four ways a household says one, and the auditor has to know all four or it
-/// reports leaks on rows carrying no date -- the one direction a measurement
-/// whose target is zero must not err in, because the only way to drive the
-/// number back down is to make the gate destroy the habit.
+/// Token positions of weekdays/months that recur ("each Saturday"): a habit, not a date.
+/// A missed form reports a false leak that the gate could only fix by destroying the habit.
 fn recurrence_positions(words: &[&str]) -> BTreeSet<usize> {
     let named = |w: &str| MONTHS.contains(&w) || WEEKDAYS.contains(&w);
     let mut out = BTreeSet::new();
     for (i, w) in words.iter().enumerate() {
-        // Plural: "on Saturdays", "eats no meat on weekdays". It marks itself,
-        // because a plural weekday cannot name one day.
+        // Plural: "on Saturdays", "on weekdays"; a plural cannot name one day.
         if w.strip_suffix('s').is_some_and(named) || *w == "weekdays" || *w == "weekends" {
             out.insert(i);
             continue;
@@ -630,8 +459,7 @@ fn recurrence_positions(words: &[&str]) -> BTreeSet<usize> {
             out.insert(i + 2);
             continue;
         }
-        // A list continuing one: "each March and October". Only immediately
-        // after a name already found to recur.
+        // A list continuing one: "each March and October".
         if matches!(before, Some("and" | "or"))
             && i.checked_sub(2).is_some_and(|j| out.contains(&j))
         {
@@ -641,13 +469,7 @@ fn recurrence_positions(words: &[&str]) -> BTreeSet<usize> {
     out
 }
 
-/// Whether stored content carries a calendar date, as an INDEPENDENT auditor.
-///
-/// Deliberately not the production `carries_calendar_date`, and not a call to
-/// it either: a gate that grades its own homework proves nothing. This scanner
-/// is what says whether the gate worked, so it had to be written without
-/// reference to it. It errs toward finding dates, which is the safe direction
-/// for a measurement whose target value is zero.
+/// Whether stored content carries a date; independent of `carries_calendar_date` on purpose.
 fn carries_a_date(content: &str) -> bool {
     let lower = content.to_lowercase();
     let words: Vec<&str> = lower
@@ -656,21 +478,8 @@ fn carries_a_date(content: &str) -> bool {
         .filter(|w| !w.is_empty())
         .collect();
     let recurring = recurrence_positions(&words);
-    // Whether the sentence describes something that happens again and again,
-    // which is what decides whether a CLOCK TIME in it is a date.
-    //
-    // The auditor learned the same distinction one pass ago for weekdays, and
-    // this is the rest of it: "runs the standup every Monday at 09:00" is one
-    // fact, and calling its nine o'clock a leak would force the gate to refuse
-    // the habit to keep this number at zero -- the exact trap the weekday
-    // carve-out was added to escape. A SPECIFIC date in a recurring sentence is
-    // untouched by this: nothing about "every" makes 3 November 2027 repeat,
-    // and the month, year and ordinal rules below never consult it.
-    //
-    // The adverbs are here for the same reason as "each" and "every": "takes
-    // his pills daily at 9am" is one habit and its nine o'clock cannot go
-    // stale. An auditor that knew a narrower set than the gate would fail the
-    // build on a fixture nobody has written yet, for a leak that is not one.
+    // In a habitual sentence ("every Monday at 09:00", "daily at 9am") a clock time belongs to
+    // the habit. Only the clock-time rules below consult this; its words must cover the gate's.
     let habitual = !recurring.is_empty()
         || words.iter().any(|w| {
             matches!(
@@ -680,24 +489,11 @@ fn carries_a_date(content: &str) -> bool {
         });
 
     for (i, w) in words.iter().enumerate() {
-        // A weekday or month governed by a recurrence is NOT a date, and an
-        // auditor that said otherwise was making the same mistake as the
-        // stripper it grades, one level up: "swims each Saturday" is the habit
-        // the extractor exists to find, and counting it as a leak would force
-        // the gate to destroy it to keep this number at zero.
+        // A recurring weekday or month is a habit, not a date.
         if recurring.contains(&i) {
             continue;
         }
-        // "may" is a month and it is also the commonest modal in English, and
-        // the auditor has to know that or it reports a leak on "The user may
-        // travel to Kisumu" -- a row carrying no date at all. It is a month
-        // here only where the words around it have already fixed the reading:
-        // after a preposition ("in May"), or beside a day number ("3 May").
-        //
-        // The same class of false positive as the version string and the birth
-        // order above it, and the same reason for fixing it: while the auditor
-        // calls a non-date a date, the only way to hold date_leak_rate at zero
-        // is for the gate to throw the fact away.
+        // "may" is usually the modal: a month only after a preposition or beside a day number.
         let ambiguous_month = *w == "may"
             && !(i > 0 && matches!(words[i - 1], "in" | "on" | "by" | "since" | "until" | "of"))
             && !words.get(i + 1).is_some_and(|n| is_day_number(n))
@@ -706,14 +502,7 @@ fn carries_a_date(content: &str) -> bool {
         {
             return true;
         }
-        // A four-digit 19xx/20xx year, and a decade built on one ("the 1990s").
-        // The year test is also what catches every separated numeric date:
-        // `numeric_parts` hands back the pieces of "2027-11-03" and
-        // "14/03/1984", and hands back nothing for "2019.1", which is a version
-        // string. The auditor flagged that one as a leak on a row carrying no
-        // date at all -- the same false positive the stripper had, which is how
-        // both of them came to rewrite "The user's build is 2019.1 of the
-        // firmware" into a sentence that is not one.
+        // A 19xx/20xx year or decade ("the 1990s"); via `numeric_parts`, also every separated date.
         for part in numeric_parts(w) {
             for candidate in [part, part.strip_suffix('s').unwrap_or(part)] {
                 if candidate.len() == 4 && candidate.chars().all(|c| c.is_ascii_digit()) {
@@ -724,12 +513,7 @@ fn carries_a_date(content: &str) -> bool {
                 }
             }
         }
-        // "on the fourteenth", "the third of May". A spelled ordinal is a day
-        // of the month only when a month follows it or nothing does. "The
-        // user's daughter is the second of four" is birth order -- a
-        // relationship fact -- and flagging it reported a leak on a row that
-        // names no day, which forces the gate to destroy a true memory to get
-        // this number back to zero.
+        // "on the fourteenth": a date only if a month or nothing follows ("the second of four").
         if SPELLED_DAYS.contains(w)
             && i > 0
             && matches!(words[i - 1], "the" | "on" | "of" | "by" | "until")
@@ -739,9 +523,7 @@ fn carries_a_date(content: &str) -> bool {
         {
             return true;
         }
-        // A numbered day of the month: "the 1st", "on the 14th". Not a
-        // recurrence even when it repeats -- "the 1st of every month" is the
-        // day a reminder is set for, and the number is the whole content of it.
+        // A numbered day ("the 1st", "on the 14th") is a date even in "the 1st of every month".
         if let Some(digits) = w
             .strip_suffix("st")
             .or_else(|| w.strip_suffix("nd"))
@@ -768,11 +550,7 @@ fn carries_a_date(content: &str) -> bool {
         {
             return true;
         }
-        // Every rule from here down is about a CLOCK TIME, and a clock time
-        // inside a habit belongs to the habit. See `habitual` above. The rules
-        // ABOVE this line are deliberately not under it: "next week" and "in
-        // three weeks" name one stretch of calendar time whatever else the
-        // sentence says.
+        // Only clock-time rules below; the relative dates above count even in a habitual sentence.
         if habitual {
             continue;
         }
@@ -828,8 +606,7 @@ enum Outcome {
 }
 
 struct Corpus {
-    /// Every stored fragment, `created_at` restamped from the turn that
-    /// produced it so the recency term is the corpus's and not the clock's.
+    /// Every stored fragment, `created_at` restamped to its turn's time for the recency term.
     fragments: Vec<MemoryFragment>,
     /// fact key -> what happened to it.
     outcomes: BTreeMap<String, Outcome>,
@@ -837,31 +614,13 @@ struct Corpus {
     recorded: BTreeMap<String, String>,
     /// fact key -> stored fragment id, for keys that reached the store.
     stored_ids: BTreeMap<String, String>,
-    /// fact key -> its highest cosine against the store AS IT STOOD when the
-    /// fact was offered.
-    ///
-    /// Measured at offer time on purpose. The bands the batch engine will act
-    /// on are a property of a candidate against the store, not of two rows that
-    /// both survived: dedup drops the near-duplicates, so a histogram taken over
-    /// stored pairs afterwards can only ever say "everything is New" -- which is
-    /// precisely the loss reinforcement exists to recover.
+    /// fact key -> its highest cosine against the store at offer time (afterwards, dedup has
+    /// removed the near-duplicates the bands exist to catch).
     best_sim_at_offer: BTreeMap<String, f32>,
 }
 
-/// Replay the whole history through the real write gate.
-///
-/// One turn per `run_pass`, against a session storage holding only that turn.
-/// That is not a shortcut around the engine -- the pass still carves the
-/// window, resolves the subject, bands every candidate and advances the cursor
-/// -- it is how the corpus keeps its own order. Driven against one storage
-/// holding all five conversations, `order_pass` would read the newest
-/// conversation first and drain the rest by backlog age, so the turns that
-/// deliberately RESTATE an earlier fact could be processed before the fact they
-/// restate. The store would then hold the restatement and drop the original,
-/// which inverts exactly what the corpus was written to show.
-///
-/// The memory repository is shared across every turn, so dedup sees the store
-/// growing as the household talks, which is the thing being measured.
+/// Replay the history through the real write gate, one turn per `run_pass`: given all turns,
+/// `order_pass` reads newest first and would store restatements before their originals.
 async fn build_corpus() -> Corpus {
     let turns = turns();
     let replies = replies();
@@ -872,10 +631,7 @@ async fn build_corpus() -> Corpus {
         let raw = replies
             .get(&t.turn_id)
             .expect("a turn with no recorded reply");
-        // `Outcome::Deduped` is attributed by elimination -- offered, no
-        // defect, not in the store -- so a turn that overflowed `max_memories`
-        // would be mislabelled as a duplicate. The corpus is written not to
-        // overflow, and that is checked here rather than assumed.
+        // `Deduped` is inferred by elimination, so a turn overflowing the cap would be mislabelled.
         let offered = as_window_extraction(raw);
         let well_formed = offered
             .memories
@@ -898,10 +654,7 @@ async fn build_corpus() -> Corpus {
         .with_embedding_provider(Arc::new(HashEmbedder::new()) as Arc<dyn EmbeddingProvider>);
     let repo = MockMemoryRepository::new();
 
-    // The shipped configuration, read the way production reads it, so a
-    // settings default that moves moves this measurement too. The subject is
-    // the anonymous one: every fact in this corpus is written "The user ...",
-    // which is the wording the gate accepts with no alias at all.
+    // Shipped defaults; the anonymous subject, since every fact says "The user ...".
     let mut settings = Settings::default();
     settings.memory_extraction_window_messages = 2;
     settings.memory_extraction_sessions_per_pass = 1;
@@ -922,9 +675,7 @@ async fn build_corpus() -> Corpus {
         let offered = as_window_extraction(raw);
         let window_id = format!("{}-a", t.turn_id);
 
-        // The store as the engine sees it when this window is offered. Scored
-        // against the sentence that would actually be EMBEDDED, which is now
-        // the model's own -- nothing edits a note on its way to the store.
+        // The store as the engine sees it when this window is offered.
         let snapshot = repo
             .search_recent(&ProfileScope::Household, usize::MAX)
             .await
@@ -990,14 +741,8 @@ async fn build_corpus() -> Corpus {
             t.turn_id
         );
 
-        // Attribute. The write loop stores in offer order, so the rows this
-        // turn added form a SUBSEQUENCE of its facts, in order -- claimed
-        // one at a time rather than looked up in a content-keyed map. The
-        // corpus deliberately restates facts word for word, and a map hands
-        // the stored row to the LAST key carrying that content: that
-        // mislabelled originals as duplicates, moved their `created_at`, and
-        // shifted recall@5 by twenty points. An artefact of the harness,
-        // reported as a property of the store.
+        // Rows are stored in offer order, so claim them as a subsequence of this turn's facts: a
+        // content-keyed map would hand a verbatim restatement's row to the last key.
         let mut fresh: Vec<MemoryFragment> = repo
             .search_recent(&ProfileScope::Household, usize::MAX)
             .await
@@ -1048,10 +793,7 @@ async fn build_corpus() -> Corpus {
         .await
         .expect("mock read");
 
-    // `from_window_extraction` stamps the wall clock, so a replay writes the
-    // whole history inside one second and the recency term collapses to a
-    // constant -- which is exactly the failure a real backfill has to avoid,
-    // and not something a baseline should be measured through.
+    // `from_window_extraction` stamps the wall clock, which would collapse the recency term.
     for f in fragments.iter_mut() {
         f.created_at = *stamped
             .get(&f.id)
@@ -1069,9 +811,7 @@ async fn build_corpus() -> Corpus {
 
 // ── Retrieval, as the agent does it ─────────────────────────────────────────
 
-/// The candidate pool `GooseAgent` assembles for one turn: a recency slice
-/// unioned with a semantic slice, merged by id, keeping the similarity of
-/// anything the semantic path returned.
+/// `GooseAgent`'s candidate pool for a turn: recency and semantic slices merged by id.
 async fn candidates_for(
     query: &str,
     fragments: &[MemoryFragment],
@@ -1087,8 +827,7 @@ async fn candidates_for(
     let mut pool: Vec<(MemoryFragment, Option<f32>)> =
         recent.into_iter().map(|f| (f, None)).collect();
 
-    // Semantic slice, scored exactly as `topical_memories` scores it: a vector
-    // of a different width forfeits the similarity term rather than scoring 0.0.
+    // Semantic slice as `topical_memories` scores it: a width mismatch gets no similarity.
     let mut scored: Vec<(f32, MemoryFragment)> = fragments
         .iter()
         .filter_map(|f| {
@@ -1113,9 +852,7 @@ async fn candidates_for(
     pool
 }
 
-/// What actually reaches the prompt at one context window: the fragment cap
-/// from the compaction profile, then the token budget, spent with the same
-/// chars/4 heuristic the injection loop uses.
+/// What reaches the prompt at one context window, costed at chars/4 like the injection loop.
 fn within_budget(ranked: &[(MemoryFragment, Option<f32>)], window: usize) -> Vec<&MemoryFragment> {
     let profile = CompactionProfile::from_context_window(window);
     let mut used = 0usize;
@@ -1133,12 +870,7 @@ fn within_budget(ranked: &[(MemoryFragment, Option<f32>)], window: usize) -> Vec
 
 // ── The measurements ────────────────────────────────────────────────────────
 
-/// The write gate does what the corpus says it should.
-///
-/// Only the deliberate cases are asserted -- the four defects, the two
-/// demotions, and the handful of facts the query set depends on. Dedup outcomes
-/// are deliberately NOT expectations: they are a measured property of the corpus
-/// and they belong in `dup_rate`, where a later phase can move them.
+/// Only planted cases are expected; incidental dedup outcomes are measured by the baseline.
 #[tokio::test]
 async fn the_write_gate_disposes_of_every_planted_fact_as_the_corpus_expects() {
     let corpus = build_corpus().await;
@@ -1156,11 +888,7 @@ async fn the_write_gate_disposes_of_every_planted_fact_as_the_corpus_expects() {
         let ok = match (exp.expect.as_str(), outcome) {
             ("rejected", Outcome::Refused(d)) => exp.defect.as_ref().is_none_or(|want| want == d),
             ("stored", Outcome::Stored(_)) => true,
-            // Worth naming rather than leaving to the aggregate count: a fact
-            // expected to collapse onto one the store already holds is
-            // asserting that two wordings of one thing are read as one thing.
-            // If dedup regressed, this row would be STORED, and the reason
-            // would be two numbers away from the cause.
+            // Named rather than left to the aggregate, so a dedup regression fails on this row.
             ("deduped", Outcome::Deduped) => true,
             ("demoted", Outcome::Stored(seg)) => exp
                 .to_segment
@@ -1199,9 +927,6 @@ async fn the_write_gate_disposes_of_every_planted_fact_as_the_corpus_expects() {
     );
 }
 
-/// The baseline itself. Everything a later phase is judged against is printed
-/// here, and the assertions are the ones that guard the premise plus the one
-/// number this phase set out to move.
 #[tokio::test]
 async fn the_write_gate_baseline() {
     let corpus = build_corpus().await;
@@ -1209,10 +934,7 @@ async fn the_write_gate_baseline() {
     let embedder = HashEmbedder::new();
     let fragments = &corpus.fragments;
 
-    // Every number printed below is also collected here and compared against
-    // `baseline.json` at the end. A baseline nobody can diff against is a
-    // paragraph in a design document; a baseline in a file that fails the build
-    // when it moves is a measurement.
+    // Every printed number, compared against `baseline.json` at the end.
     let mut measured: BTreeMap<String, f64> = BTreeMap::new();
 
     // ── what the gate let through ────────────────────────────────────────
@@ -1257,11 +979,7 @@ async fn the_write_gate_baseline() {
     println!("  stored by segment: {by_segment:?}");
 
     // ── date_leak_rate ───────────────────────────────────────────────────
-    // The number the whole date half of the design is judged against, and the
-    // one the cutover was supposed to drive to zero. It was 0.158 against the
-    // per-turn extractor, which had no date rule at all; the vacuity control
-    // is `recorded_with_dates` below, which must stay non-zero -- a zero over
-    // date-free fixtures would mean nothing whatever.
+    // Must be zero; `recorded_with_dates` must not be, or the zero is vacuous.
     let leaking: Vec<&MemoryFragment> = fragments
         .iter()
         .filter(|f| carries_a_date(&f.content))
@@ -1286,9 +1004,7 @@ async fn the_write_gate_baseline() {
     measured.insert("date_leak_rate".into(), date_leak_rate as f64);
 
     // ── dup_rate ─────────────────────────────────────────────────────────
-    // Pairs the dedup pass let through that `is_duplicate_content` still calls
-    // duplicates. Counted over stored rows, because that is what the household
-    // reads.
+    // Stored pairs that `is_duplicate_content` still calls duplicates.
     let mut dup_pairs: Vec<(&str, &str)> = Vec::new();
     for (i, a) in fragments.iter().enumerate() {
         for b in fragments.iter().skip(i + 1) {
@@ -1299,10 +1015,7 @@ async fn the_write_gate_baseline() {
     }
     let dup_rate = dup_pairs.len() as f32 / fragments.len() as f32;
 
-    // The same question asked semantically. The lexical rule and the cosine
-    // disagree on this corpus, and which of them is right is exactly what the
-    // Related band is a decision about -- so both numbers are reported rather
-    // than one of them chosen here.
+    // The same by cosine, which disagrees with the lexical rule here; both are reported.
     let mut near_dup_pairs: Vec<(&str, &str, f32)> = Vec::new();
     for (i, a) in fragments.iter().enumerate() {
         for b in fragments.iter().skip(i + 1) {
@@ -1338,18 +1051,12 @@ async fn the_write_gate_baseline() {
     measured.insert("near_dup_pairs".into(), near_dup_pairs.len() as f64);
 
     // ── band histogram ───────────────────────────────────────────────────
-    // What the batch engine's Same / Related / New bands would have seen, each
-    // candidate scored against the store as it stood when the candidate was
-    // offered. Recorded at Phase 0 so the thresholds are picked against a
-    // measured distribution rather than a guess -- and so the facts dedup threw
-    // away are visible, which over stored pairs alone they never are.
+    // Same / Related / New per candidate, scored against the store at offer time.
     let mut same: Vec<&str> = Vec::new();
     let mut related: Vec<&str> = Vec::new();
     let mut fresh = 0usize;
     let mut banded = 0usize;
     for (key, sim) in &corpus.best_sim_at_offer {
-        // A fact the parser refused never reaches a band: there is nothing to
-        // compare, because there is nothing to store.
         if matches!(corpus.outcomes.get(key), Some(Outcome::Refused(_))) {
             continue;
         }
@@ -1525,22 +1232,14 @@ async fn the_write_gate_baseline() {
     }
     println!();
 
-    // Premise guards. Each one, if it fires, says the harness stopped being able
-    // to see the thing it exists to measure.
+    // Premise guards: each firing means the harness can no longer see what it measures.
     assert!(
         recorded_with_dates > 0,
         "not one recorded fact contains a calendar date, so date_leak_rate is zero for the \
          wrong reason: the auditor has nothing to find. This is the vacuity control for the \
          assertion below it, and it is about the FIXTURES -- fix the corpus, not the gate."
     );
-    // The same control, per class rather than in aggregate. The first zero this
-    // file recorded was taken over fixtures that contained none of these
-    // shapes, so for every one of them the gate was passing vacuously: measured
-    // against eleven probes, the stripper returned had_date=false AND
-    // defect=None for nine, and mangled the other two into sentences that
-    // passed the gate anyway. One fact per class, named, so that deleting one
-    // fails the build instead of quietly restoring a zero that means nothing
-    // for that class.
+    // The same control per date class, so deleting one class's fixture fails the build.
     for (key, class) in [
         ("t30:0", "an ISO 8601 date, which is ONE whitespace token"),
         ("t30:1", "a slash date, likewise one token"),
@@ -1570,13 +1269,8 @@ async fn the_write_gate_baseline() {
              either way date_leak_rate stops covering that class."
         );
     }
-    // The other half of the same control, and the one the previous pass did
-    // not have. A zero for date_leak_rate is cheap if the gate simply destroys
-    // every weekday it sees: "The user swims each Saturday morning" becomes
-    // "The user swims morning", the auditor finds no date, and the number says
-    // the rule worked while the engine has thrown away the habit it exists to
-    // capture. So each of these has to reach the store WHOLE, and has to be
-    // read as carrying no date by an auditor that knows the difference.
+    // The reverse control: a gate that destroyed every weekday would also score zero, so these
+    // recurrences must be stored whole and audited as carrying no date.
     for (key, class) in [
         ("t33:0", "a plural weekday, which cannot name one day"),
         ("t34:0", "two month names in a list, marked by \"each\""),
@@ -1621,28 +1315,8 @@ async fn the_write_gate_baseline() {
             "{key} carries {class} and did not reach the store intact"
         );
     }
-    // The THIRD control, and the one that changed direction when the stripper
-    // was deleted. The two above guard the DETECTOR: it must find the dates,
-    // and it must leave the habits alone. This one guards the thing that used
-    // to sit between them -- the EDIT -- and there is no longer an edit, so it
-    // now asserts the opposite of what it did.
-    //
-    // Every sentence here was being MANGLED into the store by one of the four
-    // stripper passes: "The user prefers model of the tractor.", "The user
-    // keeps the oven.", "The user's cat is called.", "The user travel to
-    // Kisumu." Each reads well enough to pass every other rung, so
-    // `date_leak_rate` could never see them -- a strip that takes a date that
-    // was never there leaves a sentence carrying no date and no meaning either.
-    //
-    // Four of them are now STORED, word for word, because the detector was
-    // narrowed to the shapes the models were measured to leak and a bare
-    // integer after "at" is not one of them (36 of 36 clean windows across six
-    // models). The other four are REFUSED, and that is the boundary this change
-    // draws on purpose: a year used as a name and a digit ordinal naming a
-    // floor are the same tokens as a year used as a date and a day of the
-    // month, and nothing inside a token stream tells them apart. Refusing loses
-    // one fact that is still in the conversation; storing keeps a year that is
-    // read back as a date for as long as the pond runs.
+    // The detector's known false positives: these must be stored verbatim. The four after them
+    // (a year or digit ordinal used as a name) are refused on purpose: the tokens match a date.
     for (key, class) in [
         ("t40:0", "a quantity after a clock lead: the oven at 180"),
         (

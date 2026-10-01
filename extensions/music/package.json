@@ -1,12 +1,12 @@
 {
   "name": "giap-music-extension",
   "version": "0.1.0",
-  "description": "MCP extension for music playback and playlist management via Spotify",
+  "description": "MCP extension for music playback and playlist management via Spotify or Apple Music",
   "type": "module",
   "scripts": {
     "start": "npx tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/providers/*.test.ts"
+    "test": "tsx --test src/*.test.ts src/providers/*.test.ts src/providers/apple/*.test.ts src/providers/player/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.1",

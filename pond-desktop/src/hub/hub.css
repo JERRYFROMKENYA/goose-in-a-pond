@@ -491,19 +491,20 @@
 .np__art {
   width: 44px;
   height: 44px;
-  border-radius: 11px;
+  border-radius: 4px;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   overflow: hidden;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.12);
 }
 
+/* Spotify's design guidelines: the cover art as supplied, never cropped (contain), with no overlay or
+   filter, and corners of 4px at this size. So no shadow or scrim sits on it either. */
 .np__artImg {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .np--tile {
@@ -517,7 +518,7 @@
   width: 64px;
   height: 64px;
   margin: 0 auto 10px;
-  border-radius: 16px;
+  border-radius: 4px;
 }
 
 .np__info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
@@ -527,20 +528,28 @@
 .np__bar { height: 4px; border-radius: 2px; background: #EEE; margin-top: 9px; overflow: hidden; }
 .np__bar span { display: block; height: 100%; background: var(--pp); border-radius: 2px; }
 
-/* A real cover art background needs light text/controls and a scrim-safe
-   track, since the swatch that used to carry contrast on its own is gone. */
-.np--has-art { border-color: transparent; }
-/* Without the old thumbnail's height, a tile with little text would leave the
-   art as a thin strip rather than an actual background — give it room. */
-.np--tile.np--has-art { min-height: 180px; justify-content: flex-end; }
-/* `.np__info` normally grows to fill the row layout of the `bar` variant;
-   here that swallowed all the height `min-height` added, stranding the
-   controls at the bottom with a gap instead of grouping with the text. */
-.np--tile.np--has-art .np__info { flex: none; }
-.np--has-art .np__track { color: #fff; }
-.np--has-art .np__artist { color: rgba(255, 255, 255, 0.78); }
-.np--has-art .np__bar { background: rgba(255, 255, 255, 0.28); }
-.np--has-art .np__bar span { background: #fff; }
+/* Spotify's credit: its logo, then the link back to the item in the guidelines' own words. */
+.np__credit { display: flex; align-items: center; min-height: 24px; }
+.np--tile .np__credit { justify-content: center; }
+/* Spotify's full logo, unaltered, 21px tall (77px wide: its minimum is 70), black on the light theme and
+   white on the dark one, with clear space of at least half the icon's height around it. */
+.np__logo { height: 21px; width: auto; display: block; margin: 11px 11px 11px 0; }
+.np__logo--on-dark { display: none; }
+:root[data-theme="dark"] .np__logo--on-light { display: none; }
+:root[data-theme="dark"] .np__logo--on-dark { display: block; }
+.np__link {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  background: none;
+  border: none;
+  padding: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.np__play:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .np__ctrls { display: flex; align-items: center; gap: 4px; }
 .np--tile .np__ctrls { justify-content: center; margin-top: 12px; }

@@ -21,12 +21,6 @@ export interface TrackInfo {
 /** A context or track URI, or a `TrackInfo`, which carries the album to play the track inside. */
 export type PlayTarget = string | TrackInfo;
 
-/** What a top-up queued; `listener` means favourites stood in for an empty artist search. */
-export interface FollowUpResult {
-  queued: number;
-  source: 'artist' | 'listener';
-}
-
 /** An artist, as returned by the taste endpoints. */
 export interface ArtistInfo {
   id: string;
@@ -37,14 +31,14 @@ export interface ArtistInfo {
 /** How far back the taste endpoints look. */
 export type TimeRange = "short_term" | "medium_term" | "long_term";
 
-/** Spotify's repeat modes: off, repeat one track, repeat the whole context. */
+/** Repeat modes: off, repeat one track, repeat the whole album or playlist. */
 export type RepeatState = "off" | "track" | "context";
 
-/** A device Spotify can play on — phone, computer, speaker. */
+/** A device the service can play to, such as an AirPlay speaker. */
 export interface DeviceInfo {
   id: string;
   name: string;
-  /** Spotify's own label: "Computer", "Smartphone", "Speaker", "TV"... */
+  /** The service's own label for it, e.g. "AirPlay" or "Computer". */
   type: string;
   is_active: boolean;
   volume_percent?: number;
@@ -62,8 +56,41 @@ export interface PlaylistInfo {
   is_own: boolean;
 }
 
+export type ServiceId = 'apple';
+
+/** What a service can do, so the tool list advertises only what will work. */
+export interface ProviderCapabilities {
+  /** `devices` lists and moves playback: AirPlay speakers. */
+  devices: boolean;
+  /** Appending to the play queue. Music.app has no queue to append to. */
+  queue: boolean;
+  /** Whether top tracks and artists can be narrowed to a period. */
+  timeRange: boolean;
+}
+
+/** Tool wording each provider gets right for itself, such as what "next" does. */
+export interface ToolWording {
+  play: string;
+  /** Falls back to the text every service shares. */
+  playNext?: string;
+  playUri: string;
+}
+
+/** A `play` call as the model made it, for providers that resolve it themselves. */
+export interface PlayRequest {
+  query?: string;
+  uri?: string;
+}
+
+export class UnsupportedError extends Error {}
+
 export interface MusicProvider {
+  id: ServiceId;
   name: string;
+  capabilities: ProviderCapabilities;
+  describe: ToolWording;
+  /** Owns the whole `play` intent: search, pick, start. */
+  playRequest(request: PlayRequest): Promise<string>;
   /** Replaces current playback; pass a `TrackInfo`, not its `uri`, so playback continues after it. */
   play(target?: PlayTarget): Promise<string>;
   pause(): Promise<string>;
@@ -83,20 +110,7 @@ export interface MusicProvider {
   getQueue(): Promise<TrackInfo[]>;
   /** Appends to the queue without disturbing what is currently playing. */
   addToQueue(uri: string): Promise<string>;
-  /** Queues more by the same artist behind a short release, which otherwise runs out after a song. */
-  queueFollowUps(seed: TrackInfo, limit?: number): Promise<FollowUpResult>;
-  /** One track by URI, so a bare URI can carry its album context too. */
-  getTrack(uri: string): Promise<TrackInfo | null>;
   searchTracks(query: string, limit?: number): Promise<TrackInfo[]>;
-  searchAlbums(query: string, limit?: number): Promise<AlbumInfo[]>;
   getPlaylists(limit?: number): Promise<PlaylistInfo[]>;
 }
 
-export interface AlbumInfo {
-  id: string;
-  name: string;
-  artist: string;
-  total_tracks: number;
-  uri: string;
-  release_date: string;
-}

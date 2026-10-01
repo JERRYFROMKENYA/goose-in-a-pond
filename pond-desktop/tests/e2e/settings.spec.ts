@@ -34,25 +34,33 @@ test.describe("Settings section", () => {
     }
   });
 
-  test("Account panel shows assistant name and user name fields", async ({ page }) => {
-    await page.getByRole("button", { name: "Account" }).click({ timeout: 5_000 });
+  // The two names live in different categories, and the catalogue is why:
+  // "Account & Home" is who lives here, "Prompts & Personality" is what the
+  // pond calls itself and how it talks (src/settings/catalogue.ts). This test
+  // used to look for both under one "Account" panel, from before that split,
+  // and so asserted a layout the app had stopped having.
+  test("Account & Home shows the user's name", async ({ page }) => {
+    await page.getByRole("button", { name: "Account & Home" }).click({ timeout: 5_000 });
 
     await expect(
-      page.getByLabel(/assistant name/i)
-        .or(page.getByPlaceholder(/goose/i))
-        .or(page.getByText(/assistant name/i))
-        .first()
+      page.getByRole("textbox", { name: /your name/i })
+    ).toBeVisible({ timeout: 10_000 });
+  });
+
+  test("Prompts & Personality shows the assistant's name", async ({ page }) => {
+    await page.getByRole("button", { name: "Prompts & Personality" }).click({ timeout: 5_000 });
+
+    await expect(
+      page.getByRole("textbox", { name: /assistant name/i })
     ).toBeVisible({ timeout: 10_000 });
   });
 
   test("settings data is loaded from the API on mount", async ({ page }) => {
-    await page.getByRole("button", { name: "Account" }).click({ timeout: 5_000 });
-    // The mock returns assistant_name: "Pond" and user_name: "Jerry"
+    await page.getByRole("button", { name: "Account & Home" }).click({ timeout: 5_000 });
+    // The mock returns user_name: "Jerry", and this panel is where it lands.
     await expect(
-      page.locator('input').filter({ hasValue: "Pond" })
-        .or(page.locator('input').filter({ hasValue: "Jerry" }))
-        .first()
-    ).toBeVisible({ timeout: 10_000 });
+      page.getByRole("textbox", { name: /your name/i })
+    ).toHaveValue("Jerry", { timeout: 10_000 });
   });
 
   test("save settings calls PUT /api/v1/settings", async ({ page }) => {

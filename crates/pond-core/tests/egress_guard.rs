@@ -20,6 +20,7 @@ const TRACKER_SYMBOLS: &[&str] = &[
     "record_egress(",
     "check_egress(",
     "egress::begin(",
+    "egress::begin_as(",
     "traced_send(",
     "traced_get(",
 ];
@@ -29,6 +30,10 @@ const TRACKER_SYMBOLS: &[&str] = &[
 const EGRESS_TRACKED: &[&str] = &[
     "crates/pond-adapters-goose/src/extension_manager.rs",
     "crates/pond-api/src/routes.rs",
+    // Fetches the managed Apple Music developer token from the credentials service.
+    "crates/pond-api/src/musickit.rs",
+    // Pauses Spotify while the pond speaks, and resumes it (Developer Policy III.7).
+    "crates/pond-api/src/spotify_focus.rs",
     "crates/pond-adapters-caldav/src/lib.rs",
     "crates/pond-adapters-weather/src/lib.rs",
     "crates/pond-hf-cache/src/lib.rs",

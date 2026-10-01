@@ -243,8 +243,7 @@ export const CATALOGUE: CatalogueCategory[] = [
             ] },
             validate: oneOf(["goose"]),
           },
-          // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-          // so this switch is commented out rather than deleted; restore it with the setting.
+          // Commented out while llama.cpp lacks speculative decoding; restore with the setting.
           // { key: "speculative_decoding_enabled", label: "Guess ahead with a helper model", description: "A small helper model guesses the next few words and the main model checks each one, so answers stay the same and only the speed changes (this is called speculative decoding). On a Jetson it measured faster; on a Mac it measured slower, so try it off if replies feel slow. Only Gemma 4 E2B and E4B have a helper; turning it on downloads it (57 MB) if it is not on this device. Changing it reloads the model, so the next reply waits for that.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
@@ -476,11 +475,7 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Thinking unprompted",
         entries: [
           { key: "proactive_review_enabled", label: "Review the day on its own", description: "Let it think over the day without being asked.", control: { kind: "toggle" }, consumer: "live" },
-          // The only writer of this list today. A per-kind "Don't suggest
-          // this" on the Home card is the intended way in, and it is NOT built
-          // -- this comment used to say it was. The control is text because the
-          // value is a list of suggestor ids, parsed as a list (see LIST_TEXT in
-          // SettingsCatalogue); clearing it unmutes everything.
+          // Sole writer until Home has "Don't suggest this"; parsed as a list of ids (LIST_TEXT).
           { key: "suggestions_muted", label: "Suggestions you have hidden", description: "Kinds of suggestion Home will not offer. Clear this to see them again.", control: { kind: "text", placeholder: "Nothing hidden" }, consumer: "live" },
           // Only renames titles the pond wrote itself; hand-typed ones are never touched.
           { key: "session_titling_enabled", label: "Give conversations better names", description: "Let it name your conversations while it is idle.", control: { kind: "toggle" }, consumer: "live" },

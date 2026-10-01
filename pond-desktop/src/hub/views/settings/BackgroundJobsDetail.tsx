@@ -1,13 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// Background jobs, on the hub.
-//
-// The list itself is `settings/BackgroundJobs`, shared with the classic
-// surface. Only the shell differs: this one is a DetailShell with a back
-// affordance, because the hub reaches its settings one screen at a time.
-//
-// `bare` because DetailShell already draws the heading and the subtitle; the
-// card's own would be a second title saying the same thing.
-// ────────────────────────────────────────────────────────────
+// `bare`: DetailShell already draws the heading and subtitle.
 
 import { DetailShell } from "./DetailShell";
 import { BackgroundJobs } from "../../../settings/BackgroundJobs";

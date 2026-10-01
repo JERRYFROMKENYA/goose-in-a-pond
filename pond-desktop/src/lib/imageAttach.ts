@@ -17,14 +17,7 @@ export const MAX_IMAGE_EDGE_PX = 1024;
 
 export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number];
 
-/**
- * MIME types the on-device vision encoder can actually decode — it uses
- * stb_image, which has no WebP support at all (mirrors pond-core's
- * `ENGINE_DECODABLE_IMAGE_TYPES`). WebP is still accepted at attach time (see
- * `SUPPORTED_IMAGE_MIME_TYPES`), but it is always re-encoded below, whatever
- * its size — the "keep the original bytes" fast path is for formats the
- * engine can actually read.
- */
+/** MIME types the encoder's stb_image decodes (mirrors pond-core); WebP is always re-encoded. */
 export const ENGINE_DECODABLE_MIME = [
   "image/jpeg",
   "image/png",
@@ -32,13 +25,7 @@ export const ENGINE_DECODABLE_MIME = [
   "image/bmp",
 ] as const;
 
-/**
- * Which format a re-encode should target, given whether the decoded pixels
- * carry transparency. Pure, so it is unit-testable without a canvas — `mime`
- * is carried for a caller that wants to log or branch on the source format,
- * but the target format itself depends only on alpha: JPEG has no alpha
- * channel, so anything with one becomes PNG.
- */
+/** PNG if the pixels carry alpha (JPEG has none), else JPEG. Pure, so testable without a canvas. */
 export function reencodeTarget(
   _mime: string,
   hasAlpha: boolean,
@@ -99,9 +86,7 @@ function decodeImageElement(objectUrl: string): Promise<HTMLImageElement> {
   });
 }
 
-/** Whether any sampled pixel is not fully opaque. Called on a canvas already
- *  downscaled to at most `MAX_IMAGE_EDGE_PX` per edge, so this is always a
- *  read of at most 1024x1024 pixels. */
+/** Any pixel not fully opaque; runs on the downscaled canvas, so at most 1024x1024 reads. */
 function canvasHasAlpha(ctx: CanvasRenderingContext2D, width: number, height: number): boolean {
   const { data } = ctx.getImageData(0, 0, width, height);
   for (let i = 3; i < data.length; i += 4) {
@@ -111,15 +96,8 @@ function canvasHasAlpha(ctx: CanvasRenderingContext2D, width: number, height: nu
 }
 
 /**
- * Draw `img` onto an offscreen canvas, downscaled so the longest edge is at
- * most `maxEdge`, and encode it as PNG (alpha present) or JPEG (opaque), per
- * `reencodeTarget`. A PNG that comes out over `MAX_IMAGE_BYTES` falls back to
- * JPEG — better a photo with its alpha flattened than one the size cap
- * refuses outright.
- *
- * JPEG has no alpha channel, so a transparent source needs a white background
- * filled BEFORE the draw: an unfilled canvas defaults to transparent BLACK,
- * which is what made a large transparent PNG render with a black backing.
+ * Downscales to `maxEdge` and encodes per `reencodeTarget`; a PNG over `MAX_IMAGE_BYTES` falls
+ * back to JPEG, drawn over white since a blank canvas is transparent black.
  */
 function downscaleAndEncode(
   img: HTMLImageElement,
@@ -150,8 +128,7 @@ function downscaleAndEncode(
     // Too large as PNG — fall through to the JPEG branch below.
   }
 
-  // Re-drawn on a FRESH canvas rather than filling the one above: filling
-  // white after drawing would paint over the image's own opaque pixels too.
+  // A fresh canvas, white first: filling after the draw would cover the image.
   const jpegCanvas = document.createElement("canvas");
   jpegCanvas.width = width;
   jpegCanvas.height = height;
@@ -187,9 +164,7 @@ export async function prepareImage(file: File | Blob): Promise<PreparedImage> {
   const longestEdge = Math.max(img.naturalWidth, img.naturalHeight);
   const withinEdgeLimit = longestEdge <= MAX_IMAGE_EDGE_PX;
   const withinByteLimit = file.size <= MAX_IMAGE_BYTES;
-  // The engine cannot read WebP at all (see ENGINE_DECODABLE_MIME) — keeping
-  // the original bytes is only safe for a format it can actually decode, so a
-  // small WebP still goes through the re-encode path below.
+  // Original bytes only for formats the engine decodes; a small WebP is still re-encoded.
   const isEngineDecodable = (ENGINE_DECODABLE_MIME as readonly string[]).includes(mime);
 
   if (withinEdgeLimit && withinByteLimit && isEngineDecodable) {

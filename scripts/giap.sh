@@ -8,6 +8,9 @@
 #   bash scripts/giap.sh doctor       # non-interactive: health report, exit 1 on FAIL
 #   bash scripts/giap.sh status       # non-interactive: detection banner only
 #   bash scripts/giap.sh build        # non-interactive: build UI + server for THIS host
+#   bash scripts/giap.sh node         # find, or download and verify, the Node this repo needs
+#   bash scripts/giap.sh node --check # only report; change nothing (exit 1 if the shell's node is wrong)
+#   bash scripts/giap.sh node --method nvm|fnm|volta|download --major N --install-deps
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
 #
 # It auto-detects the host (Jetson / Linux / macOS), whether CUDA is usable, and
@@ -37,10 +40,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/macos-sdk.sh"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
+# Which Node the repo runs on, finding one, and downloading one. REPO_ROOT has to be set first: the
+# preferred major comes from .nvmrc.
+# shellcheck source=lib/node-setup.sh
+source "$HERE/lib/node-setup.sh"
 
 DRY_RUN=false
 ASSUME_YES=false
 SERVICE_NAME="goose-in-a-pond.service"
+NODE_METHOD=auto; NODE_MAJOR=""; NODE_CHECK=false; NODE_DEPS=false
 
 # ── output ───────────────────────────────────────────────────────────────────
 if [ -t 1 ] && command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
@@ -96,7 +104,7 @@ pause() { [ -t 0 ] || return 0; printf '\n%spress return%s ' "$C_DIM" "$C_RST"; 
 # Plain variables only — bash 3.2 has no associative arrays.
 D_OS=""; D_ARCH=""; D_KERNEL=""; D_BOARD=""; D_IS_JETSON=false; D_L4T=""
 D_CUDA_STATE=""; D_NVCC=""; D_ACCEL=""
-D_RUST=""; D_CMAKE=""; D_NODE=""; D_NODE_OK=false; D_NODE_MATTER_OK=false
+D_RUST=""; D_CMAKE=""; D_NODE=""; D_NODE_OK=false; D_NODE_REPO_OK=false; D_NODE_MATTER_OK=false; D_NODE_NOTE=""; D_NODE_FROM=""
 D_BRANCH=""; D_SHA=""; D_DIRTY=""; D_SUB_PIN=""; D_SUB_HEAD=""; D_SUB_STATE=""
 D_UI_STATE=""; D_UI_WHEN=""
 D_BIN_REL=""; D_BIN_REL_WHEN=""; D_BIN_DBG=""; D_STAMP=""; D_DESKTOP=""
@@ -168,16 +176,15 @@ detect_toolchain() {
     D_RUST="$("$cargo_bin" --version 2>/dev/null | awk '{print $2}')"
   fi
   command -v cmake >/dev/null 2>&1 && D_CMAKE="$(cmake --version 2>/dev/null | head -1 | awk '{print $3}')"
+  D_NODE=""; D_NODE_OK=false; D_NODE_REPO_OK=false; D_NODE_MATTER_OK=false
   if command -v node >/dev/null 2>&1; then
     D_NODE="$(node -v 2>/dev/null)"
-    local maj min; maj="$(printf '%s' "$D_NODE" | sed 's/^v//' | cut -d. -f1)"
-    min="$(printf '%s' "$D_NODE" | sed 's/^v//' | cut -d. -f2)"
-    if [ -n "$maj" ] && [ "$maj" -ge 20 ] 2>/dev/null; then D_NODE_OK=true; fi
-    # The Matter controller (matter.js) has a higher floor than Vite's, and it
-    # is a MINOR one: 20.18 satisfies "20+" and does not satisfy matter.js.
-    if [ -n "$maj" ] && { [ "$maj" -gt 20 ] || { [ "$maj" -eq 20 ] && [ "${min:-0}" -ge 19 ]; }; } 2>/dev/null; then
-      D_NODE_MATTER_OK=true
-    fi
+    # Three separate questions, three separate floors (scripts/lib/node-setup.sh says where each comes
+    # from): can it build the web UI (Vite), is it inside the range the desktop app and the tests
+    # need (Electron, vitest), and can it run the Matter controller (matter.js, a MINOR-level floor).
+    node_version_ui_ok "$D_NODE" && D_NODE_OK=true
+    node_version_ok "$D_NODE" && D_NODE_REPO_OK=true
+    node_version_matter_ok "$D_NODE" && D_NODE_MATTER_OK=true
   fi
 }
 
@@ -365,6 +372,7 @@ banner() {
   printf '  %-9s rust %s · cmake %s · node %s%s\n' "Tools" \
     "${D_RUST:-MISSING}" "${D_CMAKE:-none}" "${D_NODE:-none}" \
     "$( [ "$D_NODE_OK" = true ] && echo ' (can build UI)' || echo ' (CANNOT build UI)' )"
+  [ -n "$D_NODE_NOTE" ] && note "$D_NODE_NOTE"
   printf '  %-9s %s @ %s (%s)\n' "Repo" "$D_BRANCH" "$D_SHA" "$D_DIRTY"
   printf '  %-9s pin %s / checkout %s — %s\n' "Goose" "${D_SUB_PIN:-?}" "${D_SUB_HEAD:-?}" "$D_SUB_STATE"
   printf '  %-9s %s%s\n' "Web UI" "$D_UI_STATE" "$( [ -n "$D_UI_WHEN" ] && echo " ($D_UI_WHEN)" )"
@@ -547,17 +555,40 @@ doctor() {
     fi
   fi
 
-  # 8. node capability
+  # 8. node capability: the web UI build (Vite's floor), then the range the desktop app and the
+  # tests need. A server only needs the first, so the second is a warning only where the desktop runs.
+  [ -n "$D_NODE_NOTE" ] && info "$D_NODE_NOTE"
+  # What this run uses and what the pond uses can differ: the pond knows only the node on its own
+  # PATH and the recorded one (crates/pond-server/src/node_path.rs), and reads the record at start.
+  case "$D_NODE_FROM" in
+    "") ;;
+    recorded) note "the pond uses it too when the node on its own PATH is outside the range; it reads the record when it starts" ;;
+    *) note "the pond does not use this one: it knows only the node on its own PATH and the recorded one"
+       note "bash scripts/giap.sh node records it; restart the pond after" ;;
+  esac
   if [ "$D_NODE_OK" = true ]; then ok "node $D_NODE can build the web UI"
-  else warn "node ${D_NODE:-absent} cannot build the web UI (Vite needs >= 20) — build dist elsewhere and rsync"
+  else warn "node ${D_NODE:-absent} cannot build the web UI (Vite needs $NODE_UI_RANGE_TEXT)"
+       note "fix: bash scripts/giap.sh node   (finds one already installed, or downloads one after asking)"
+       note "or build dist elsewhere and rsync"
        DOC_WARN=$((DOC_WARN+1)); fi
+  if [ "$D_NODE_REPO_OK" = true ]; then ok "node $D_NODE is inside the range the desktop app and tests need"
+  elif [ "$D_OS" = "macos" ]; then
+    warn "node ${D_NODE:-absent} is outside $NODE_RANGE_TEXT (Electron 44 and vitest): $(node_why_not "${D_NODE:-none}")"
+    note "fix: bash scripts/giap.sh node"
+    DOC_WARN=$((DOC_WARN+1))
+  else info "node ${D_NODE:-absent} is outside $NODE_RANGE_TEXT, which only the desktop app and its tests need"; fi
 
   # 8b. node capability for the Matter controller — a higher, MINOR-level floor.
   # Only worth warning about when Matter is something this Pond might use; the
   # failure is otherwise invisible until someone flips the toggle months later.
+  # Inside the repo's range and still refused is 22.12.x, which giap.sh node keeps, so it has to be
+  # upgraded; anything else giap.sh node replaces, and the pond takes the replacement at its next start.
   if [ "$D_NODE_MATTER_OK" = true ]; then ok "node $D_NODE can run the Matter controller"
-  else warn "node ${D_NODE:-absent} cannot run the Matter controller (matter.js needs >= 20.19) — Matter will report it and stay off"
-       DOC_WARN=$((DOC_WARN+1)); fi
+  else
+    if [ "$D_NODE_REPO_OK" = true ]; then local matter_fix="upgrade it to 22.13 or newer"
+    else local matter_fix="bash scripts/giap.sh node fixes it, once the pond is restarted"; fi
+    warn "node ${D_NODE:-absent} cannot run the Matter controller: $(node_why_not_matter "${D_NODE:-none}") — Matter will report it and stay off; $matter_fix"
+    DOC_WARN=$((DOC_WARN+1)); fi
 
   # 9. desktop app
   case "$D_DESKTOP" in
@@ -729,9 +760,13 @@ action_install() {
   # Guardrail 2: this host cannot build the web UI, so a model/UI-heavy install
   # would embed the placeholder dashboard.
   if [ "$D_NODE_OK" != true ]; then
-    warn "node ${D_NODE:-absent} cannot build the web UI (Vite needs >= 20)."
-    note "the server will embed whatever is already in pond-desktop/dist"
-    note "build dist on a dev machine and rsync it, or use 'jetson.sh deploy'"
+    warn "node ${D_NODE:-absent} cannot build the web UI (Vite needs $NODE_UI_RANGE_TEXT)."
+    if ensure_node_for_ui; then
+      ok "node $D_NODE can build the web UI"
+    else
+      note "the server will embed whatever is already in pond-desktop/dist"
+      note "build dist on a dev machine and rsync it, or use 'jetson.sh deploy'"
+    fi
   fi
 
   # Guardrail 3: a Jetson release build with a model resident gets its linker
@@ -781,14 +816,39 @@ action_install() {
   return $rc
 }
 
+# Get a Node that can build the UI: one already installed somewhere, else (after asking) a verified
+# download. Puts it on PATH for this run and re-detects. Returns 0 only if the UI can now be built.
+ensure_node_for_ui() {
+  node_ensure auto "" || return 1
+  node_use_repo >/dev/null 2>&1
+  detect_toolchain
+  [ "$D_NODE_OK" = true ]
+}
+
+# `giap.sh node`, and menu item 9: report, or find/download the Node this repo runs on.
+action_node() {
+  head1 "Node for this repo  (needs $NODE_RANGE_TEXT)"
+  case "$NODE_MAJOR" in ''|[0-9]*) ;; *) bad "--major must be a number"; return 2 ;; esac
+  if [ "$NODE_CHECK" = true ]; then node_report; return $?; fi
+  node_ensure "$NODE_METHOD" "$NODE_MAJOR" || return 1
+  node_use_repo >/dev/null 2>&1
+  detect_toolchain
+  if [ "$NODE_DEPS" = true ]; then node_install_deps || return 1; fi
+  return 0
+}
+
 action_build_ui() {
   head1 "Build the web UI"
   if [ "$D_NODE_OK" != true ]; then
-    bad "node ${D_NODE:-absent} cannot run Vite 7 (needs >= 20)."
-    info "Build dist on a dev machine and sync it here:"
-    note "rsync -az --delete pond-desktop/dist/ <host>:goose-in-a-pond/pond-desktop/dist/"
-    note "then: find pond-desktop/dist -exec touch {} +   # rsync preserves mtimes; cargo would re-embed the old UI"
-    return 1
+    bad "node ${D_NODE:-absent} cannot run Vite (needs $NODE_UI_RANGE_TEXT)."
+    if ensure_node_for_ui; then
+      ok "node $D_NODE can build the web UI"
+    else
+      info "Build dist on a dev machine and sync it here:"
+      note "rsync -az --delete pond-desktop/dist/ <host>:goose-in-a-pond/pond-desktop/dist/"
+      note "then: find pond-desktop/dist -exec touch {} +   # rsync preserves mtimes; cargo would re-embed the old UI"
+      return 1
+    fi
   fi
   ( cd pond-desktop && run npm run build ) || { bad "UI build failed"; return 1; }
   # cargo's rerun-if-changed on dist is mtime-based; make sure it fires.
@@ -1065,6 +1125,7 @@ show_menu() {
   say "   5) Stop stray pond-server / desktop app processes"
   say ""
   say "  ${C_B}Install & build${C_RST}"
+  say "   9) Set up Node (find the right version, or download it)"
   say "  10) Install GIAP on this host (first-time setup)"
   say "  11) Build the web UI"
   say "  12) Build pond-server (release, correct features for this host)"
@@ -1100,6 +1161,7 @@ menu_loop() {
       3)  action_repair_submodule; pause ;;
       4)  action_reclaim_disk; pause ;;
       5)  action_kill_strays; pause ;;
+      9)  action_node; pause ;;
       10) action_install; pause ;;
       11) action_build_ui; pause ;;
       12) action_build_server; pause ;;
@@ -1126,7 +1188,7 @@ menu_loop() {
 }
 
 usage() {
-  sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # ── entry ────────────────────────────────────────────────────────────────────
@@ -1135,10 +1197,22 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
     -y|--yes)  ASSUME_YES=true; shift ;;
+    --check)   NODE_CHECK=true; shift ;;
+    --install-deps) NODE_DEPS=true; shift ;;
+    --method)  [ $# -ge 2 ] || { bad "--method needs a value"; exit 2; }; NODE_METHOD="$2"; shift 2 ;;
+    --major)   [ $# -ge 2 ] || { bad "--major needs a value"; exit 2; }; NODE_MAJOR="$2"; shift 2 ;;
     -h|--help|help) usage; exit 0 ;;
+    -*)        bad "unknown option: $1"; usage; exit 2 ;;
     *) CMD="$1"; shift ;;
   esac
 done
+
+# `node` looks at the shell's own node, so PATH is left alone until it has reported. Every other
+# command runs on the right Node: if the shell's is outside the range, a recorded or already-installed
+# one is put first on PATH for this run, so the UI build and the tests use it whatever the shell says.
+if [ "$CMD" = node ]; then action_node; exit $?; fi
+node_use_repo >/dev/null 2>&1
+D_NODE_NOTE="$NODE_USE_NOTE"; D_NODE_FROM="$NODE_USE_FROM"
 
 detect_all
 

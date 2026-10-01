@@ -47,13 +47,7 @@ impl MatterCommissioner {
     async fn refuse_when_nothing_is_pairable(&self) -> Result<()> {
         // Unboxed devices advertise over BLE only, which this mDNS probe can't see.
         if self.client.has_ble() {
-            // INFO, not debug. `giap::trace` is carved to INFO in the
-            // production filter, so at debug this line could never appear in a
-            // log — and a skipped probe is precisely what somebody reading a
-            // captured log needs to see when pairing failed, because without it
-            // the skip is indistinguishable from a probe that ran and found
-            // nothing. It fires once per pairing attempt, which is rare and
-            // always user-initiated, so it costs a log nothing.
+            // INFO (the production level for `giap::trace`): a skipped probe must be visible.
             tracing::info!(
                 target: "giap::trace",
                 kind = "matter_pairing_probe_skipped",

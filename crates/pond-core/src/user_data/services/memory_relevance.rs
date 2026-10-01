@@ -335,21 +335,8 @@ pub async fn run_backfill(
     .await
 }
 
-/// The RECURRING repair of the same defect [`run_backfill`] fixes once at boot.
-///
-/// `run_backfill` is spawned a single time per process, so every unembedded row
-/// minted afterwards stays invisible to `search_similar` until the next restart
-/// — and three ordinary paths mint them: consolidation's `apply_actions` writes
-/// `embedding: None`, `update_content` nulls the vector on purpose (its own
-/// comment promises a "next sweep" that until now did not exist), and any embed
-/// that simply failed. The index sweep did not cover it either: adoption only
-/// COPIES vectors that already exist.
-///
-/// Same batch size and pause as the backfill, because it competes with
-/// inference for the same CPU. Two things the boot-time pass does not need and
-/// a scheduled one does: a cancellation token, so a member coming back takes
-/// the machine straight back, and `max_batches`, so a background tick takes one
-/// bite of a long backlog instead of holding the lane slot until it drains.
+/// Embed rows left without a vector since boot, which the one-shot [`run_backfill`] misses.
+/// `cancel` yields to a returning member; `max_batches` keeps a tick from holding the lane slot.
 pub async fn run_memory_embedding_sweep(
     repo: &dyn MemoryRepository,
     embedder: &dyn EmbeddingProvider,
@@ -456,8 +443,7 @@ async fn embed_in_batches(
             break;
         }
 
-        // Before the pause, not after it: a caller allowed one batch would
-        // otherwise sleep a quarter-second holding the lane slot for nothing.
+        // Check before the pause, or a one-batch caller sleeps holding the lane slot for nothing.
         if batches >= max_batches || cancelled() {
             break;
         }

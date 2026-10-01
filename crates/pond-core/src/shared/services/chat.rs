@@ -256,6 +256,16 @@ impl WorkingTone {
     }
 }
 
+/// Ends the turn when dropped, so every way out of `stream_response_inner`, an error included, ends
+/// what `begin_utterance` began: other audio paused for the turn must not stay paused after it.
+struct TurnEnds(Arc<dyn VoiceOutput>);
+
+impl Drop for TurnEnds {
+    fn drop(&mut self) {
+        self.0.end_utterance();
+    }
+}
+
 impl Drop for WorkingTone {
     fn drop(&mut self) {
         self.stop();
@@ -952,6 +962,7 @@ impl ChatService {
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.
         self.voice_output.begin_utterance();
+        let _turn = TurnEnds(self.voice_output.clone());
 
         // ── Working tone ──────────────────────────────────────────────────
         // Plays from before inference until the first speakable sentence.
@@ -2219,6 +2230,89 @@ mod tests {
             "stream_response_inner must not persist; found {} messages",
             msgs.len()
         );
+    }
+
+    /// Counts the turns begun and ended.
+    #[derive(Default)]
+    struct CountingTurns {
+        begun: std::sync::atomic::AtomicUsize,
+        ended: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingTurns {
+        fn counts(&self) -> (usize, usize) {
+            use std::sync::atomic::Ordering::SeqCst;
+            (self.begun.load(SeqCst), self.ended.load(SeqCst))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl VoiceOutput for CountingTurns {
+        async fn speak(&self, _text: &str) -> Result<()> {
+            Ok(())
+        }
+        fn begin_utterance(&self) {
+            self.begun.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn end_utterance(&self) {
+            self.ended.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// An engine that goes away half a sentence into its reply.
+    struct EngineGoesAway;
+
+    #[async_trait::async_trait]
+    impl crate::models::ports::agent::Agent for EngineGoesAway {
+        async fn chat(
+            &self,
+            _request: crate::models::ports::agent::AgentRequest,
+        ) -> Result<crate::models::ports::agent::AgentResponse> {
+            anyhow::bail!("the engine went away")
+        }
+        async fn chat_stream(
+            &self,
+            _request: crate::models::ports::agent::AgentRequest,
+        ) -> Result<
+            futures::stream::BoxStream<
+                'static,
+                Result<crate::models::ports::agent::AgentStreamEvent>,
+            >,
+        > {
+            use futures::StreamExt;
+            let stream = async_stream::stream! {
+                yield Ok(crate::models::ports::agent::AgentStreamEvent::Text {
+                    content: "Half a sen".to_string(),
+                });
+                yield Err(anyhow::anyhow!("the engine went away"));
+            };
+            Ok(stream.boxed())
+        }
+    }
+
+    /// Other audio is paused for a turn (`QuietVoiceOutput`) until the turn ends, so a turn that
+    /// fails partway must still end, or the music never comes back.
+    #[tokio::test]
+    async fn every_turn_begun_is_ended_even_one_that_fails() {
+        let storage = Arc::new(InMemorySessionStorage::new());
+        storage.create_session("turns".to_string()).await.unwrap();
+        let out = Arc::new(CountingTurns::default());
+
+        let service = ChatService::new(Arc::new(MockAgent::new()), "turns".into(), storage.clone())
+            .with_voice_output(out.clone());
+        service
+            .stream_response_inner("hello".to_string(), std::time::Instant::now())
+            .await
+            .unwrap();
+        assert_eq!(out.counts(), (1, 1));
+
+        let failing = ChatService::new(Arc::new(EngineGoesAway), "turns".into(), storage)
+            .with_voice_output(out.clone());
+        let outcome = failing
+            .stream_response_inner("hello".to_string(), std::time::Instant::now())
+            .await;
+        assert!(outcome.is_err());
+        assert_eq!(out.counts(), (2, 2), "a failed turn was never ended");
     }
 
     #[tokio::test]

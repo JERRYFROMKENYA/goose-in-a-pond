@@ -266,13 +266,19 @@ impl DeviceRegistry for NoDevices {
     }
 }
 
-/// Holds a Spotify token pair so `spotify_api_call` gets past "not connected" to the gate.
+/// Holds a Spotify token pair so `spotify_api_call` gets past "not connected" to the gate, in a
+/// household that chose Spotify, since with Apple Music chosen the music controls never ask Spotify.
 struct ConnectedSpotify;
 
 #[async_trait::async_trait]
 impl SecretRepository for ConnectedSpotify {
-    async fn get(&self, _key: &str) -> anyhow::Result<Option<String>> {
-        Ok(Some("stored-token".to_string()))
+    async fn get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let value = if key == "MUSIC_SERVICE" {
+            "spotify"
+        } else {
+            "stored-token"
+        };
+        Ok(Some(value.to_string()))
     }
     async fn set(&self, _key: &str, _value: &str) -> anyhow::Result<()> {
         Ok(())

@@ -150,8 +150,7 @@ async function goToModelsScreen(page: Page) {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/");
   await page.waitForSelector(".ghub", { timeout: 10_000 });
-  // The rail is a drawer now: Models is a chip under "Manage", and in the hub
-  // it resolves to the Models detail screen directly, without the Settings list.
+  // Models is a "Manage" chip in the drawer and opens the Models detail screen directly.
   await navigateTo(page, "Models");
   await page.waitForTimeout(600);
 }
@@ -207,8 +206,7 @@ test.describe("Hub — Models sub-screen wiring", () => {
     await expect(useButtons.first()).toBeVisible({ timeout: 3_000 });
   });
 
-  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-  // so the switch this test drove is commented out; restore it with the switch.
+  // Commented out while llama.cpp lacks speculative decoding; restore with the switch.
   // test("the guess-ahead switch reads and writes speculative_decoding_enabled", async ({ page }) => {
   //   await setupModelsRoutes(page);
   //   // Overrides the fixed 8-key body setupModelsRoutes registers for

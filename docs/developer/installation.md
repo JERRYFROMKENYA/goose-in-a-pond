@@ -79,9 +79,68 @@ There is no `--fast` flag; it was documented here but never parsed.
 | C compiler | `xcode-select --install` | `apt install build-essential` |
 | cmake | `brew install cmake` | `apt install cmake` |
 | pkg-config | `brew install pkg-config` | `apt install pkg-config` |
-| Node.js (desktop only) | [nodejs.org](https://nodejs.org) | `apt install nodejs npm` |
+| Node.js (desktop and tests; the UI build needs less) | `bash scripts/giap.sh node` | `bash scripts/giap.sh node` |
 
 The install script auto-installs cmake and pkg-config via Homebrew (macOS) or apt (Linux).
+
+### Node
+
+Three different floors, each read off the packages that set it, not chosen:
+
+| For | Needs | Because |
+|-----|-------|---------|
+| The desktop app and the tests (the repo's range) | `^22.12.0 \|\| ^24.0.0 \|\| >=26.0.0` | Electron 44 wants 22.12+; vitest 5 wants that exact range, which rules out the odd-numbered 23 and 25 |
+| Building the web UI | `^20.19.0 \|\| >=22.12.0` | Vite 8. A server (the Jetson) only needs this |
+| The Matter controller | `>=20.19 <22.0 \|\| >=22.13` | matter.js 0.17. One gap in the repo's range: **22.12.x** passes the repo's check and not Matter's, and the doctor says so |
+
+`.nvmrc` says `22`, `pond-desktop/package.json` carries the range as `engines`, and CI's frontend job
+runs on 22. A Node outside the range is the usual reason `npm test` or `npm run dev:electron` fails in a way
+that does not look like a Node problem.
+
+```bash
+bash scripts/giap.sh node                  # check; use one you have; else offer a download
+bash scripts/giap.sh node --check          # report only, change nothing (exit 1 if the shell's node is wrong)
+bash scripts/giap.sh node -y               # no prompts (scripts, CI)
+bash scripts/giap.sh node --dry-run        # say what it would do
+bash scripts/giap.sh node --method nvm     # install through nvm (or fnm, volta); default: auto
+bash scripts/giap.sh node --major 24       # which major to install when none is present
+bash scripts/giap.sh node --install-deps   # then `npm ci` in pond-desktop and extensions/music
+```
+
+What it does, in this order, stopping at the first that works:
+
+1. **The Node on your PATH**, if it is inside the range. Nothing else happens.
+2. **One already installed**: it looks in nvm, fnm, volta, asdf and in `~/.giap/node` (an earlier run of
+   this). It asks each binary for its version and skips one that will not run. If one is inside the range
+   it is **recorded** in `~/.giap/node/.path`, and nothing is downloaded.
+3. **An install**, only after asking (`-y` answers for you; with no terminal and no `-y` it refuses):
+   through nvm, fnm or volta if you have one, else a download from `nodejs.org/dist` into `~/.giap/node`.
+   The download is **checked against the SHA-256 nodejs.org publishes** in the release's `SHASUMS256.txt`,
+   unpacked beside its destination and moved into place only after the check passes; on a mismatch nothing
+   is installed and the run fails, naming both hashes. It is https only (TLS 1.2+). Builds exist for macOS and Linux on
+   arm64 and x64, so the Jetson is covered; anything else is reported, not guessed at.
+
+Nothing is installed globally and nothing is added to a shell profile. `GIAP_NODE_HOME` moves the download
+folder; `GIAP_NODE_DIST_URL` points it at a mirror.
+
+The recorded Node is what makes the rest of `giap.sh` work whatever your shell's default is: every command
+(`build`, `doctor`, the menu) puts the right Node first on PATH for its own run if the shell's is outside the
+range, and says so in the banner and the doctor. Your own shell is left alone; `giap.sh node` prints the line to type
+(`nvm use 26.10.0`, `export PATH=...`). `giap.sh build-ui` and `giap.sh install` do the same when they find
+a Node that cannot build the UI, and offer the download before falling back to "build it elsewhere and rsync".
+
+**The pond reads the record too** (`crates/pond-server/src/node_path.rs`). When it starts, if the `node` on
+its own PATH is outside the range, or there is none, it puts the recorded one first, so the Matter controller
+and the stdio extensions it starts run on it. That is the Jetson's case: apt's Node 12 in `/usr/bin` comes
+first on a systemd service's PATH. A `node` inside the range is left alone, which is the order `giap.sh`
+itself takes, and without a record nothing is asked. It asks each binary for its version, as the script does,
+and gives up on one that has not answered in 3 seconds. The record is read only at start, so **restart the
+pond after `giap.sh node`**; its log says what it did (`node_path_recorded`). The doctor says whether the
+pond will use the Node it is reporting on: an installed one that `giap.sh` found but never recorded, it will
+not.
+
+The script is tested in `scripts/lib/node-setup.test.sh` (against a fake nodejs.org, so no network; run by
+CI's `node-setup` job): `bash scripts/lib/node-setup.test.sh`.
 
 ## What Gets Installed
 

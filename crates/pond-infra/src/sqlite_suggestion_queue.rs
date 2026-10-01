@@ -1,30 +1,8 @@
 //! SQLite-backed [`SuggestionQueueRepository`] — the rows migration 0058 added.
 //!
-//! # The insert is `ON CONFLICT DO NOTHING`, and that is the deduplication
-//!
-//! Not a read followed by a write. Generation runs on the inference lane, a
-//! restart can overlap two ticks, and a check-then-insert would be a race that
-//! queues two questions about one note on exactly the pond that is idle
-//! longest. The partial unique index is the guard, the database enforces it,
-//! and `rows_affected` is how the caller learns which happened.
-//!
-//! `DO NOTHING` rather than `DO UPDATE` for the same reason the reminders
-//! adapter chose it: the live row may be one the household has been looking at
-//! for a week, and an upsert would swap the question under them between two
-//! glances at the same screen.
-//!
-//! # `offerable` joins `memory_fragments`, on purpose
-//!
-//! A queued question whose note has been deleted, archived or superseded is an
-//! offer whose reason is false — and the reason is the only thing that makes the
-//! offer falsifiable. The join is the check, and it uses the SAME liveness
-//! predicate as `sqlite_memory`'s own reads (`lifecycle IS NULL OR lifecycle =
-//! 'active'`), so a memory the household can no longer retrieve cannot be one
-//! the panel is still asking about.
-//!
-//! No foreign key: `memory_fragments` rows are removed by the household and by
-//! decay, and a CASCADE would empty this table with nothing anywhere recording
-//! that it had. A join is visible in a query plan and testable from a test.
+//! Dedup is the partial unique index plus `ON CONFLICT DO NOTHING`: check-then-insert would race
+//! overlapping ticks, and an upsert would swap a question the household may be looking at.
+//! `offerable` joins `memory_fragments` (no FK: a CASCADE would silently empty this table).
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -36,19 +14,14 @@ use pond_core::user_data::ports::suggestion_queue::{
 use pond_core::user_data::services::suggestion_generation::GeneratedSuggestion;
 use sqlx::{Pool, Sqlite};
 
-/// Stated once, so a column added to one query and not another shifts a tuple
-/// field at compile time rather than at runtime.
+/// Shared by every row read, so no query drifts from `QueueRow`'s field order.
 const QUEUE_COLUMNS: &str = "q.id, q.profile_id, q.prompt, q.reason, q.source_memory_id, \
      q.created_at";
 
 /// `(id, profile_id, prompt, reason, source_memory_id, created_at)`.
 type QueueRow = (String, Option<String>, String, String, String, String);
 
-/// The liveness predicate, copied verbatim from `sqlite_memory`'s reads.
-///
-/// Verbatim and not "equivalent": if that file's definition of a live memory
-/// ever changes, this one has to change with it, and an identical string is
-/// what makes a grep find both.
+/// `sqlite_memory`'s liveness predicate, copied verbatim so one grep finds both.
 const MEMORY_IS_LIVE: &str = "(m.lifecycle IS NULL OR m.lifecycle = 'active')";
 
 pub struct SqliteSuggestionQueue {
@@ -65,9 +38,7 @@ fn sql_ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// Timestamps written by this adapter are RFC3339; the column default is
-/// SQLite's `datetime('now')`, which is not. Both are read, because a row
-/// inserted by a future path that leans on the default must not be unreadable.
+/// Accepts RFC3339 (ours) and SQLite's `datetime('now')` (the column default).
 fn parse_ts(raw: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
         return Ok(dt.with_timezone(&Utc));
@@ -77,10 +48,7 @@ fn parse_ts(raw: &str) -> Result<DateTime<Utc>> {
         .with_context(|| format!("unreadable suggestion timestamp: {raw}"))
 }
 
-/// The same shape `sqlite_memory::scope_sql` uses, against this table's own
-/// alias. An `Owner` sees their own rows and the unattributed ones; a `Guest`
-/// sees nothing and the predicate says so rather than relying on the caller to
-/// short-circuit.
+/// Same shape as `sqlite_memory::scope_sql`; `Guest` is refused by the predicate itself.
 fn scope_sql(scope: &ProfileScope) -> (&'static str, Option<&str>) {
     match scope {
         ProfileScope::Owner(id) => (
@@ -109,9 +77,7 @@ impl SuggestionQueueRepository for SqliteSuggestionQueue {
     async fn queue(&self, suggestions: &[GeneratedSuggestion]) -> Result<usize> {
         let mut stored = 0usize;
         for s in suggestions {
-            // The id is the pond's, never the model's. A model-supplied id
-            // would be a value the household's own rows are keyed on, written
-            // by something that cannot be trusted to make it unique.
+            // The pond mints the id: a model can't be trusted to keep keys unique.
             let id = uuid::Uuid::new_v4().to_string();
             let result = sqlx::query(
                 "INSERT INTO suggestion_queue \
@@ -154,11 +120,7 @@ impl SuggestionQueueRepository for SqliteSuggestionQueue {
     }
 
     async fn settle(&self, id: &str, outcome: Settled) -> Result<bool> {
-        // `state = 'queued'` in the predicate is what makes this answer the
-        // question the caller asked. Without it a second tap would report
-        // success, and "already taken" would be indistinguishable from "no such
-        // suggestion" -- one is a household being quick on a touch panel and
-        // the other is a bug.
+        // `state = 'queued'` makes a second tap report `false` rather than a second success.
         let result =
             sqlx::query("UPDATE suggestion_queue SET state = ? WHERE id = ? AND state = 'queued'")
                 .bind(outcome.as_str())
@@ -192,10 +154,7 @@ mod tests {
             .run(&pool)
             .await
             .unwrap();
-        // `memory_fragments.profile_id` is a real foreign key, so a member has
-        // to exist before a note can belong to them. Inserting the member is
-        // part of the fixture rather than something to work around: a test that
-        // disabled the constraint would not be testing this database.
+        // `memory_fragments.profile_id` is a real FK, so the members must exist first.
         for member in ["jerry", "liz"] {
             sqlx::query("INSERT INTO profiles (id, display_name) VALUES (?, ?)")
                 .bind(member)
@@ -244,8 +203,6 @@ mod tests {
         assert_eq!(offered[0].source_memory_id, "m1");
     }
 
-    /// The whole reason the reason is checkable. A question about a note the
-    /// household has deleted is an offer whose sentence underneath is false.
     #[tokio::test]
     async fn a_suggestion_whose_memory_is_gone_is_not_offered() {
         let repo = queue_with_memories(&[("m1", None, "active")]).await;
@@ -275,9 +232,7 @@ mod tests {
         );
     }
 
-    /// Archived and superseded are not deleted, and a household cannot retrieve
-    /// them — so the panel must not still be asking about them. Same predicate
-    /// `sqlite_memory`'s own reads use.
+    /// Not deleted, but not retrievable either.
     #[tokio::test]
     async fn a_suggestion_about_an_archived_memory_is_not_offered() {
         for lifecycle in ["archived", "superseded"] {
@@ -295,8 +250,7 @@ mod tests {
         }
     }
 
-    /// A composed question carries whatever its note carried, so scope is not
-    /// optional here. `Guest` is the one that must never see anything.
+    /// A question carries its note's content, so it is scoped like it; `Guest` sees nothing.
     #[tokio::test]
     async fn scope_keeps_a_members_question_off_a_shared_screen() {
         let repo =
@@ -332,9 +286,6 @@ mod tests {
         assert_eq!(liz[0].source_memory_id, "m2");
     }
 
-    /// The partial unique index is the deduplication, and it is what stops a
-    /// pass that runs every idle period from queueing a hundred variations of
-    /// one note.
     #[tokio::test]
     async fn one_memory_carries_one_live_question() {
         let repo = queue_with_memories(&[("m1", None, "active")]).await;
@@ -360,9 +311,7 @@ mod tests {
         );
     }
 
-    /// Once settled, a memory may carry a NEW question — a later pass sees more
-    /// of the household's history than an earlier one did. What must not happen
-    /// is two at once.
+    /// A later pass sees more history, so re-asking is fine; two live at once is not.
     #[tokio::test]
     async fn a_settled_memory_may_be_asked_about_again() {
         let repo = queue_with_memories(&[("m1", None, "active")]).await;
@@ -385,9 +334,7 @@ mod tests {
         assert_eq!(offered[0].prompt, "A later question?");
     }
 
-    /// A double tap on a touch panel is a real event. "Already taken" and "no
-    /// such suggestion" must be different answers: the first is a household
-    /// being quick, the second is a bug.
+    /// A double tap on a touch panel is a real event.
     #[tokio::test]
     async fn settling_twice_reports_that_it_changed_nothing() {
         let repo = queue_with_memories(&[("m1", None, "active")]).await;
@@ -411,8 +358,6 @@ mod tests {
             .is_empty());
     }
 
-    /// What the generation pass subtracts before choosing what to show the
-    /// model, so a pass spends its slots on notes nobody has been asked about.
     #[tokio::test]
     async fn the_pass_can_see_which_memories_already_have_a_question() {
         let repo = queue_with_memories(&[("m1", None, "active"), ("m2", None, "active")]).await;

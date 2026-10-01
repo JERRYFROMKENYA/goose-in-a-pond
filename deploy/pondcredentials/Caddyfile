@@ -1,0 +1,17 @@
+{$CREDENTIALS_HOST} {
+  request_body {
+    max_size 1KB
+  }
+  # Exactly one question is answerable from outside. /healthz stays on the private network:
+  # it carries counters, and there is no reason to publish them.
+  @token {
+    method POST
+    path /v1/musickit/developer-token
+  }
+  handle @token {
+    reverse_proxy pondcredentials:8080
+  }
+  respond 404
+  # There is no `log` directive, on purpose: an access log is a list of every household that
+  # asked and when. Do not add one without changing what docs/architecture/pondcredentials.md says.
+}

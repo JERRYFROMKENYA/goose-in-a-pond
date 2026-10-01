@@ -3646,6 +3646,59 @@
 
 .secret-modal__input-toggle:hover { color: var(--fg); }
 
+/* A choice, such as the music service: the chosen answer rises on the ink offset and the others lie
+   flat on a hairline (DESIGN.md: state is elevation, not hue). Each answer is a 44px target. */
+.secret-modal__choice {
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.secret-modal__choice-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  cursor: pointer;
+}
+
+.secret-modal__choice-option--on {
+  border: 2px solid var(--border-ink);
+  box-shadow: var(--shadow-ink);
+}
+
+.secret-modal__choice-option:focus-within {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.secret-modal__choice-option input {
+  margin-top: 3px;
+  accent-color: var(--border-ink);
+}
+
+.secret-modal__choice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.secret-modal__choice-label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  color: var(--fg);
+}
+
+.secret-modal__choice-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+
 .secret-modal__field-hint {
   font-size: var(--text-sm);
   color: var(--grey-500);
@@ -3751,6 +3804,51 @@
   border-radius: 50%;
   animation: mkt-spin 0.75s linear infinite;
   flex-shrink: 0;
+}
+
+/* Developer settings: a closed disclosure, so the ordinary path is a button and not a form. */
+.secret-modal__advanced {
+  border-top: 1px solid var(--grey-100);
+  padding-top: 10px;
+}
+
+.secret-modal__advanced-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--grey-500);
+  list-style: none;
+  user-select: none;
+}
+
+.secret-modal__advanced-summary::-webkit-details-marker { display: none; }
+.secret-modal__advanced-summary:hover { color: var(--fg); }
+
+.secret-modal__advanced-saved {
+  font-weight: var(--weight-regular, 400);
+  color: var(--color-success);
+}
+
+.secret-modal__advanced-chevron {
+  transition: transform 0.15s ease;
+}
+
+.secret-modal__advanced[open] .secret-modal__advanced-chevron {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .secret-modal__advanced-chevron { transition: none; }
+}
+
+.secret-modal__advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 12px;
 }
 
 .secret-modal__divider {

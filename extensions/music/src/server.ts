@@ -1,251 +1,27 @@
 #!/usr/bin/env node
-/** GIAP Music MCP server for Spotify: a few intent-shaped tools, not one per endpoint. */
+/** GIAP Music MCP server for Apple Music: a few intent-shaped tools, not one per endpoint. */
 import * as readline from "readline";
 import { describeError, log } from "./log.js";
-import { isShortRelease, SpotifyProvider } from "./providers/spotify.js";
-import type { TimeRange } from "./providers/types.js";
+import { normalizeName, playlistMatchScore } from "./match.js";
+import { createProvider } from "./providers/index.js";
+import { buildTools } from "./tools.js";
+import { chooseService, noMusicInstructions } from "./providers/select.js";
+import type { MusicProvider, TimeRange } from "./providers/types.js";
 
-const provider = new SpotifyProvider();
-
-const TOOLS = [
-  {
-    name: "play",
-    // Enums, not sibling tools, to save tokens; the description says only what no parameter can.
-    description:
-      "Play music on Spotify. Music keeps playing afterwards: a song starts inside its album so the album follows on, and a single is topped up with more by the same artist — do not tell the user playback will stop after the song, and do not queue extra songs yourself to keep it going. Search picks the closest match, which is not always what was asked for — tell the user the track name and artist FROM THE RESULT, never the name they asked for.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description:
-            "What to play, as the user said it — 'Marvin's Room by Drake', 'Randoms', 'jazz'. Omit to resume what is paused.",
-        },
-        target: {
-          type: "string",
-          enum: ["track", "playlist"],
-          description:
-            "'playlist' matches the user's own playlists loosely by name, preferring ones they created. Default 'track' searches songs, artists and albums.",
-        },
-        when: {
-          type: "string",
-          enum: ["now", "next"],
-          description:
-            "'next' appends to the queue and lets the current track finish; Spotify cannot insert at a chosen position, and cannot queue a whole playlist, so this applies to tracks only. Default 'now' replaces what is playing.",
-        },
-        uri: {
-          type: "string",
-          description:
-            "A pasted Spotify URI or link. Plays it directly, and is the only way to reach a playlist outside the user's library.",
-        },
-      },
-    },
-  },
-      {
-    name: "playlists",
-    description:
-      "List every playlist in the user's Spotify library, separated into ones they created and ones they follow from other people. Use this to answer 'what playlists do I have' or 'which of these are mine', and to find the exact name before playing one with the 'play' tool.",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "library",
-    description:
-      "The user's own Spotify library and listening history: their liked songs, what they listen to most, and what they played recently. Read-only — Spotify does not let this app change what is liked. Use for 'what are my liked songs', 'what do I listen to most', 'what was I playing yesterday'.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          enum: ["saved", "top_tracks", "top_artists", "recent"],
-          description:
-            "saved = list liked songs; top_tracks / top_artists = what they listen to most; recent = recently played.",
-        },
-        time_range: {
-          type: "string",
-          enum: ["short_term", "medium_term", "long_term"],
-          description:
-            "How far back top_tracks / top_artists look: short_term is about 4 weeks, medium_term about 6 months, long_term is several years. Defaults to medium_term.",
-        },
-        limit: {
-          type: "number",
-          description: "How many to return, 1-50. Defaults to 20.",
-        },
-      },
-      required: ["action"],
-    },
-  },
-  {
-    name: "devices",
-    description:
-      "List the devices Spotify can play on (phone, computer, speaker, TV), or move playback to one of them. Call with no arguments to see what is available; pass transfer_to with a device name to move the music there without interrupting it. Use this for 'play this on the speaker', 'move it to my phone', 'where can I play this'.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        transfer_to: {
-          type: "string",
-          description:
-            "Name of the device to move playback to, as the user said it (e.g. 'my phone', 'kitchen speaker'). Matched loosely against the device list. Omit to just list devices.",
-        },
-      },
-    },
-  },
-  {
-    name: "status",
-    description:
-      "Get what is currently playing on Spotify — track name, artist, album, progress, and upcoming queue.",
-    inputSchema: { type: "object", properties: {} },
-  },
-  {
-    name: "control",
-    description:
-      "Control Spotify playback: pause, resume, next, previous, set volume, toggle shuffle, jump within the track, or set repeat.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          enum: [
-            "pause",
-            "resume",
-            "next",
-            "previous",
-            "volume_up",
-            "volume_down",
-            "set_volume",
-            "shuffle_on",
-            "shuffle_off",
-            "seek",
-            "repeat_off",
-            "repeat_track",
-            "repeat_all",
-          ],
-          description:
-            "The playback action to perform. 'seek' jumps within the current track (give position); 'repeat_track' loops the song, 'repeat_all' loops the album or playlist, 'repeat_off' stops looping.",
-        },
-        volume: {
-          type: "number",
-          description: "Exact volume level (0-100). Required when action is 'set_volume'.",
-        },
-        position: {
-          type: "string",
-          description:
-            "Where to jump to, for action 'seek'. Accepts 'm:ss' like '1:30', or a plain number of seconds like '90'.",
-        },
-      },
-      required: ["action"],
-    },
-  },
-];
+const available = await createProvider();
+// Said to the model when there is no provider, so it can tell the person why.
+const NO_MUSIC_INSTRUCTIONS = noMusicInstructions(chooseService(process.platform, process.env));
+// Every handler below runs only when there is a provider: `tools/call` refuses first when there is not.
+const provider = available as MusicProvider;
+const TOOLS = available ? buildTools(available) : [];
 
 // ── Tool handlers ─────────────────────────────────────────────
 
 async function handlePlay(args: Record<string, unknown>): Promise<string> {
-  const query = args.query as string | undefined;
-  const uri = args.uri as string | undefined;
-
-  if (uri) {
-    // Resolve the album so playback continues; on any failure, play the URI as given.
-    if (uri.startsWith("spotify:track:")) {
-      try {
-        const track = await provider.getTrack(uri);
-        if (track) {
-          const result = await provider.play(track);
-          if (isShortRelease(track)) {
-            try {
-              await provider.queueFollowUps(track);
-            } catch (err) {
-              log.warn("follow_up_failed", "could not queue follow-ups", {
-                seed: track.uri,
-                error: describeError(err),
-              });
-            }
-          }
-          return result;
-        }
-      } catch (err) {
-        log.warn("track_lookup_failed", "playing the URI without its album context", {
-          uri,
-          error: describeError(err),
-        });
-      }
-    }
-    return await provider.play(uri);
-  }
-
-  // A query saying "playlist" counts even with `type` unset: models often fail to set it.
-  const saysPlaylist = !!query && /\bplaylists?\b/i.test(query);
-  if (query && ((args.type as string | undefined) === "playlist" || saysPlaylist)) {
-    const { uri: playlistUri, name } = await resolvePlaylist(query);
-    await provider.play(playlistUri);
-    return `Now playing playlist: ${name}`;
-  }
-
-  // Album: play the whole record in order, same context_uri mechanism.
-  if (query && (args.type as string | undefined) === "album") {
-    const albums = await provider.searchAlbums(query, 5);
-    if (albums.length === 0) {
-      return `No album found for "${query}". Try a different search.`;
-    }
-    const top = albums[0];
-    await provider.play(top.uri);
-
-    let text = `Now playing album: ${top.name} by ${top.artist} (${top.total_tracks} tracks, ${top.release_date})`;
-    const others = albums.slice(1, 4);
-    if (others.length > 0) {
-      text +=
-        "\n\nOther matches:\n" +
-        others.map((a, i) => `${i + 2}. ${a.name} by ${a.artist}`).join("\n");
-    }
-    return text;
-  }
-
-  if (query) {
-    const tracks = await provider.searchTracks(query, 5);
-    if (tracks.length === 0) {
-      return `No results found for "${query}". Try a different search.`;
-    }
-
-    const top = tracks[0];
-    // Pass the TrackInfo, not `top.uri`: its album lets playback continue past the track.
-    await provider.play(top);
-
-    // Top up a short release; the song has already started, so a failure here is only logged.
-    let toppedUp: { queued: number; source: "artist" | "listener" } | null = null;
-    if (isShortRelease(top)) {
-      try {
-        toppedUp = await provider.queueFollowUps(top);
-      } catch (err) {
-        log.warn("follow_up_failed", "could not queue follow-ups", {
-          seed: top.uri,
-          error: describeError(err),
-        });
-      }
-    }
-
-    const others = tracks.slice(1, 4);
-    // "track" outright, so the model can't pass this off as the playlist it was asked for.
-    let text = `Now playing track: ${top.name} by ${top.artist} (${top.album})`;
-    // Say what follows, naming the source: the fallback queues the listener's favourites.
-    if (toppedUp && toppedUp.queued > 0) {
-      text +=
-        toppedUp.source === "artist"
-          ? `\nThen ${toppedUp.queued} more by ${top.artist}.`
-          : `\nThen ${toppedUp.queued} more from your top tracks.`;
-    } else if (!isShortRelease(top) && top.album_uri) {
-      // Only claim the album follows when a context was actually sent.
-      text += `\nThe rest of the album follows.`;
-    }
-    if (others.length > 0) {
-      text +=
-        "\n\nOther matches:\n" +
-        others.map((t, i) => `${i + 2}. ${t.name} by ${t.artist}`).join("\n");
-    }
-    return text;
-  }
-
-  // No query, no URI — resume
-  const result = await provider.play();
-  return result;
+  return provider.playRequest({
+    query: args.query as string | undefined,
+    uri: args.uri as string | undefined,
+  });
 }
 
 async function handleQueue(args: Record<string, unknown>): Promise<string> {
@@ -278,50 +54,6 @@ async function handleQueue(args: Record<string, unknown>): Promise<string> {
       others.map((t, i) => `${i + 2}. ${t.name} by ${t.artist}`).join("\n");
   }
   return text;
-}
-
-/** Lowercase, drop emoji and punctuation, collapse runs of whitespace. */
-function normalizeName(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
-/** Filler around a spoken playlist name, stripped from the query only (it dilutes the match). */
-const QUERY_FILLER = new Set([
-  "the", "a", "an", "my", "our", "from", "in", "on", "of", "please", "playlist",
-  "playlists", "list", "library", "spotify", "called", "named", "one",
-]);
-
-/** Drops filler, keeping the original if that would leave nothing to match on. */
-function contentWords(normalized: string): string {
-  const kept = normalized.split(" ").filter(w => w && !QUERY_FILLER.has(w));
-  return kept.length > 0 ? kept.join(" ") : normalized;
-}
-
-/** 0–1 match score; compares without spaces too, since people say "sautisol" for "Sauti sol". */
-function playlistMatchScore(query: string, playlistName: string): number {
-  const q = contentWords(normalizeName(query));
-  const n = normalizeName(playlistName);
-  if (!q || !n) return 0;
-  if (q === n) return 1;
-
-  const qs = q.replace(/ /g, "");
-  const ns = n.replace(/ /g, "");
-  if (qs === ns) return 0.95;
-
-  // Prefix is the common case; weighting containment by coverage stops short names tying with it.
-  if (ns.startsWith(qs)) return 0.92;
-  if (ns.includes(qs)) return 0.75 + 0.15 * (qs.length / ns.length);
-  if (qs.includes(ns)) return 0.7 + 0.15 * (ns.length / qs.length);
-
-  const qWords = q.split(" ");
-  const nSet = new Set(n.split(" "));
-  const overlap = qWords.filter(w => nSet.has(w)).length;
-  // Kept below the containment band so a partial word match never outranks one.
-  return Math.min(0.65, overlap / qWords.length);
 }
 
 /** Splits off a trailing "by X" owner, only when X owns something here: names contain "by" too. */
@@ -379,7 +111,7 @@ async function resolvePlaylist(query: string): Promise<{ uri: string; name: stri
     `No playlist matching "${name}"${scope} in this library. ` +
       `Closest${scope}: ${suggestions || "(none)"}. ` +
       `Only playlists the user created or follows are visible — if it belongs to someone else, ` +
-      `they can follow it in Spotify, or paste its link to play it directly.`
+      `they can add it to their library in ${provider.name}.`
   );
 }
 
@@ -387,14 +119,11 @@ async function handlePlayPlaylist(args: Record<string, unknown>): Promise<string
   // A link or URI is the only way to reach a playlist outside the library.
   const given = (args.uri ?? args.url) as string | undefined;
   if (given) {
-    const id = given.match(/playlist[/:]([A-Za-z0-9]+)/)?.[1];
-    if (!id) return `That does not look like a Spotify playlist link: ${given}`;
-    await provider.play(`spotify:playlist:${id}`);
-    return `Now playing playlist from the link provided.`;
+    return `${provider.name} can only play playlists in the user's library; ask for one by name.`;
   }
 
   const name = (args.name ?? args.query) as string | undefined;
-  if (!name) return "Which playlist? Give me its name, or a Spotify playlist link.";
+  if (!name) return "Which playlist? Give me its name.";
 
   const { uri, name: actual } = await resolvePlaylist(name);
   await provider.play(uri);
@@ -411,7 +140,7 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
   switch (action) {
     case "saved": {
       const tracks = await provider.getSavedTracks(limit);
-      if (tracks.length === 0) return "No liked songs in this Spotify account.";
+      if (tracks.length === 0) return `No favourite songs in this ${provider.name} library.`;
       return (
         `${tracks.length} liked song(s):\n` +
         tracks.map((t, i) => `${i + 1}. ${t.name} by ${t.artist}`).join("\n")
@@ -421,7 +150,7 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
 
     case "top_tracks": {
       const tracks = await provider.getTopTracks(range, limit);
-      if (tracks.length === 0) return "Spotify has no top tracks for this period yet.";
+      if (tracks.length === 0) return `${provider.name} has no top tracks for this period yet.`;
       return (
         `Top ${tracks.length} track(s) (${describeRange(range)}):\n` +
         tracks.map((t, i) => `${i + 1}. ${t.name} by ${t.artist}`).join("\n")
@@ -430,7 +159,7 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
 
     case "top_artists": {
       const artists = await provider.getTopArtists(range, limit);
-      if (artists.length === 0) return "Spotify has no top artists for this period yet.";
+      if (artists.length === 0) return `${provider.name} has no top artists for this period yet.`;
       return (
         `Top ${artists.length} artist(s) (${describeRange(range)}):\n` +
         artists
@@ -454,6 +183,8 @@ async function handleLibrary(args: Record<string, unknown>): Promise<string> {
 }
 
 function describeRange(range: TimeRange): string {
+  // A service that cannot narrow by period reports lifetime totals, whatever the default says.
+  if (!provider.capabilities.timeRange) return "all time";
   return range === "short_term"
     ? "last 4 weeks"
     : range === "long_term"
@@ -464,7 +195,7 @@ function describeRange(range: TimeRange): string {
 async function handleDevices(args: Record<string, unknown>): Promise<string> {
   const devices = await provider.getDevices();
   if (devices.length === 0) {
-    return "No Spotify devices are available. Open Spotify on a phone, computer or speaker first.";
+    return `No ${provider.name} devices are available.`;
   }
 
   const target = args.transfer_to as string | undefined;
@@ -495,7 +226,7 @@ async function handleDevices(args: Record<string, unknown>): Promise<string> {
 
 async function handlePlaylists(): Promise<string> {
   const playlists = await provider.getPlaylists();
-  if (playlists.length === 0) return "No playlists found on this Spotify account.";
+  if (playlists.length === 0) return `No playlists found in this ${provider.name} library.`;
 
   const mine = playlists.filter(p => p.is_own);
   const followed = playlists.filter(p => !p.is_own);
@@ -515,7 +246,7 @@ async function handlePlaylists(): Promise<string> {
 async function handleStatus(): Promise<string> {
   const now = await provider.getNowPlaying();
   if (!now) {
-    return "Nothing is currently playing on Spotify.";
+    return `Nothing is currently playing on ${provider.name}.`;
   }
 
   const progress = now.progress_ms
@@ -635,7 +366,8 @@ async function handleRequest(
         result: {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
-          serverInfo: { name: "giap-music", version: "0.2.0" },
+          serverInfo: { name: "giap-music", version: "0.4.0" },
+          ...(available ? {} : { instructions: NO_MUSIC_INSTRUCTIONS }),
         },
       };
 
@@ -655,6 +387,14 @@ async function handleRequest(
           unknown
         >) ?? {};
 
+      if (!available) {
+        return {
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32601, message: NO_MUSIC_INSTRUCTIONS },
+        };
+      }
+
       const started = Date.now();
       log.info("tool_call", `handling ${toolName}`, { tool: toolName });
 
@@ -668,8 +408,10 @@ async function handleRequest(
             if (target === "playlist") {
               text = await handlePlayPlaylist({ ...args, name: args.name ?? args.query });
               if (when === "next") {
-                text += "\n\n(Played now — Spotify cannot add a whole playlist to the queue.)";
+                text += `\n\n(Played now — ${provider.name} cannot add a whole playlist to the queue.)`;
               }
+            } else if (when === "next" && !provider.capabilities.queue) {
+              text = `${provider.name} has no queue to add to. Nothing was changed; ask to play it now to replace what is playing.`;
             } else if (when === "next") {
               text = await handleQueue(args);
             } else {
@@ -682,6 +424,7 @@ async function handleRequest(
             text = await handleLibrary(args);
             break;
           case "devices":
+            if (!provider.capabilities.devices) throw new Error(`${provider.name} has no devices tool.`);
             debug("devices →", args.transfer_to ?? "(list)");
             text = await handleDevices(args);
             break;

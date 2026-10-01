@@ -527,35 +527,18 @@ impl ContextRepository for SqliteContextRepository {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<u64> {
-        // The guest check comes first and returns zero rather than running a
-        // query that would also return zero. PAI-8 invariant 2 is that a
-        // `Guest` sees no context items, and the cheapest way to honour it is
-        // not to ask.
+        // A guest sees no context items, so don't query.
         if scope.excludes_everything() {
             return Ok(0);
         }
         let (filter, bind) = scope_sql(scope);
-        // Half-open [from, to): a midnight boundary belongs to the day it
-        // opens, and a closed range would count an event at exactly midnight
-        // on both of the days either side of it.
+        // Half-open [from, to), so an event at midnight counts on one day only.
         let query = format!(
             "SELECT COUNT(*) FROM context_items \
              WHERE source_kind = ? AND occurred_at >= ? AND occurred_at < ? {filter}"
         );
-        // `sql_ts`, the same formatter every row is written with, so the bound
-        // and the column are the same shape of string -- these are compared as
-        // TEXT, not as instants.
-        //
-        // Worth recording what this is NOT protecting against, because the
-        // obvious worry turns out to be unfounded and the next reader will have
-        // it too. Rows read "...:00Z" and `to_rfc3339()` would bind
-        // "...:00+00:00"; 'Z' is 0x5A and '+' is 0x2B, so an exactly-equal
-        // instant sorts ABOVE the bound -- which is what `>= from` (include)
-        // and `< to` (exclude) each already want. Mutating this back to
-        // `to_rfc3339()` leaves all four tests below green, checked. The reason
-        // to use `sql_ts` anyway is that the agreement is a coincidence of two
-        // formats and one comparison direction: change `sql_ts` to emit offsets,
-        // or make either bound inclusive, and it stops holding silently.
+        // Bind with `sql_ts`, the rows' own formatter: timestamps compare as TEXT. `to_rfc3339()`
+        // passes the tests only by coincidence ('Z' sorts above '+') and would break silently.
         let mut q = sqlx::query_scalar::<_, i64>(&query)
             .bind(kind.as_str())
             .bind(sql_ts(from))
@@ -1182,10 +1165,6 @@ mod tests {
         );
     }
 
-    /// The window counts the rows inside it and not the ones outside.
-    ///
-    /// Four rows an hour apart, a window covering two of them. This is the
-    /// plain correctness test; the boundary and scope cases are separate below.
     #[tokio::test]
     async fn the_window_counts_rows_in_the_format_they_are_stored_in() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -1245,8 +1224,6 @@ mod tests {
         );
     }
 
-    /// A kind that is not asked for is not counted, or every suggestor would
-    /// quote the whole corpus.
     #[tokio::test]
     async fn the_window_counts_one_source_kind_only() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -1270,7 +1247,6 @@ mod tests {
         );
     }
 
-    /// PAI-8 invariant 2: a guest sees no context items, counts included.
     #[tokio::test]
     async fn a_guest_counts_nothing() {
         let (repo, pool, _tmp) = make_repo().await;
@@ -1280,8 +1256,7 @@ mod tests {
         let at = "2026-09-15T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
         ingest(&repo, &src, raw("v", "spoken", at)).await.unwrap();
 
-        // The control: the same window is non-zero for the household, so a zero
-        // for the guest is the scope and not an empty table.
+        // Control: non-zero for the household, so the guest's zero is the scope.
         let from = at - chrono::Duration::hours(1);
         let to = at + chrono::Duration::hours(1);
         assert_eq!(

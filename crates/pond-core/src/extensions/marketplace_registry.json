@@ -103,21 +103,95 @@
     {
       "id": "music",
       "name": "Music",
-      "description": "Control music playback, search tracks, and manage playlists via Spotify",
+      "description": "Play songs, playlists and your library on Apple Music, and sign in to Spotify for the app's music controls",
       "kind": "stdio",
       "command": "npx",
       "args": ["-y", "tsx", "extensions/music/src/server.ts"],
       "category": "entertainment",
       "author": "GIAP",
-      "tools": ["play", "play_playlist", "queue", "playlists", "library", "devices", "status", "control"],
+      "tools": ["play", "playlists", "library", "devices", "status", "control"],
       "featured": true,
       "required_secrets": [
         {
+          "key": "MUSIC_SERVICE",
+          "display_name": "Music service",
+          "description": "Which service this household plays.",
+          "required": false,
+          "kind": "choice",
+          "options": [
+            {
+              "value": "apple",
+              "label": "Apple Music",
+              "description": "The assistant can play it for you, by voice or in chat."
+            },
+            {
+              "value": "spotify",
+              "label": "Spotify",
+              "description": "Played by hand, on its page, in the Spotify app, or with the music controls. The assistant never controls Spotify: Spotify's developer rules do not allow voice or AI control."
+            }
+          ]
+        },
+        {
+          "key": "MUSIC_PLAYER",
+          "display_name": "Player",
+          "description": "Where the music plays.",
+          "required": false,
+          "kind": "choice",
+          "options": [
+            {
+              "value": "page",
+              "label": "The player page, in your web browser",
+              "description": "Apple Music's whole catalog, or Spotify as a device called Goose In A Pond."
+            },
+            {
+              "value": "app",
+              "label": "The service's own app",
+              "description": "The Music app on this Mac for Apple Music. The Spotify app, or another of your devices, for Spotify."
+            }
+          ]
+        },
+        {
+          "key": "SPOTIFY_CLIENT_ID",
+          "display_name": "Spotify client ID",
+          "description": "Needed before you can sign in to Spotify: its developer terms do not allow one app for every household, so each uses its own.",
+          "required": false,
+          "kind": "generic",
+          "host_only": true
+        },
+        {
           "key": "SPOTIFY_ACCESS_TOKEN",
           "display_name": "Spotify",
-          "description": "Sign in to control playback and manage playlists",
-          "required": true,
-          "kind": "oauth_flow"
+          "description": "Optional. Sign in so the app's music controls and the Spotify player page can play Spotify. The assistant never controls Spotify: Spotify's developer rules do not allow voice or AI control.",
+          "required": false,
+          "kind": "oauth_flow",
+          "host_only": true
+        },
+        {
+          "key": "APPLE_MUSIC_TEAM_ID",
+          "display_name": "Apple Music Team ID",
+          "description": "Optional. Your own Apple Developer key for the Apple Music player page. Leave all three blank to use Jarida's shared credentials. Your 10-character Team ID.",
+          "required": false,
+          "kind": "generic",
+          "host_only": true,
+          "advanced": true
+        },
+        {
+          "key": "APPLE_MUSIC_KEY_ID",
+          "display_name": "Apple Music Key ID",
+          "description": "Optional. Part of your own Apple Developer key; leave blank to use the shared credentials. The 10-character ID of your MusicKit key.",
+          "required": false,
+          "kind": "generic",
+          "host_only": true,
+          "advanced": true
+        },
+        {
+          "key": "APPLE_MUSIC_PRIVATE_KEY",
+          "display_name": "Apple Music private key",
+          "description": "Optional. Part of your own Apple Developer key; leave blank to use the shared credentials. Paste the whole contents of the MusicKit .p8 file; it stays on this device and is never given to the extension.",
+          "required": false,
+          "kind": "api_key",
+          "host_only": true,
+          "advanced": true
         }
       ]
     }

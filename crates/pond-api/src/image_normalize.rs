@@ -1,35 +1,23 @@
-//! Pictures the engine can decode, whatever the client sent (design_v2 F.1).
+//! Pictures the engine can decode, whatever the client sent; judged by bytes, never the label.
 //!
-//! mtmd decodes with `stb_image` alone, which has no WebP decoder
-//! (`image_limits::ENGINE_DECODABLE_IMAGE_TYPES`). The desktop re-encodes WebP before it uploads,
-//! but a phone browser, an older client or a script may not, and the declared mime proves nothing:
-//! a WebP labelled `image/jpeg` passes `validate_turn_images`, which reads only the label. A picture
-//! the engine cannot read does not fail once. It stays the newest image in the history and fails
-//! every later turn of the conversation, so it has to be caught before the turn is persisted.
-//!
-//! So each attachment's leading bytes are sniffed. JPEG, PNG, GIF and BMP pass untouched (their
-//! label is corrected if it disagrees with the bytes); WebP is decoded under hard limits, off the
-//! executor, and re-encoded to PNG when it has transparency and JPEG otherwise; anything else is
-//! refused, because the engine could not read it either.
+//! mtmd decodes with `stb_image`, which has no WebP, and an unreadable picture stays in history
+//! and fails every later turn, so it must be caught before the turn is persisted. JPEG, PNG, GIF
+//! and BMP pass (label corrected); WebP is re-encoded under hard limits; the rest is refused.
 
 use base64::Engine as _;
 use pond_core::models::domain::image_limits::MAX_IMAGE_BYTES;
 use pond_core::models::domain::message::ImageAttachment;
 
-/// Widest and tallest picture the WebP decoder accepts. Four times the 1024 px longest edge the
-/// desktop sends, so only a picture no client of ours produces is refused.
+/// Max WebP edge to decode; 4x the desktop's 1024 px, so no picture our clients make is refused.
 pub(crate) const MAX_DECODE_EDGE_PX: u32 = 4096;
 
-/// Allocation ceiling for one decode: exactly one 4096 x 4096 RGBA frame. A 4 MiB WebP may declare
-/// 16383 x 16383, about 1 GiB decoded, which is an OOM on the Orin rather than a slow turn.
+/// One 4096x4096 RGBA frame; a 4 MiB WebP may declare ~1 GiB decoded, an OOM on the Orin.
 pub(crate) const MAX_DECODE_ALLOC_BYTES: u64 = 64 << 20;
 
-/// JPEG quality for a re-encoded picture. The desktop's canvas re-encode uses 0.85
-/// (`pond-desktop/src/lib/imageAttach.ts`), so a picture reads the same whichever side converted it.
+/// Matches the desktop's canvas re-encode (0.85 in `pond-desktop/src/lib/imageAttach.ts`).
 pub(crate) const TRANSCODE_JPEG_QUALITY: u8 = 85;
 
-/// Base64 characters enough to identify every container below: 16 characters are 12 bytes, which
-/// covers the longest magic (`RIFF` + size + `WEBP`).
+/// 16 base64 chars = 12 bytes, enough for the longest magic (`RIFF` + size + `WEBP`).
 const SNIFF_BASE64_CHARS: usize = 16;
 
 /// A container the leading bytes identify.
@@ -78,9 +66,7 @@ pub(crate) struct Unreadable {
     pub index: usize,
 }
 
-/// Normalise a turn's pictures for the engine. Already-decodable pictures cost a 16-character
-/// base64 decode each and never leave the executor; only a WebP pays for a decode, and that runs
-/// in `spawn_blocking`. The result is in the same order as `images`.
+/// Normalise a turn's pictures for the engine, in order; only WebP is decoded (off the executor).
 pub(crate) async fn normalize_images_for_engine(
     mut images: Vec<ImageAttachment>,
 ) -> Result<Vec<ImageAttachment>, Unreadable> {
@@ -106,13 +92,11 @@ pub(crate) async fn normalize_images_for_engine(
         Ok(images)
     })
     .await
-    // A panic is caught per picture above, so a join error means the runtime is shutting down;
-    // nothing was persisted either way, and the first picture is as honest a pointer as any.
+    // Panics are caught per picture, so a join error means shutdown; index 0 is as good as any.
     .unwrap_or(Err(Unreadable { index: 0 }))
 }
 
-/// The base64 payload itself: a data-URL prefix and surrounding whitespace dropped, the same
-/// tolerance the attachment store applies when it writes the picture to disk.
+/// Strips a data-URL prefix and outer whitespace, matching the attachment store's tolerance.
 fn payload(data: &str) -> &str {
     data.rsplit_once("base64,")
         .map(|(_, b)| b)
@@ -129,16 +113,14 @@ fn lenient_base64() -> base64::engine::GeneralPurpose {
     )
 }
 
-/// The first bytes of the picture, decoded from its first [`SNIFF_BASE64_CHARS`] characters
-/// (inner whitespace skipped). `None` when those characters are not base64.
+/// Leading bytes decoded from the first [`SNIFF_BASE64_CHARS`] non-whitespace characters.
 fn head_bytes(b64: &str) -> Option<Vec<u8>> {
     let head: String = b64
         .chars()
         .filter(|c| !c.is_ascii_whitespace())
         .take(SNIFF_BASE64_CHARS)
         .collect();
-    // Four characters decode independently of what follows, so a whole number of quads is a
-    // valid decode of a prefix. A payload shorter than that is decoded as it stands.
+    // Each 4-char quad decodes independently, so whole quads are a valid prefix decode.
     let usable = if head.len() >= 4 {
         head.len() - head.len() % 4
     } else {
@@ -147,7 +129,6 @@ fn head_bytes(b64: &str) -> Option<Vec<u8>> {
     lenient_base64().decode(&head[..usable]).ok()
 }
 
-/// The whole picture, decoded.
 fn full_bytes(b64: &str) -> Option<Vec<u8>> {
     if b64.bytes().any(|b| b.is_ascii_whitespace()) {
         let compact: String = b64.chars().filter(|c| !c.is_ascii_whitespace()).collect();
@@ -157,8 +138,7 @@ fn full_bytes(b64: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Correct a label that disagrees with the bytes. The bytes are what the engine will decode, and
-/// the label is what names the stored file.
+/// Correct a label that disagrees with the bytes: the label names the stored file.
 fn relabel(img: &mut ImageAttachment, container: Container) {
     let declared = img.mime_type.trim().to_ascii_lowercase();
     let base = declared.split(';').next().unwrap_or("").trim();
@@ -182,8 +162,7 @@ fn decode_limits() -> image::Limits {
     limits
 }
 
-/// Decode one WebP under [`decode_limits`] and re-encode it for the engine. `None` when the bytes
-/// do not decode, exceed a limit, or will not encode.
+/// Decode one WebP under [`decode_limits`] and re-encode it for the engine.
 fn transcode_webp(img: &ImageAttachment) -> Option<ImageAttachment> {
     let bytes = full_bytes(payload(&img.data))?;
     let mut reader =
@@ -207,9 +186,8 @@ fn transcode_webp(img: &ImageAttachment) -> Option<ImageAttachment> {
     })
 }
 
-/// PNG when the picture really is transparent somewhere, JPEG otherwise. A transparent PNG that
-/// would exceed the per-picture limit falls back to JPEG over white, as the desktop does, rather
-/// than turning a legal 4 MB upload into a 413 about a file the household never made.
+/// PNG if any pixel is transparent, else JPEG. An over-limit PNG falls back to JPEG over white,
+/// as the desktop does, so a legal upload never becomes a 413.
 fn encode_for_engine(decoded: image::DynamicImage) -> Option<(Vec<u8>, &'static str)> {
     if decoded.color().has_alpha() {
         let rgba = decoded.into_rgba8();
@@ -225,9 +203,8 @@ fn encode_for_engine(decoded: image::DynamicImage) -> Option<(Vec<u8>, &'static 
     encode_jpeg(&decoded.into_rgb8()).map(|j| (j, "image/jpeg"))
 }
 
-/// Composite RGBA over white into RGB, reusing the RGBA buffer: a 4096 px frame is 64 MiB, and a
-/// second buffer beside it would double the transient on a device with little to spare. Pixel `i`
-/// is read whole before its three bytes are written at `3i`, which never passes `4i`.
+/// Composite RGBA over white into RGB in the same buffer (a 4096 px frame is 64 MiB). In place
+/// is sound because pixel `i` is read before writing at `3i`, which never passes `4i`.
 fn flatten_onto_white(rgba: image::RgbaImage) -> Option<image::RgbImage> {
     let (width, height) = rgba.dimensions();
     let mut raw = rgba.into_raw();

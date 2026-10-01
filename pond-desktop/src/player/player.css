@@ -1,0 +1,194 @@
+/* The player is one card on paper: the edge marks the content, the controls stay on a hairline,
+   and the offset is spent twice at most (the card, and Connect when it is the question asked). */
+/* A browser tab, not a fixed small window: one centred column, as tall as the tab. */
+.player {
+  box-sizing: border-box;
+  min-height: 100vh;
+  max-width: 440px;
+  margin: 0 auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+
+.player__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.player__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: -0.02em;
+}
+
+.player__card {
+  border: 2px solid var(--border-ink);
+  border-radius: var(--radius-card);
+  box-shadow: 4px 4px 0 var(--border-ink);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--color-bg);
+}
+
+.player__text,
+.player__meta,
+.player__note {
+  margin: 0;
+  /* Slate on Jarida White measures 5.97:1. */
+  color: var(--color-text-secondary);
+  font-size: 0.9rem;
+}
+
+.player__track {
+  margin: 0;
+  font-weight: 700;
+  font-size: 1.05rem;
+  overflow-wrap: anywhere;
+}
+
+.player__time {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+}
+
+.player__now {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+/* Artwork exactly as the service supplies it: never cropped (contain), no overlay, no filter. The
+   4px corner is the one Spotify's design guidelines allow for small artwork; Apple sets none. */
+.player__art {
+  flex: none;
+  width: 150px;
+  height: 150px;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+/* A service's own logo, as its brand rules give it: unaltered, with clear space around it. Spotify's
+   full logo is at least 70px wide (24px tall gives it 88), with clear space of half its icon's height. */
+.player__logo {
+  display: block;
+  height: 24px;
+  width: auto;
+  margin: 12px 12px 12px 0;
+}
+
+/* The link back to the item on the service, in the words its guidelines give. */
+.player__link {
+  align-self: flex-start;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-text);
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.player__about {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.player__controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* Dense controls keep a hairline; 44px is the touch target, not decoration. */
+.player__key {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-text-secondary);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+/* A control the service does not allow right now (Spotify's disallows) is shown, and cannot be used. */
+.player__key:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.player__primary {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 2px solid var(--border-ink);
+  border-radius: var(--radius-sm);
+  box-shadow: 3px 3px 0 var(--border-ink);
+  background: var(--bg-brand-soft);
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.player__primary:active {
+  box-shadow: 0 0 0 var(--border-ink);
+  transform: translate(3px, 3px);
+}
+
+/* Signing out is chrome, not content: no edge and no offset, only words and a 44px target. */
+.player__quiet {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.player__link:focus-visible,
+.player__key:focus-visible,
+.player__quiet:focus-visible,
+.player__primary:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.player__note--error {
+  /* Text stays charcoal: colour never carries the meaning, the words do. */
+  color: var(--color-text);
+  border-left: 3px solid var(--border-ink);
+  padding-left: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .player__primary:active {
+    transform: none;
+  }
+}

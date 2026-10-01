@@ -501,9 +501,7 @@ impl Agent for MistralRsAgent {
         self.provider.capabilities()
     }
 
-    /// No vision on this path (see the module docs), for every provider and model: reported as
-    /// not declared, so the API refuses a picture before anything is saved instead of this
-    /// agent dropping it and answering as if it had looked.
+    /// No vision here. `NotDeclared` makes the API refuse pictures; `None` would let them through.
     fn vision_state(&self, _provider: &str, _model: &str) -> Option<EncoderState> {
         Some(EncoderState::NotDeclared)
     }
@@ -540,9 +538,6 @@ mod tests {
         }
     }
 
-    /// The API asks the agent before it saves a turn carrying pictures. This agent drops them,
-    /// so it must answer "not declared" (refused as unsupported), never `None`, which the API
-    /// reads as unknown and lets through.
     #[test]
     fn pictures_are_reported_as_not_declared_for_every_provider() {
         use pond_core::user_data::mocks::mock_session::InMemorySessionStorage;

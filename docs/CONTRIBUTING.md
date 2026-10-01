@@ -163,6 +163,33 @@ npx tsc --noEmit   # TypeScript type check
 npm test           # vitest unit tests
 ```
 
+### Comments
+
+Most code needs no comment. Write one only for what a reader can't get from the code: a constraint, an invariant, a non-obvious reason, or a quirk of a dependency (Goose, llama.cpp, SQLite, Matter).
+
+- **Keep it short.** One line where possible. A doc comment is a one-sentence summary plus any constraint the caller must know.
+- **No history.** No "used to", dates, commit hashes, PR or issue numbers, phase or workstream tags (`PAI-7 P4`, `Phase F2`), or incident write-ups. Those go in the commit message and the pull request.
+- **Don't restate the code.** `// increment the retry count` above `retries += 1` adds nothing.
+- **Keep it true.** When you change code, fix or delete the comments it makes wrong.
+
+```rust
+// Bad: history and narrative
+// Phase F2: attachments used to be inlined as base64 until a routine history
+// read reached megabytes on 2026-09-12 (#nnn), so now they're referenced.
+
+// Good: the constraint
+// Referenced by URL, never inlined: base64 would make a history read megabytes.
+```
+
+Some comments are read by programs as well as people, so change them deliberately:
+
+- clap doc comments on CLI arguments are the `--help` text;
+- `JsonSchema` field docs in `pond-mcp-server` are the tool descriptions the model sees;
+- directives such as `// SAFETY:`, `@ts-expect-error`, `eslint-disable` and `/// <reference>`;
+- code blocks in Rust doc comments, which run as doctests.
+
+Several tests read source files as text, including the `*_is_wired.rs` and `*_wiring.rs` tests, `egress_guard.rs` and `stream_handler_parity.rs`. Run them after editing comments in the files they scan.
+
 ---
 
 ## Commit Messages
@@ -194,6 +221,7 @@ Before opening a PR:
 - [ ] Tests pass: `cargo test -p pond-core -p pond-api`
 - [ ] No clippy warnings: `cargo clippy`
 - [ ] Code formatted: `cargo fmt`
+- [ ] Comments follow [the comment rules](#comments)
 - [ ] New ports have a mock and tests in `pond-core`
 - [ ] `pond-core` has no new external dependencies
 - [ ] Live tests are `#[ignore]`d with setup instructions

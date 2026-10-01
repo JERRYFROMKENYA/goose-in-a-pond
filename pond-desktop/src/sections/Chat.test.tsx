@@ -31,8 +31,7 @@ vi.mock("../api/PondApiClient", () => ({
       structured_output: false,
       tool_calling: true,
     }),
-    // Ready by default, so tests that do not care about picture support see
-    // the send gate stay open.
+    // Ready by default, so the send gate stays open outside the picture-support tests.
     getVisionStatus: vi.fn().mockResolvedValue({
       model: "", state: { kind: "ready", bytes: null }, size_bytes: null, message: null,
     } satisfies VisionStatus),
@@ -55,11 +54,7 @@ vi.mock("../state/AppContext", () => ({
   useAppDispatch: () => vi.fn(),
 }));
 
-// Only `prepareImage` is faked — everything else (validateAttachmentSet, the
-// MIME lists AttachmentTray itself reads) stays real. happy-dom's <img> never
-// fires a real decode, so prepareImage cannot run end to end here; the tests
-// below only need SOME PreparedImage to reach the composer's state, the way
-// a real decode would.
+// Only `prepareImage` is faked: happy-dom's <img> never decodes, so it can't run here.
 vi.mock("../lib/imageAttach", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/imageAttach")>();
   return { ...actual, prepareImage: vi.fn() };
@@ -90,9 +85,7 @@ beforeEach(() => {
   appState.sessionId = null;
   vi.mocked(api.listSessions).mockResolvedValue([]);
   vi.mocked(api.getSessionMessages).mockResolvedValue([]);
-  // `mockResolvedValue` replaces the mock's implementation for good, not just
-  // for the test that called it, so a per-test override of getVisionStatus
-  // (or of prepareImage's resolved image) has to be re-established here too.
+  // Re-set each test: `mockResolvedValue` overrides outlive the test that set them.
   vi.mocked(api.getVisionStatus).mockResolvedValue(READY_STATUS);
   vi.mocked(prepareImage).mockResolvedValue(fakePrepared());
   // The turn is a module singleton that outlives cleanup(), so reset it; with AppContext mocked
@@ -471,11 +464,7 @@ describe("Chat history — persisted reasoning (PAI-5 P6)", () => {
 });
 
 // ── History images ────────────────────────────────────────────────────────────
-//
-// Opened from the wall, the way a person does. The bubble must show an object
-// URL made from bytes the client fetched with its token: the bare attachment
-// URL it used to show sits on the protected router, and an `<img src>` cannot
-// send the bearer header, so on a real pond every one of them was a 401.
+// An `<img src>` can't send the bearer header, so a replayed image must be an object URL of fetched bytes.
 describe("Chat history — images", () => {
   it("shows a replayed image through an object URL, not the attachment URL", async () => {
     vi.mocked(api.listSessions).mockResolvedValue([
@@ -512,18 +501,10 @@ describe("Chat history — images", () => {
   });
 });
 
-/**
- * Picture support's own status, and the send/paste gate it drives.
- *
- * The paperclip is never disabled for a vision reason (see Chat.tsx), so
- * these test the actual gate: the composer accepts an attachment into its
- * tray regardless of status, and only refuses to SEND it.
- */
+/** The paperclip is never vision-gated, so these test the real gate: attaching works, sending is refused. */
 describe("Chat — picture support", () => {
   async function attachOneImage() {
-    // The composer (and its file input) only exists once `view` resolves to
-    // "thread" -- a render or two after mount, unlike the Hub's ChatHubView,
-    // which has no such wall/thread split.
+    // The composer mounts only once `view` resolves to "thread", a render or two in.
     await screen.findByLabelText("Message input");
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
     fireEvent.change(fileInput, { target: { files: [fakeFile()] } });
@@ -600,9 +581,7 @@ describe("Chat — picture support", () => {
     } satisfies VisionStatus);
 
     render(<Chat />);
-    // Wait for the mocked status to actually land before pasting -- otherwise
-    // the paste can race the hook's first fetch and land while gate.blocked
-    // is still evaluating from the (unblocked) capabilities fallback.
+    // Wait for the status first, or the paste races the hook's fetch and sees the unblocked fallback.
     await screen.findByText(/Picture support needs a one-time 941 MB download/);
     const input = screen.getByLabelText("Message input");
     fireEvent.paste(input, { clipboardData: { files: [fakeFile()] } });

@@ -1,0 +1,18 @@
+[package]
+name = "pond-apple-token"
+description = "Signs Apple Music developer tokens (ES256) from a MusicKit .p8 key. Shared by the pond and the pondcredentials service."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jsonwebtoken = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# Tests only: generate the P-256 key at run time, so no key material is ever committed (CI runs
+# gitleaks over history). Already in the graph as jsonwebtoken's crypto backend.
+aws-lc-rs = "1"
+serde_json = { workspace = true }

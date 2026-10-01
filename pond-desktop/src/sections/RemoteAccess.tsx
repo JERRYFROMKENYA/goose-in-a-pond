@@ -57,8 +57,7 @@ export function RemoteAccess() {
         if (current !== generation.current) return;
         setState('local');
       } else {
-        // Empty means the hosted coordinator, which the server fills in when it
-        // enables. Only validate what the household actually chose.
+        // Empty means the hosted coordinator (server-filled), so only chosen origins are validated.
         for (const value of [control, enrollment].filter((entry) => entry !== '')) {
           const url = new URL(value);
           if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('invalid origin');
@@ -85,10 +84,6 @@ export function RemoteAccess() {
       console.warn('[remote] local activation operation failed');
     } finally { if (current === generation.current) setBusy(false); }
   };
-  // Remote access is a thing you turn on and off again, so it is a switch rather
-  // than a button whose label changes. An earlier version rendered an enable and
-  // a disable action side by side, which left a running Pond still inviting you
-  // to enable it.
   const on = state === 'enabled';
   const settling = state === 'connecting' || state === 'provision';
   const field: React.CSSProperties = { display: 'grid', gap: 4 };

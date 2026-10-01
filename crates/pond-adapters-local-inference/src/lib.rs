@@ -198,8 +198,7 @@ impl LocalInferenceLlmAdapter {
         Self::new(model_id).await
     }
 
-    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-    // so this is commented out rather than deleted; restore it if it returns.
+    // Speculation left the engine; kept commented out in case it returns.
     // /// The drafter id to hand the engine, or `None` to decode without speculation.
     // ///
     // /// `None` whenever the speculation switch in Settings is off: every call site stamps the
@@ -366,11 +365,8 @@ impl LocalInferenceLlmAdapter {
             get_registry, ModelSettings, ToolCallingMode,
         };
 
-        // Size the context to THIS model, through pond-core's one derivation. The goose adapter
-        // asks the same function whether picture support fits beside the model, so the window
-        // stamped here and that answer cannot come from different inputs: the RESOLVED file's
-        // length and header slope, never a registry row by name. A file that cannot be read is
-        // charged as the largest model we ship, so the first load is conservative, not fatal.
+        // Same `device_window` the goose adapter asks about picture support, fed the resolved
+        // file rather than a registry row by name, so the two answers can't disagree.
         let gguf = get_registry().lock().ok().and_then(|reg| {
             reg.get_model(model_id)
                 .map(|e| Self::resolved(&e.local_path))
@@ -378,11 +374,8 @@ impl LocalInferenceLlmAdapter {
         let sizing =
             pond_core::models::domain::device_budget::device_window(gguf.as_deref(), model_id);
         let context_size = sizing.window;
-        // The window above still charges this model's drafter (see `device_budget`), although
-        // the engine no longer loads one: that keeps the Orin's windows at the values they were
-        // measured at. Uncharging it is a separate, device-measured change.
-        // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
-        // 743649d98), so this is commented out rather than deleted; restore it if it returns.
+        // `device_window` still charges a drafter, keeping the Orin's windows as measured.
+        // Speculation left the engine; kept commented out in case it returns.
         // let draft_model = Self::registered_drafter(model_id);
         tracing::info!(
             model = model_id,
@@ -437,8 +430,7 @@ impl LocalInferenceLlmAdapter {
             // From the model's own template; see `tool_and_thinking_for`.
             tool_calling: tools,
             enable_thinking: thinking,
-            // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose
-            // 743649d98), so this is commented out rather than deleted; restore it if it returns.
+            // Speculation left the engine; kept commented out in case it returns.
             // // Speculative decoding, when the switch in Settings is on AND this
             // // model's drafter is registered AND its weights are still on disk.
             // // Re-decided on every provider build
@@ -475,26 +467,8 @@ impl LocalInferenceLlmAdapter {
         }
     }
 
-    /// Stamp `settings` on every registry row naming the same GGUF as `model_id`, returning the
-    /// ids that took it.
-    ///
-    /// Every row, not only the id we were handed. One file is registered under more than one id
-    /// -- the spelling in settings (`gemma-4-E2B-it-qat-UD-Q4_K_XL`) and the canonical stem
-    /// `register_gguf_model` returns (`gemma-4-E2B-it-qat`) -- and they share one engine slot.
-    /// Stamping only the id passed in put the whole tuning block on a row the engine never read:
-    /// measured on the Orin, the row it did read carried context_size, flash_attention, type_k,
-    /// type_v, n_batch and n_ubatch all None, so the pond ran with an f16 KV cache and the
-    /// default 2048/512 batch instead of q8_0 and 512/128 -- roughly 700 MB of footprint on a
-    /// 7.6 GB board. On the Mac the same split decided whether the drafter loaded by which
-    /// caller happened to cold-load the slot first.
-    ///
-    /// Matching on the resolved path rather than on a name rule: the spellings are produced by
-    /// two different canonicalisers in two crates, and a rule that tried to reproduce either
-    /// would be one more thing to keep in step.
-    ///
-    /// Each row keeps its own copy of the picture-support fields (`mmproj_size_bytes`,
-    /// `vision_capable`): the goose adapter's encoder stamp owns them, and a block that zeroed
-    /// them at every build left the settings copy disagreeing with the row it sits on.
+    /// Stamps `settings` on every row resolving to `model_id`'s GGUF: those ids share one slot.
+    /// Picture-support fields stay per row, since the goose adapter's encoder stamp owns them.
     fn stamp_every_row_naming(
         registry: &mut goose::providers::local_inference::local_model_registry::LocalModelRegistry,
         model_id: &str,

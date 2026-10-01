@@ -1,0 +1,84 @@
+# Reviewed exceptions for osv-scanner.
+#
+# Every entry here is an advisory with NO upstream fix. Anything that has a
+# fixed version is deliberately absent: an advisory you could upgrade away from
+# does not belong in an ignore file, and putting it here would convert a real
+# finding into a silent one.
+#
+# `ignoreUntil` is a review date, not a dismissal. When it passes the scanner
+# reports the advisory again, which is the point -- an unmaintained crate that
+# is still unmaintained a year later is worth re-deciding, not re-ignoring.
+#
+# Reviewed 2026-09-29. Checked against the scan on jarida-io/goose-in-a-pond
+# main at that date; the fixed-version column was empty ("--") for all of them.
+
+# ── Unmaintained-crate notices ───────────────────────────────────────────────
+#
+# RUSTSEC's `unmaintained` category is a maintenance signal, not a defect: there
+# is no vulnerable code and no patch to take. They are worth knowing and worth
+# migrating off, and none of them is a reason to block a merge today. Each one
+# below arrives transitively; none is a direct dependency of this workspace.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0089"
+ignoreUntil = 2027-03-31
+reason = "atomic-polyfill is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0141"
+ignoreUntil = 2027-03-31
+reason = "bincode 1.x is unmaintained. Transitive, no fixed version exists; bincode 2.x is a separate API, not an upgrade."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0388"
+ignoreUntil = 2027-03-31
+reason = "derivative is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0384"
+ignoreUntil = 2027-03-31
+reason = "instant is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0243"
+ignoreUntil = 2027-03-31
+reason = "nostr-relay-pool is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+ignoreUntil = 2027-03-31
+reason = "paste is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+ignoreUntil = 2027-03-31
+reason = "proc-macro-error is unmaintained. Transitive, build-time only, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0134"
+ignoreUntil = 2027-03-31
+reason = "rustls-pemfile is unmaintained. Transitive, no fixed version exists; its successor is rustls-pki-types."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0249"
+ignoreUntil = 2027-03-31
+reason = "smartstring is unmaintained. Transitive, no fixed version exists."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+ignoreUntil = 2027-03-31
+reason = "ttf-parser is unmaintained. Transitive via font rendering, no fixed version exists. Named in security.yml's own comment as one of the two advisories this tree cannot clear."
+
+# ── A real vulnerability with no upstream fix ────────────────────────────────
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2023-0071"
+ignoreUntil = 2027-03-31
+reason = "rsa: Marvin Attack, key recovery through timing side channels (CVSS 5.9). No fixed version exists -- the fix requires a constant-time rewrite upstream. Reached transitively; GIAP does not perform RSA private-key operations on attacker-controlled timing paths. Named in security.yml's own comment. Re-check whether a fixed rsa release exists at the review date."
+
+# ── Go: present in the module graph, not in the build ────────────────────────
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+ignoreUntil = 2027-03-31
+reason = "golang.org/x/crypto/openpgp is unmaintained and unsafe by design; the advisory covers only the openpgp subpackages and has no fixed version because the guidance is to stop using it. native/pondnet does not: `go list -deps ./...` contains no openpgp package and `go mod why golang.org/x/crypto` reports 'main module does not need package golang.org/x/crypto'. govulncheck with the go.mod toolchain agrees -- 1 vulnerability in a required module, 0 called. The govulncheck step in embedded-go-audit is what proves this on every run."

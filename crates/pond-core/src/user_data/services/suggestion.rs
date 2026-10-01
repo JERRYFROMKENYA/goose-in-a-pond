@@ -1,95 +1,21 @@
-//! The suggestion engine — what the household might want to ask, and why.
+//! Suggestions: questions the household could ask now, phrased only from facts the pond holds.
 //!
-//! A **suggestion** is a question the household could put to the pond right
-//! now, that the pond can currently answer, phrased only from facts the pond
-//! actually holds. It is not a [`Proposal`](crate::user_data::domain::proposal),
-//! and the difference is the whole reason this module exists rather than a
-//! fourth arm inside `proactive_review`.
-//!
-//! | | proposal | suggestion |
-//! |---|---|---|
-//! | what it is | a staged action | an offer |
-//! | who it is for | one named member | nobody in particular |
-//! | when it acts | on approval | when tapped, by the person tapping |
-//! | if ignored | expires | keeps |
-//! | budget | 6 interruptions a day | none; it interrupts nothing |
-//!
-//! Because a suggestion performs nothing until somebody taps it, **the tap is
-//! the consent**. That is what lets it skip the apparatus a proposal needs —
-//! [`ProposalAudience`](crate::user_data::domain::proposal::ProposalAudience),
-//! the expiry, the daily cap — and it is also why skipping that apparatus is
-//! not a loophole: there is no action being staged to approve.
-//!
-//! # Derived on read, never stored
-//!
-//! Nothing here writes a row. A suggestion is a pure function of a
-//! [`SuggestionSnapshot`] the caller measured a moment ago, so it cannot go
-//! stale and there is no table that could acquire a writer and no reader. That
-//! is deliberate: the memory-edge table, `activity_watcher`, the context
-//! preamble and `TaskKind::ToolCall` are all shapes in this tree where
-//! something was built and nothing ever reached it. A derived suggestion is
-//! immune to that class by construction.
-//!
-//! # Every suggestion carries the fact that produced it
-//!
-//! [`Suggestion::because`] is not decoration and is never a template with no
-//! number in it. DESIGN.md's rule is "never invent meaning the data lacks", so
-//! a suggestor that cannot measure its own fact does not soften the sentence —
-//! it emits nothing, and says so in [`Considered::silent_because`]. The set is
-//! therefore small on a bare pond and grows as the household connects things,
-//! which is the honest shape.
-//!
-//! # Nothing here spends inference
-//!
-//! The one model-backed producer in this tree is the proactive reviewer, and
-//! its yield has been zero on three Orin runs — twice on `deny_unknown_fields`,
-//! once on a 2B model omitting a required field. Every suggestor below is a
-//! `match` over integers and booleans, which has none of that failure mode and
-//! does not queue behind the household's next turn for the one GPU.
-//!
-//! # A suggestion that nothing can answer is not offered
-//!
-//! [`Suggestion::answered_by`] names the tool group whose tools the model would
-//! reach for, and [`suggest`] drops any suggestion whose group the pond does
-//! not have. This is the control that keeps the engine from producing the one
-//! card everybody wants and nothing can serve: there is no music tool anywhere
-//! in `pond-mcp-server` — `POST /api/v1/music/control` is an HTTP route the
-//! desktop calls, not something the model can invoke — so "Play some music"
-//! would reach a model that answers it cannot. Rather than ship it behind a
-//! flag that is false on every pond, it is not written, and this paragraph is
-//! where the next person finds out why.
+//! Unlike a proposal, a suggestion stages no action (the tap is the consent), so it needs no
+//! audience, expiry or daily cap. Derived on read, never stored; no suggestor spends inference.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 // ── What the household may be shown ─────────────────────────────────────────
 
-/// Who is looking, in the only terms this module needs.
-///
-/// Deliberately NOT [`ProfileScope`](crate::user_data::domain::profile::ProfileScope):
-/// the question here is "may this screen show personal facts", which has two
-/// answers, not three.
-///
-/// The mapping is the subtle part and it follows
-/// [`identity_resolution::resolve`](super::identity_resolution::resolve)
-/// exactly. That function returns `Guest` **only** when the household has more
-/// than one member, and `Household` otherwise — so `ProfileScope::Household` is
-/// reachable only on a pond with at most one member, where "every member's
-/// rows" and "the one member's rows" are the same rows. That is why the
-/// personal tier is gated on *not-Guest* rather than on `Owner`, and it is the
-/// same call commit `881da889` made for connecting a context source: "Household
-/// in a single-member household now resolves to that member."
-///
-/// Gating on `Owner` instead would be defensible and would also make the whole
-/// personal half unreachable on every desktop pond that has not paired an
-/// attributed device, which is the inert shape this engine exists to avoid.
+/// Who is looking: may personal facts be shown? Every scope but `Guest` is `Personal`, as
+/// `identity_resolution::resolve` yields `Household` only on a pond of at most one member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Audience {
     /// One member, or a household of one. Personal facts are theirs to see.
     Personal,
-    /// An unidentified speaker on a pond with more than one member. Only facts
-    /// about the house itself — never about a person.
+    /// An unidentified speaker on a multi-member pond: house facts only, never a person's.
     Shared,
 }
 
@@ -100,13 +26,7 @@ impl Audience {
     }
 }
 
-/// The tool group whose tools would answer a suggestion.
-///
-/// A suggestion is only ever offered when the pond actually has this group, so
-/// the household is never invited to ask something the model has no way to
-/// serve. The strings match `TOOL_GROUPS` in
-/// [`tool_group`](crate::mcp::domain::tool_group); `groups_present_on_this_pond`
-/// in the caller supplies the set to check against.
+/// Tool-group names, matching `TOOL_GROUPS` in [`tool_group`](crate::mcp::domain::tool_group).
 pub const GROUP_CONTEXT: &str = "giap-context";
 pub const GROUP_SCHEDULE: &str = "giap-schedule";
 pub const GROUP_MEMORY: &str = "giap-memory";
@@ -116,16 +36,9 @@ pub const GROUP_WEATHER: &str = "giap-weather";
 /// One thing the household might want to ask.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Suggestion {
-    /// Stable across renders, so muting one mutes the same one tomorrow.
-    ///
-    /// It is the suggestor's own id and nothing else — deliberately not a hash
-    /// of the fact. A suggestion is recomputed every read, so an id that moved
-    /// with the number would make a mute a key that never matched again.
+    /// The suggestor's id, not a hash of the fact, so a mute keeps matching as the number moves.
     pub id: String,
-    /// The sentence the household reads AND the prompt that is sent when they
-    /// tap it. One string, because two would let the card promise something
-    /// other than what it does — which is exactly what
-    /// `SuggestionQueue.tsx` refused to build for proposals.
+    /// The card's text and the prompt sent on tap, as one string so the two can't disagree.
     pub prompt: String,
     /// The fact that produced it, with the number in it. Never blank.
     pub because: String,
@@ -133,14 +46,7 @@ pub struct Suggestion {
     pub answered_by: &'static str,
 }
 
-/// One suggestor's outcome, whether or not it produced anything.
-///
-/// This is the anti-inertness device and it is the reason the route returns it.
-/// Today a failed fetch, a 403 and a genuinely quiet house are pixel-identical
-/// on the Dashboard — `SuggestionQueue` swallows every error into the quiet
-/// line — so "the feature is broken" and "there is nothing to say" look the
-/// same to the household AND to whoever is debugging it. A silent suggestor
-/// that states its reason is falsifiable; one that merely returns `None` is not.
+/// One suggestor's outcome, returned even when silent so "broken" and "nothing to say" differ.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Considered {
     pub id: String,
@@ -157,42 +63,19 @@ pub struct SuggestionSet {
 
 // ── What the caller must measure ────────────────────────────────────────────
 
-/// What the pond knows about which tool groups it has.
-///
-/// Three states, not two, and the third is the one that matters. An extension
-/// manager answers from a live agent session, so on a pond whose model provider
-/// is not configured yet -- a fresh install mid-onboarding, or any pond whose
-/// provider failed to start -- it returns an EMPTY list rather than an error.
-///
-/// Reading that empty list as "this pond has no extensions" silences every
-/// suggestion at exactly the moment the column most needs to be useful. Verified
-/// live while building this: a scratch pond with two devices registered and
-/// weather switched on reported `giap-device is not installed` and
-/// `giap-weather is not installed`, because its log said
-/// `LLM: llamafile skipped (provider = )`.
-///
-/// So absence of evidence is [`Unknown`](Self::Unknown) and is treated as
-/// permissive; only a populated answer is evidence, and then it is trusted
-/// completely. The cost of being wrong in the permissive direction is a prompt
-/// the model answers with "I can't do that"; the cost of being wrong in the
-/// strict direction is a feature that never appears at all, which this codebase
-/// has shipped several times.
+/// What the pond knows about its tool groups; an empty report means unknown, not none.
+/// The extension manager reports empty without a live agent session, e.g. no provider yet.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum GroupsKnown {
     /// The manager answered with a real list. A group not in it is absent.
     These(BTreeSet<String>),
-    /// Nobody could say. Offer everything and let the model speak for itself.
-    ///
-    /// The default, and deliberately: absence of evidence is permissive. See
-    /// this type's docs for which direction of being wrong is cheaper.
+    /// Nobody could say: offer everything; an unanswerable card costs less than a hidden feature.
     #[default]
     Unknown,
 }
 
 impl GroupsKnown {
-    /// Build from what an extension manager reported.
-    ///
-    /// An empty list is `Unknown`, not `These(empty)` -- see the type's docs.
+    /// Build from an extension manager's report; an empty list is `Unknown`, not `These(empty)`.
     pub fn from_report(report: Option<Vec<String>>) -> Self {
         match report {
             Some(names) if !names.is_empty() => Self::These(names.into_iter().collect()),
@@ -209,53 +92,35 @@ impl GroupsKnown {
 }
 
 /// Everything the suggestors read, gathered once by the caller.
-///
-/// Plain counts and small owned values rather than ports, so this module stays
-/// a pure function and its tests need no database and no mocks. Each field is
-/// something the caller actually measured; there is no `Option` here standing
-/// in for "did not bother to look", because a suggestor cannot tell that apart
-/// from "looked and found nothing" and would phrase a guess either way.
+/// Each field was measured; no `Option` stands in for "did not look".
 #[derive(Debug, Clone, Default)]
 pub struct SuggestionSnapshot {
     pub audience: Audience,
-    /// What is known about the tool groups this pond has. A suggestion whose
-    /// `answered_by` is known to be absent is dropped before anybody sees it;
-    /// one that is merely unconfirmed is offered.
     pub groups: GroupsKnown,
     /// Suggestor ids the household has muted.
     pub muted: BTreeSet<String>,
 
-    /// Calendar items between now and the household's local midnight.
-    /// `None` means no calendar source is connected — a different thing from
-    /// `Some(0)`, which means a connected calendar with an empty day.
+    /// Calendar items from now to local midnight; `None` means no calendar is connected.
     pub calendar_events_today: Option<usize>,
-    /// Mail items in the last seven days, `None` when no mail account is
-    /// connected. Seven days rather than "today" because a mail sync that has
-    /// not run since yesterday would make a today-count read zero on a pond
-    /// with a full inbox.
+    /// Mail items this past week (a lagging sync zeroes a daily count); `None`: no mail account.
     pub mail_items_this_week: Option<usize>,
     /// Unpaused schedules whose next run falls before local midnight.
     pub schedules_before_midnight: usize,
     /// The soonest of those, as the household's own label for it.
     pub next_schedule_label: Option<String>,
-    /// Memories that are actually retrievable — lifecycle active, not archived.
-    /// Counted the same way the read path counts them, because a number larger
-    /// than what an answer can draw on is a number that overpromises.
+    /// Retrievable memories (active, not archived), counted as the read path counts them.
     pub active_memories: usize,
     /// Of those, the ones the extractor classified as a standing habit.
     pub routine_memories: usize,
-    /// Devices registered with this pond.
     pub devices_registered: usize,
-    /// Weather is switched on AND a place resolved. Both, because either alone
-    /// produces a card that cannot be answered.
+    /// Weather switched on AND a place resolved: either alone yields an unanswerable card.
     pub weather_ready: bool,
     /// The household's own name for where it is, when it has one.
     pub place: Option<String>,
 }
 
 impl Default for Audience {
-    /// Shared, because it is the narrower of the two. A snapshot somebody
-    /// forgot to fill should show less, not more.
+    /// The narrower one, so an unfilled snapshot shows less, not more.
     fn default() -> Self {
         Audience::Shared
     }
@@ -263,10 +128,7 @@ impl Default for Audience {
 
 // ── The suggestors ──────────────────────────────────────────────────────────
 
-/// Every suggestor, in the order they would be offered.
-///
-/// Order is by how specific the answer is to today: a calendar with three
-/// events on it says more than a device count that is the same every day.
+/// Every suggestor, in offer order: most specific to today first.
 const SUGGESTOR_IDS: &[&str] = &[
     "calendar_today",
     "upcoming_schedule",
@@ -277,17 +139,10 @@ const SUGGESTOR_IDS: &[&str] = &[
     "weather_today",
 ];
 
-/// How many a household is shown at once.
-///
-/// The design's left column holds one open card, two faded peek rows and a
-/// count. Beyond about that the column stops being a glance and becomes a list,
-/// which is the thing the Home screen was pared back to avoid.
+/// Max shown at once; more turns the Home column from a glance into a list.
 pub const MAX_SUGGESTIONS: usize = 4;
 
 /// Work out what this household might want to ask.
-///
-/// Pure. Every refusal is recorded in [`SuggestionSet::considered`] rather than
-/// dropped, so a caller can tell an empty set apart from a broken one.
 pub fn suggest(snapshot: &SuggestionSnapshot) -> SuggestionSet {
     let mut offered = Vec::new();
     let mut considered = Vec::new();
@@ -309,10 +164,7 @@ pub fn suggest(snapshot: &SuggestionSnapshot) -> SuggestionSet {
         }
     }
 
-    // The cap is applied AFTER everything has been considered, so the
-    // `considered` list still names the suggestors that would have fired. A cap
-    // that shortened the record as well as the output would hide the fact that
-    // the pond had more to say.
+    // Truncate after the loop so `considered` still records suggestors the cap cut.
     if offered.len() > MAX_SUGGESTIONS {
         offered.truncate(MAX_SUGGESTIONS);
     }
@@ -337,8 +189,7 @@ fn run_one(id: &str, s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         "memory_recall" => memory_recall(s),
         "devices_online" => devices_online(s),
         "weather_today" => weather_today(s),
-        // Unreachable while SUGGESTOR_IDS and this match agree, and
-        // `every_suggestor_id_is_reachable` is what keeps them agreeing.
+        // Unreachable while SUGGESTOR_IDS matches this list (`every_suggestor_id_is_reachable`).
         other => Err(format!("no suggestor is registered under '{other}'")),
     }?;
 
@@ -363,9 +214,7 @@ fn calendar_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
         return Err("no calendar account is connected".to_string());
     };
     if count == 0 {
-        // Deliberately silent rather than "nothing on today". Inviting somebody
-        // to ask a question whose answer is "nothing" wastes the one card on
-        // the screen that is supposed to be worth reading.
+        // Silent, not "nothing on today": a question answered "nothing" wastes the one card.
         return Err("a calendar is connected and today is empty".to_string());
     }
     Ok(Suggestion {
@@ -383,8 +232,7 @@ fn upcoming_schedule(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
     if s.schedules_before_midnight == 0 {
         return Err("nothing is set to run before midnight".to_string());
     }
-    // The label is the household's own name for the routine, never a
-    // description this module invented for it.
+    // The household's own label, never a description invented here.
     let because = match &s.next_schedule_label {
         Some(label) => format!(
             "{} before midnight; the next is {label}.",
@@ -442,12 +290,7 @@ fn routine_recall(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
     Ok(Suggestion {
         id: "routine_recall".to_string(),
         prompt: "What do you know about my routines?".to_string(),
-        // Note what this does NOT say. There is no observation count anywhere
-        // in this tree -- `KnownMemory.pattern` is hardcoded false and the
-        // extractor drops a candidate that matches a stored memory rather than
-        // counting it -- so "you usually" and "you have mentioned this three
-        // times" are both unbackable. What the pond can say is how many notes
-        // it filed under that heading, which is what this says.
+        // Notes filed, not observations: nothing counts repeats, so "you usually" can't be backed.
         because: format!(
             "{} filed as something you do regularly.",
             plural(s.routine_memories, "note", "notes")
@@ -485,12 +328,7 @@ fn devices_online(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
     Ok(Suggestion {
         id: "devices_online".to_string(),
         prompt: "Which of my devices are online?".to_string(),
-        // Registered, never "on". The production `DeviceControlPort` is
-        // `LoggingDeviceControl`, which implements neither `state()` nor
-        // `describe()`, and `GET /api/v1/devices` emits no metadata at all --
-        // so the pond does not know whether a single light is lit. Asking which
-        // are ONLINE is answerable (`is_online` is a real column); asserting
-        // which are on is not.
+        // Registered, never "on": `LoggingDeviceControl` reads no state; `is_online` is real.
         because: format!(
             "{} registered here.",
             plural(s.devices_registered, "device", "devices")
@@ -515,11 +353,7 @@ fn weather_today(s: &SuggestionSnapshot) -> Result<Suggestion, String> {
     })
 }
 
-/// "1 event" / "3 events", with the caller supplying both spellings.
-///
-/// A free function rather than an inline `if`, because the singular form of
-/// "routine runs" is not the plural with an "s" removed and a generic helper
-/// would get it wrong.
+/// "1 event" / "3 events"; the caller spells both ("routine runs" / "routines run").
 fn plural(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
         format!("{n} {one}")
@@ -573,12 +407,7 @@ mod tests {
     }
 
     // ── The vacuity control ─────────────────────────────────────────────────
-    //
-    // Every suggestor gets a PAIR: one test that it fires, one that it is
-    // silent. A fires-only suite passes just as well when the silence condition
-    // is inverted, and a silent-only suite passes on a function that returns
-    // `Err` unconditionally -- which is how a feature ships inert with green
-    // tests. The pairs are what make each claim falsifiable in both directions.
+    // Each suggestor gets a fires test and a silent test; either alone passes on a broken one.
 
     #[test]
     fn a_fully_connected_pond_offers_the_cap() {
@@ -665,8 +494,7 @@ mod tests {
                 "{personal} was offered to an unidentified speaker on a multi-member pond"
             );
         }
-        // And the house's own facts still are, or the guest rule would have
-        // emptied the screen rather than narrowed it.
+        // Control: house facts still show, so the rule narrows rather than empties.
         assert!(ids(&set).contains(&"devices_online".to_string()));
         assert!(ids(&set).contains(&"upcoming_schedule".to_string()));
     }
@@ -688,13 +516,6 @@ mod tests {
 
     #[test]
     fn an_unanswerable_report_is_permissive_and_a_real_one_is_not() {
-        // The distinction this type exists for, in one test.
-        //
-        // An extension manager that cannot answer -- a pond whose model
-        // provider has not started, which is every pond mid-onboarding --
-        // returns an empty list, NOT an error. Reading that as "no extensions"
-        // silenced every suggestion on a live scratch pond that had devices
-        // registered and weather switched on.
         let mut s = full();
 
         s.groups = GroupsKnown::Unknown;
@@ -721,9 +542,6 @@ mod tests {
             GroupsKnown::from_report(Some(vec![GROUP_MEMORY.to_string()])),
             GroupsKnown::These([GROUP_MEMORY.to_string()].into_iter().collect())
         );
-        // The default narrows the OTHER way from `Audience::default`, and that
-        // is deliberate: showing a suggestion nobody can answer costs a shrug
-        // from the model, while hiding every suggestion costs the feature.
         assert_eq!(GroupsKnown::default(), GroupsKnown::Unknown);
     }
 
@@ -760,10 +578,6 @@ mod tests {
 
     #[test]
     fn every_suggestor_id_is_reachable() {
-        // `SUGGESTOR_IDS` and `run_one`'s match are two lists that must agree.
-        // A new id added to one and not the other would be silent forever with
-        // a reason that reads like a bug report, which is better than silence
-        // but worse than not shipping it.
         let s = full();
         for id in SUGGESTOR_IDS {
             let outcome = run_one(id, &s);
@@ -778,9 +592,6 @@ mod tests {
 
     #[test]
     fn nothing_claims_a_device_is_on() {
-        // The pond does not know. `LoggingDeviceControl` implements neither
-        // `state()` nor `describe()`, and the devices route sends no metadata,
-        // so any sentence asserting a device's state would be invented.
         let set = suggest(&full());
         for s in &set.offered {
             let text = format!("{} {}", s.prompt, s.because).to_lowercase();
@@ -803,9 +614,6 @@ mod tests {
 
     #[test]
     fn nothing_claims_a_habit_the_pond_has_not_counted() {
-        // There is no observation count in this tree. A suggestion that says
-        // "you usually" or "you always" would be asserting evidence that does
-        // not exist anywhere.
         let set = suggest(&full());
         for s in &set.offered {
             let text = format!("{} {}", s.prompt, s.because).to_lowercase();
@@ -827,9 +635,6 @@ mod tests {
 
     #[test]
     fn every_offered_suggestion_carries_a_number_or_a_name() {
-        // "never invent meaning the data lacks": a `because` with no measured
-        // value in it is a template, and a template is what this engine exists
-        // not to be.
         let set = suggest(&full());
         for s in &set.offered {
             assert!(
@@ -844,8 +649,6 @@ mod tests {
 
     #[test]
     fn the_prompt_is_the_sentence_the_household_reads() {
-        // One string, never two. A separate headline and prompt is how a card
-        // comes to promise something other than what it does.
         let set = suggest(&full());
         for s in &set.offered {
             assert!(s.prompt.ends_with('?'), "{} is not a question", s.id);
@@ -859,7 +662,6 @@ mod tests {
 
     #[test]
     fn the_snapshot_defaults_to_showing_less() {
-        // A caller that forgot to fill the audience gets the narrow answer.
         assert_eq!(Audience::default(), Audience::Shared);
         assert!(!Audience::default().may_see_personal());
     }

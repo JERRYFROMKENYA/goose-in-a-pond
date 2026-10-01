@@ -1,35 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// Now Playing — the design's page-2 widget 1, minus the two things the pond
-// cannot supply.
-//
-// CUT: the speaker name. The design's second line reads "Marconi Union ·
-// Living Room speaker", but `now_playing_snapshot` emits connected, playing,
-// track, artist, album_art, progress_ms and duration_ms and no device object
-// at all. There is nothing on the wire a room could be read from, so the
-// artist stands alone rather than carrying an invented suffix (DESIGN.md §3).
-//
-// CUT: the volume slider. `MusicControlAction` is the closed union
-// "play" | "pause" | "next" | "previous" — there is no volume read and no
-// volume write, in either direction. A slider that moves and changes nothing
-// is the worst inert control there is, so it is not drawn.
-//
-// Five states, exactly one of them rendered:
-//
-//   disconnected  a fresh install. Says so, and offers Settings. It does NOT
-//                 show the mock track the old widget substituted here — that
-//                 faked playback on the one screen most likely to be new.
-//   error         Spotify answered and refused. The store's own sentence, and
-//                 Try again. No transport: asking again is not a playback
-//                 command, and the controls would fail the same way the read
-//                 just did.
-//   idle          connected, nothing playing. Resume is real (Spotify accepts
-//                 it), skipping past nothing is not, so prev/next are off.
-//   playing/paused  the full card.
-//
-// The bar steps in 10-second jumps because that is the poll interval. No
-// client-side interpolation timer: it would run ahead of the poll and draw a
-// position nobody reported.
-// ────────────────────────────────────────────────────────────
+// Now Playing. No speaker name or volume slider: the snapshot has no device and
+// `MusicControlAction` has no volume. The bar moves only on the 10s poll, never interpolated.
 
 import type { ReactElement } from "react";
 import { HubIco, pauseEl } from "../../primitives/HubIco";
@@ -39,18 +9,11 @@ import { controlNowPlaying, refreshNowPlaying, useHomeData } from "../../state/h
 import "./media-card.css";
 
 export interface MediaCardProps {
-  /** Where "Connect a music service" sends them. The integrator passes a function that navigates to Settings. */
+  /** Where "Connect a music service" goes (Settings). */
   onOpenSettings: () => void;
 }
 
-/**
- * `progressMs` / `durationMs` are the raw milliseconds the snapshot has always
- * carried and the store used to discard. They are optional here so this file
- * compiles whether it lands before or after the store change, and because they
- * are genuinely absent at runtime on the idle snapshot — which is the same
- * reason every read below goes through `typeof x === "number"` rather than a
- * truthiness check that would also swallow a legitimate 0.
- */
+/** Raw ms, absent on the idle snapshot; checked with `typeof` so a real 0 survives. */
 type TimedNowPlaying = NowPlayingData & {
   progressMs?: number | null;
   durationMs?: number | null;
@@ -100,11 +63,7 @@ export function MediaCard({ onOpenSettings }: MediaCardProps): ReactElement {
 
   const durationMs = np.durationMs;
   const progressMs = np.progressMs;
-  // A duration is what makes the rail mean anything; without one there is no
-  // scale to place the fill against, and idle has nothing to place.
   const showScrub = !idle && typeof durationMs === "number" && durationMs > 0;
-  // The labels need both ends. One number alone would have to be paired with a
-  // duration read off the bar, which is arithmetic on a decoration.
   const showTimes = showScrub && typeof progressMs === "number";
   const pct = Math.max(0, Math.min(100, np.elapsed * 100));
 

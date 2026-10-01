@@ -151,6 +151,14 @@ function VoiceModeChildProcess() {
         <Button variant="ghost" size="sm" onPress={backToGui} aria-label="Back">
           <ChevronLeft size={14} /> Back
         </Button>
+        {/* The same hint the pipeline half of this file shows. This header was
+            built fresh when the child-process mode was added and never got one,
+            so the two voice architectures disagreed about whether you can see
+            which session you are in -- and the test written alongside this
+            component has been asking for it ever since. */}
+        {state.sessionId && (
+          <span className="vm-session-hint">Session {state.sessionId.slice(0, 6)}</span>
+        )}
         <div className="vm-header__actions">
           <Button
             variant="ghost" size="sm"

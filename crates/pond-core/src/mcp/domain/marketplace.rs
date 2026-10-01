@@ -32,3 +32,10 @@ pub struct MarketplaceExtension {
     #[serde(default)]
     pub required_secrets: Vec<SecretRequirement>,
 }
+
+impl MarketplaceExtension {
+    /// The secrets that go into the extension's environment: all but the host-only ones.
+    pub fn env_secrets(&self) -> impl Iterator<Item = &SecretRequirement> {
+        self.required_secrets.iter().filter(|s| !s.host_only)
+    }
+}

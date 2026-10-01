@@ -28,7 +28,7 @@ struct Harness {
     /// The same state, reached from a LAN address.
     remote: axum::Router,
     profiles: Arc<SqliteProfileRepository>,
-    /// The pond's own pool, for the one test that has to break the attribution read on purpose.
+    /// The pond's pool, so one test can break the attribution read.
     pool: sqlx::Pool<sqlx::Sqlite>,
     _tmp: tempfile::TempDir,
 }
@@ -418,13 +418,7 @@ async fn re_displaying_the_code_names_the_member_it_is_bound_to() {
 }
 
 // ── Who a paired device belongs to: `GET /devices/self` ──────────────────────
-//
-// Everything above stops at the code: it proves `pairing_codes.profile_id` is written and
-// leaves the code-to-device step to `sqlite_handshake`. These go the rest of the way. The pair
-// is completed over HTTP with a MAC computed the way a phone computes it, and `/devices/self`
-// is called with the token the pond issued -- so the device the route reads came out of
-// `auth_middleware` via `caller_for_token`, exactly as it does for a real phone, and no test
-// here writes a `Principal` by hand.
+// Pairs over HTTP with a phone's MAC; no test here builds a `Principal` by hand.
 
 type HmacSha256 = hmac::Hmac<sha2::Sha256>;
 
@@ -468,10 +462,7 @@ async fn post_json(router: &axum::Router, uri: &str, body: Value) -> (StatusCode
     )
 }
 
-/// Pair `client_id` with `code` and return the session token the pond issued.
-///
-/// Over loopback: `require_lan` classifies a peer against this host's real interfaces, so a
-/// fixed LAN address pairs only on a machine that happens to sit on that subnet.
+/// Pairs over loopback (`require_lan` checks real host interfaces) and returns the token.
 async fn pair(h: &Harness, code: &str, client_id: &str) -> String {
     let (status, init) = post_json(
         &h.loopback,
@@ -552,8 +543,7 @@ async fn a_phone_paired_with_a_members_code_reads_that_member_back() {
     );
     assert_eq!(body["profile"]["id"], liz, "body: {body}");
     assert_eq!(body["profile"]["display_name"], "Liz", "body: {body}");
-    // Display only, and only what a greeting needs. A member's preferences are theirs, and
-    // the avatar is not something this route has any business handing out.
+    // Only what a greeting needs: no preferences, no avatar.
     let profile = body["profile"].as_object().expect("profile is an object");
     assert_eq!(
         profile.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -562,8 +552,7 @@ async fn a_phone_paired_with_a_members_code_reads_that_member_back() {
     );
 }
 
-/// NULL is *nobody has claimed this device*, not an error and not everybody. Migration 0043's
-/// normal case, since pairing happens before anyone says who they are.
+/// NULL means unclaimed (pairing precedes identification): not an error, not everybody.
 #[tokio::test]
 async fn a_phone_paired_with_an_unattributed_code_reads_no_member() {
     let h = make_app().await;
@@ -583,10 +572,7 @@ async fn a_phone_paired_with_an_unattributed_code_reads_no_member() {
     );
 }
 
-/// The one this route could get wrong quietly. A failed attribution read is `Unavailable`, and
-/// reporting it as "no member" would look exactly like an unclaimed phone -- a greeting with no
-/// name, and nothing anywhere saying the pond could not tell. `DeviceRung::rung` consumes the
-/// `Result` so that cannot be spelled away; this holds the route to the same rule.
+/// Same rule as `DeviceRung::rung`: a failed read is `Unavailable`, never "no member".
 #[tokio::test]
 async fn a_failed_attribution_read_is_reported_rather_than_read_as_unclaimed() {
     let h = make_app().await;
@@ -594,8 +580,7 @@ async fn a_failed_attribution_read_is_reported_rather_than_read_as_unclaimed() {
     let (_, issued) = issue(&h.loopback, Some(&format!(r#"{{"profile_id":"{liz}"}}"#))).await;
     let token = pair(&h, &code_of(&issued), "liz-phone").await;
 
-    // Break only the attribution read. Authentication reads `session_tokens` and never this
-    // column, so the request still arrives with its device and fails exactly where it should.
+    // Auth reads `session_tokens`, never this column, so only the attribution read breaks.
     sqlx::query("ALTER TABLE devices RENAME COLUMN profile_id TO profile_id_unreadable")
         .execute(&h.pool)
         .await

@@ -7,50 +7,20 @@ import { HP_PATHS } from "../../primitives/icons";
 import { useHomeData } from "../../state/hubDataStore";
 import "./home-controls-card.css";
 
-/**
- * The design's 2x2 device tiles, reporting only what a device actually said.
- *
- * `GET /api/v1/devices` sends identity and capabilities and no metadata at all, so
- * the mockup's "On · 80%", "Heat to 70°F" and "Locked" have no source anywhere in
- * the pond. The one honest read is the `get_device_state` MCP tool, which answers
- * with text lines including `power: on|off` — so this card says `On`, `Off`, or
- * that the device did not say, and nothing else.
- *
- * It deliberately does not use `useDeviceState`/`controlDevice` from hubStore:
- * that map is seeded from the mock house and answers a real device id with a
- * hardcoded on/locked/target/brightness, which is the single largest fabrication
- * on today's Home.
- */
-
 const DEVICE_SERVER = "giap-device-control";
 
 /** What a device says about its switch: on, off, or (undefined) it did not say. */
 type PowerRead = boolean | undefined;
 
-/**
- * What this card knows about the pond's device list.
- *
- * Three answers, not two. A single nullable map collapsed "has not answered yet"
- * and "the read failed" into one value, and since neither can enter the empty
- * state nor the grid, both rendered the same thing: a full-height card holding an
- * icon, the word "Devices", and nothing else — permanently, because the read is
- * fired once on mount and nothing retries it. They are different sentences to a
- * household. One says wait; the other says the pond was not reachable, and offers
- * the read again.
- */
+/** The device-list read. Loading and failed are distinct: one says wait, the other offers a retry. */
 type Wire =
   | { status: "loading" }
   | { status: "failed" }
   | { status: "ready"; byId: Record<string, string[]> };
 
 /**
- * Ask one device what it is.
- *
- * A throw, a body that is not text, and a reply this cannot parse are all the same
- * answer: it did not say. Never coerced to `false` — labelling a tile "Off" because
- * a read failed is the mock store's mistake with a different wrong input. The body
- * check is not paranoia: `request<T>` hands back `undefined` or `index.html` for an
- * empty or misrouted response, and both would reach `powerStateOf` as a non-string.
+ * One device's power; undefined (never `false`) on a throw or an unparseable reply. The body
+ * check matters: `request<T>` returns `undefined` or `index.html` for empty or misrouted replies.
  */
 async function readPower(id: string): Promise<PowerRead> {
   try {
@@ -66,28 +36,24 @@ async function readPower(id: string): Promise<PowerRead> {
 }
 
 export interface HomeControlsCardProps {
-  /** How many tiles to show before the card would become a list. The integrator passes 2 | 4 | 6 by widget size. */
+  /** Max tiles; the integrator passes 2, 4 or 6 by widget size. */
   limit: number;
   /** Where an empty house is sent to add its first device. */
   onManageDevices: () => void;
 }
 
+/** Device tiles showing only what `get_device_state` reports; not hubStore's mock-seeded `useDeviceState`. */
 export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardProps): ReactElement {
   const home = useHomeData();
 
-  // Capabilities by device id, straight off the wire. Two facts come from here and
-  // nowhere else: whether a device declares `power` — a contact sensor's list is
-  // empty, and that is what stops it being offered a switch — and whether the id
-  // exists on the backend at all. hubDataStore substitutes the mock house when the
-  // pond has no devices, and a demo tile is the exact thing the empty state is
-  // here to replace.
+  // Capabilities by device id, off the wire: the only source for whether a device has `power`,
+  // and whether it exists at all (hubDataStore fills an empty pond with the mock house).
   const [wire, setWire] = useState<Wire>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [reads, setReads] = useState<Record<string, PowerRead>>({});
   const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
 
-  // Re-armed on mount because a StrictMode double-invoke would otherwise leave the
-  // first cleanup's `false` standing for the life of the component.
+  // Re-armed on mount: StrictMode's double-invoke would otherwise leave the first cleanup's `false`.
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -96,10 +62,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
     };
   }, []);
 
-  // Keyed on `attempt` so "Try again" re-runs it. The old `[]` deps meant a read
-  // that failed at launch — routine, the shell paints before the sidecar serves —
-  // stayed failed for the life of the mount, since none of the store's refresh
-  // paths re-render their way into this effect.
+  // Keyed on `attempt` so "Try again" re-runs it; a launch read often fails before the sidecar serves.
   useEffect(() => {
     let cancelled = false;
     api
@@ -111,9 +74,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
         setWire({ status: "ready", byId });
       })
       .catch(() => {
-        // `failed`, never an empty map. A failed read means the card does not know
-        // what the house holds, which is a different sentence from "you have no
-        // devices" — and only one of the two is true.
+        // `failed`, never an empty map: not knowing the house is not an empty house.
         if (!cancelled) setWire({ status: "failed" });
       });
     return () => {
@@ -123,13 +84,8 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
 
   const room = Math.max(0, Math.floor(limit));
 
-  // Both halves have to have answered before this card can say anything about the
-  // house: its own capability read, AND the store's device list. Until
-  // `devicesAreReal` flips, `home.devices` is the demo house from mockHome, whose
-  // ids are strings like "driveway" while a real one is a UUID — so the
-  // intersection below is empty by construction, and the empty state would call a
-  // pond with a paired lamp a house with nothing in it. Same guard, same reason, as
-  // DashboardGrid's `home.devicesAreReal ? home.devices : []`.
+  // Needs both reads: until `devicesAreReal`, `home.devices` is the mock house, whose ids never
+  // match a real one, so the empty state would wrongly call the house empty.
   const settled = wire.status === "ready" && home.devicesAreReal;
 
   // Store order, intersected with what the backend actually knows.
@@ -142,8 +98,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
   const canPower = (id: string): boolean =>
     wire.status === "ready" ? (wire.byId[id]?.includes("power") ?? false) : false;
 
-  // Serialised rather than passed as an array, so the read effect re-runs when the
-  // visible ids change and not when a render hands it an equal-but-new array.
+  // Serialised so the read effect re-runs on changed ids, not on each new-but-equal array.
   const powerKey = useMemo(
     () => JSON.stringify(visible.filter((d) => canPower(d.id)).map((d) => d.id)),
     [visible, wire],
@@ -174,13 +129,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
     });
   }
 
-  /**
-   * Send the switch, then ask the device what happened.
-   *
-   * The write's own result is never displayed. A dispatch that returns without
-   * throwing says the tool ran, not that the lamp moved, so the tile keeps showing
-   * the last read until a newer read replaces it.
-   */
+  /** Sends the switch, then re-reads: a dispatch that returns says the tool ran, not that the lamp moved. */
   async function toggle(id: string, next: boolean) {
     markPending(id, true);
     try {
@@ -190,7 +139,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
         args: { device_id: id, power: next },
       });
     } catch {
-      // Swallowed because the re-read below is what decides the label either way.
+      // Swallowed: the re-read below decides the label.
     }
     const state = await readPower(id);
     if (!alive.current) return;
@@ -203,8 +152,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
     window.dispatchEvent(new CustomEvent("hub:device", { detail: device.id }));
   }
 
-  // The head is the card's identity, so every state carries it. The count is left
-  // blank until `settled`, because a number there is a claim about the house.
+  // The count stays blank until `settled`: a number there is a claim about the house.
   const head = (label: string) => (
     <div className="hcc__head">
       <HubIco d={HP_PATHS.sliders} size={18} color="var(--color-text)" sw={1.9} />
@@ -282,9 +230,7 @@ export function HomeControlsCard({ limit, onManageDevices }: HomeControlsCardPro
             }
 
             const read = reads[device.id];
-            // The last thing the device said. It is what the tile shows even while a
-            // write is in flight, which is the difference between optimism and
-            // invention.
+            // The last read, shown even while a write is in flight.
             const last = read === true ? "on" : read === false ? "off" : "unknown";
             const busy = pending.has(device.id);
 

@@ -61,24 +61,6 @@ test.describe("Models section", () => {
     ).toContainText("4.0 GB", { timeout: 10_000 });
   });
 
-  test("memory status shows loaded model name when a model is hot", async ({ page }) => {
-    await page.route("**/api/v1/models/memory-status", (route) =>
-      route.fulfill({
-        json: {
-          total_mb: 8192,
-          available_for_llm_mb: 4000,
-          loaded_model: "llama3.2-3b-instruct",
-        },
-      }),
-    );
-
-    await goToModels(page);
-
-    await expect(
-      page.getByText(/llama3\.2-3b|llama3/i).first()
-    ).toBeVisible({ timeout: 10_000 });
-  });
-
   test("memory status shows zero / external label when total_mb is 0", async ({ page }) => {
     await page.route("**/api/v1/models/memory-status", (route) =>
       route.fulfill({

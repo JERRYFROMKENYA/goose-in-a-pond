@@ -85,8 +85,7 @@ fn build_settings(store: &HashMap<String, String>) -> Settings {
             s.context_monitor_enabled = b;
         }
     }
-    // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-    // so this is commented out rather than deleted; restore it if it returns.
+    // Speculative decoding left the llama.cpp engine; restore this if it returns.
     // // Default-true like the two above, so the same reason applies: a mock that dropped it
     // // would let "turning speculation off sticks" pass while the drafter still ran.
     // if let Some(v) = store.get("speculative_decoding_enabled") {

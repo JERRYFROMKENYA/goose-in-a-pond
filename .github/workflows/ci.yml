@@ -292,6 +292,45 @@ jobs:
       - name: Vitest (unit tests)
         run: npx vitest run
 
+  # The music extension is TypeScript run by tsx, so nothing in the Rust or desktop jobs compiles or
+  # tests it. Its tests use fakes and a fake network; the ones that drive the real Music app
+  # (GIAP_MUSIC_LIVE) are skipped here, and would have no Music app to drive on this runner.
+  music-extension:
+    name: Music extension - typecheck / tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extensions/music
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extensions/music/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
+
+  # The Node setup in scripts/giap.sh (`giap.sh node`) decides which Node every developer builds on
+  # and can download one, so it is tested like code: the range, the checksum check, the download and
+  # its refusals, against a fake nodejs.org. Nothing here touches the network or the runner's home.
+  node-setup:
+    name: Node setup script - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/node-setup.test.sh
+
   frontend:
     name: Frontend — vitest / playwright
     runs-on: ubuntu-latest
@@ -303,7 +342,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          # 22, not 20: vitest 5 declares `^22.12.0 || ^24.0.0 || >=26.0.0` and this job runs it, so
+          # 20 was below the package's own stated minimum. .nvmrc and package.json's `engines` say
+          # the same; scripts/giap.sh node is what gets a developer onto it.
+          node-version: 22
           cache: npm
           cache-dependency-path: pond-desktop/package-lock.json
 
@@ -422,6 +464,97 @@ jobs:
 
       - name: Launch headless and assert the bridge
         run: xvfb-run -a node scripts/smoke.mjs
+
+  # ── Live test ──────────────────────────────────────────────────────────────
+  #
+  # CLAUDE.md calls this required for any change touching a migration, a route,
+  # a handler or startup wiring, and nothing in CI has ever run it. Every Rust
+  # test above builds its database by applying every migration to an empty file,
+  # in one process, with the adapter constructed by hand -- so none of them
+  # exercises startup ordering, migrations against a database that already has
+  # rows, route registration, auth middleware, or the wiring in main.rs. That is
+  # where several real defects have been.
+  #
+  # It is gated twice, because it is slow and because it cannot always run.
+  live-test-gate:
+    name: Live test — gate
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - id: decide
+        # The secret is read here rather than in an `if:`, because the secrets
+        # context is not available to job-level conditions.
+        env:
+          HAS_TOKEN: ${{ secrets.GIAP_PRIVATE_FORK_TOKEN != '' }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          # cargo resolves the whole workspace before building any member, and
+          # pond-adapters-local-inference takes llama-cpp-2 from the private
+          # jarida-io/llama-cpp-rs-giap. Without a credential nothing in this
+          # workspace compiles -- which is also why `Rust — fmt / clippy / test`
+          # is red. Skip rather than add a fifth permanently-failing check.
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Live test skipped::GIAP_PRIVATE_FORK_TOKEN is not set, so cargo cannot fetch jarida-io/llama-cpp-rs-giap. Add the secret to enable this job."
+            exit 0
+          fi
+
+          # A cold build here compiles Goose and llama.cpp, so it is not worth
+          # paying on a change it cannot say anything about. These are the paths
+          # CLAUDE.md names: migrations, routes, handlers, startup wiring.
+          if [ -z "${BASE:-}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"; exit 0   # push to a trunk branch
+          fi
+          CHANGED=$(git diff --name-only "$BASE"...HEAD || true)
+          if echo "$CHANGED" | grep -qE '^(crates/pond-infra/migrations/|crates/pond-api/src/routes\.rs|crates/pond-server/src/|scripts/live-test\.sh|scripts/live_checks\.py|tests/e2e-live/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Live test skipped::No migration, route, handler or startup-wiring change in this diff."
+          fi
+
+  live-test:
+    name: Live test — HTTP against a server that really started
+    needs: live-test-gate
+    if: needs.live-test-gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # Lets cargo fetch the private fork. Scoped to github.com and torn down
+      # with the runner; the token is never written to a tracked file.
+      - name: Authenticate cargo to the private fork
+        env:
+          TOKEN: ${{ secrets.GIAP_PRIVATE_FORK_TOKEN }}
+        run: |
+          git config --global url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # live-test.sh drives the dashboard the server actually serves when asked
+      # for --ui; without Node it still runs every HTTP assertion.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pond-desktop/package-lock.json
+
+      # A scratch POND_DATA_DIR, a mock chat model, and the loopback bypass off
+      # for the auth phase are all the script's own doing -- see its header.
+      - name: scripts/live-test.sh
+        run: bash scripts/live-test.sh
 
   # Packages a real .app and checks its shape. Gated to manual dispatch and
   # tags ONLY: macOS runners bill at 10x, and nothing here changes often

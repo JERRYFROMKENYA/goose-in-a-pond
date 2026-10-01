@@ -1,14 +1,4 @@
-// The device tiles, and the one thing they are not allowed to do.
-//
-// This is the audit's largest fix, held down by a test: the old Home read a
-// real device id out of a mock map that answered every id with a hardcoded
-// {on:false, locked:true, target:70, brightness:40, watts:42}. Every tile on
-// the screen therefore reported a switch position, a setpoint and a wattage
-// that came from a literal in the source.
-//
-// The rule the card now follows is narrow and worth pinning: a device that did
-// not answer reads "Not reporting" and never "Off". "Off" is a claim about the
-// world, and a failed read is a claim about the read.
+// A device that didn't answer reads "Not reporting", never "Off": that's a claim about the world.
 
 import { render, screen, cleanup, waitFor, fireEvent } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,11 +13,7 @@ vi.mock("../../../api/PondApiClient", () => ({
   },
 }));
 
-// Mocked rather than exercised: the real module fires a full dashboard load on
-// import in a browser-like environment, and this card's own reads are the
-// subject here. `devicesAreReal` is part of the fixture because the card reads
-// it — it is the store's own flag for "these devices came off the wire, not out
-// of mockHome", and the tests below drive it in both positions.
+// hubDataStore is mocked: importing the real one fires a full dashboard load.
 const DEVICES = [
   { id: "lamp", name: "Hall Lamp", kind: "light", room: "Hall" },
   { id: "sensor", name: "Back Door", kind: "other", room: "Kitchen" },
@@ -62,11 +48,7 @@ describe("a device that did not answer", () => {
     expect(screen.queryByText("On")).toBeNull();
   });
 
-  /**
-   * A reply this cannot parse is the same answer as no reply. `request<T>` hands
-   * back `undefined` or `index.html` for an empty or misrouted response, and
-   * both would reach `powerStateOf` as something that is not a state.
-   */
+  /** `request<T>` returns `undefined` or `index.html` for an empty or misrouted reply. */
   it("treats an unparseable reply the same way", async () => {
     invokeTool.mockResolvedValue({ tool: "get_device_state", success: true, content: "<html>" });
     mount();
@@ -91,8 +73,7 @@ describe("a device with no power capability", () => {
     mount();
 
     expect(await screen.findByText("Back Door")).toBeTruthy();
-    // Present as a tile, absent from the buttons: a contact sensor has no
-    // switch, and a switch it cannot perform is the thing DESIGN.md §3 forbids.
+    // A tile but not a button: a contact sensor has no switch (DESIGN.md §3).
     expect(screen.queryByRole("button", { name: /Back Door/ })).toBeNull();
   });
 
@@ -107,17 +88,13 @@ describe("a device with no power capability", () => {
 });
 
 describe("a toggle", () => {
-  /**
-   * The write's own result is never displayed. A dispatch that returns without
-   * throwing says the tool ran, not that the lamp moved.
-   */
+  /** A dispatch that returns says the tool ran, not that the lamp moved. */
   it("shows the re-read, not the write", async () => {
     invokeTool.mockResolvedValue({ tool: "get_device_state", success: true, content: "power: off" });
     mount();
     const tile = await screen.findByRole("button", { name: "Hall Lamp, off" });
 
-    // The write succeeds and the device still says off — a lamp that did not
-    // move. The tile must keep saying off.
+    // The write succeeds but the device still says off.
     fireEvent.click(tile);
     await waitFor(() => {
       const calls = invokeTool.mock.calls.map((c) => (c[0] as { tool: string }).tool);
@@ -148,15 +125,7 @@ describe("a house with nothing in it", () => {
   });
 });
 
-/**
- * The three non-happy states, which used to be one.
- *
- * `capabilities === null` covered both "has not answered" and "threw", and
- * neither reached the empty state or the grid, so both rendered a card holding
- * an icon and the word "Devices" — in a 196-280px frame, with no retry. The
- * distinction matters to a household: one of those sentences says wait and the
- * other says the pond was not reachable.
- */
+/** Loading, failed and empty each say something different. */
 describe("before the pond has answered", () => {
   it("says it is still looking, and claims nothing about the house", async () => {
     let release: (v: unknown[]) => void = () => {};
@@ -172,13 +141,7 @@ describe("before the pond has answered", () => {
     expect(await screen.findByText("Hall Lamp")).toBeTruthy();
   });
 
-  /**
-   * The store seeds `state.data` with mockHome, whose ids are demo strings
-   * ("driveway", "thermo") while a real one is a UUID. The card intersects the
-   * store's list with its own, so before the store settles the intersection is
-   * empty by construction — and calling that "no devices" is a false statement
-   * about a house that has a lamp in it.
-   */
+  /** Until the store settles it holds mockHome, whose demo ids never intersect the wire's. */
   it("does not call a house empty while the store is still holding the demo one", async () => {
     home = { devices: [{ id: "driveway", name: "Driveway Cam", kind: "camera", room: "Outdoor" }], devicesAreReal: false };
     listDevices.mockResolvedValue([{ id: "9f1c-real-uuid", name: "Hall Lamp", capabilities: ["power"] }]);
@@ -208,17 +171,11 @@ describe("when the device list cannot be read", () => {
     mount();
 
     expect(await screen.findByText(/Could not reach the pond/)).toBeTruthy();
-    // Not "you have no devices", and not the silent blank: both are claims the
-    // failed read did not earn.
     expect(screen.queryByRole("button", { name: /Add your first device/ })).toBeNull();
     expect(screen.queryByText(/Checking what the house holds/)).toBeNull();
   });
 
-  /**
-   * The read fired once on mount with `[]` deps, so a shell that painted before
-   * the sidecar was serving stayed blank for the life of the mount even after
-   * the pond came back. The retry is the only way back without a reload.
-   */
+  /** A launch read often fails before the sidecar serves; the retry is the way back without a reload. */
   it("offers the read again, and takes it", async () => {
     listDevices.mockRejectedValueOnce(new Error("connection refused"));
 
@@ -227,8 +184,7 @@ describe("when the device list cannot be read", () => {
     const retry = await screen.findByRole("button", { name: "Try again" });
     fireEvent.click(retry);
 
-    // The press answers immediately rather than leaving the failure standing for
-    // however long the second request takes.
+    // The press answers at once, not after the second request.
     expect(screen.getByText(/Checking what the house holds/)).toBeTruthy();
     expect(await screen.findByText("Hall Lamp")).toBeTruthy();
     expect(screen.queryByText(/Could not reach the pond/)).toBeNull();

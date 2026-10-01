@@ -434,16 +434,7 @@ async fn an_unidentified_session_on_a_multi_member_pond_is_still_refused() {
     assert_eq!(ids(&body), vec!["p-liz-1".to_string()], "body: {body}");
 }
 
-/// A household of one has exactly one possible answer, so stop asking.
-///
-/// The measured consequence of the old behaviour: on a pond with
-/// `proactive_review_enabled` switched on, `drafts where origin='proactive'`
-/// was 0 and the Home column had never rendered a row -- because the surface
-/// that would have shown them answered 403 to the only caller there was.
-///
-/// Note the scope this asserts on is `Owner`, not `Household`: the fallthrough
-/// RESOLVES the member rather than widening the audience, so nothing downstream
-/// ever sees a broadcast and invariant 4 is untouched.
+/// The one-member fallthrough resolves that member; it never widens to a household broadcast.
 #[tokio::test]
 async fn an_unidentified_session_on_a_one_member_pond_gets_that_members_proposals() {
     let h = make_app().await;

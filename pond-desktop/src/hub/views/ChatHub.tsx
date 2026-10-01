@@ -109,8 +109,6 @@ export function ChatHubView() {
   const run = useChatRun();
   const { messages, busy } = run;
 
-  // The composer's chips, grounded. See `useSuggestedPrompts` for why the five
-  // hardcoded ones went: three of them named hardware a pond may not own.
   const chips = useSuggestedPrompts(state.sessionId);
 
   // Presentation only: shown until the first real message, never stored.
@@ -133,14 +131,9 @@ export function ChatHubView() {
   // Fail-open: attaching is disabled only once the model is confirmed to lack vision.
   const [visionCapable, setVisionCapable] = useState(true);
   const [capabilitiesKnown, setCapabilitiesKnown] = useState(false);
-  // Picture support's own lifecycle — download progress, readiness, a device
-  // that declines the encoder entirely. `useVisionStatus` replaces this
-  // fetch-once probe as the primary attach decision; `capabilities.vision`
-  // below is now only the fallback while a per-model answer is unknown.
+  // Primary attach gate; the `capabilities.vision` probe is the fallback while this is unknown.
   const { status: visionStatus, refresh: refreshVisionStatus } = useVisionStatus();
-  // Whether the household has just now reached for the paperclip or tried to
-  // paste — the only moment a PERMANENT reason (not_declared /
-  // not_on_this_device) earns a line; see ImageSupportStatus.
+  // Set when they reach for the paperclip or paste: only then does a permanent reason show.
   const [attachReasonShown, setAttachReasonShown] = useState(false);
 
   useEffect(() => {
@@ -152,10 +145,7 @@ export function ChatHubView() {
 
   const visionKind = visionStatus?.state.kind;
   const visionKnown = !!visionStatus && visionKind !== "unknown";
-  // gate.blocked: status known && kind !== "ready". While the richer status
-  // is unknown, fall back to the coarser capabilities probe rather than
-  // failing open outright — a model this pond has already confirmed cannot
-  // see pictures should not be offered as if it could.
+  // Until the vision status is known, fall back to the capabilities probe rather than fail open.
   const gateBlocked = visionKnown
     ? visionKind !== "ready"
     : capabilitiesKnown && !visionCapable;
@@ -166,11 +156,8 @@ export function ChatHubView() {
           ? "This model cannot look at pictures. To send one, choose a model marked Reads pictures on the Models page."
           : "The active model cannot read images. Switch to a model marked Reads pictures on the Models page."));
 
-  // A refused turn (409/413/415/...) hands its draft back here rather than
-  // leaving an error bubble nobody can act on. `run.refusedDraft` is
-  // referentially stable across commits that do not touch it, so this only
-  // fires once per refusal, and `takeRefusedDraft` clears it so a second
-  // effect run (StrictMode) cannot restore the same draft twice.
+  // A refused turn (409/413/415...) hands its draft back here, once: `takeRefusedDraft` clears
+  // it, so a StrictMode re-run can't restore it twice.
   useEffect(() => {
     if (!run.refusedDraft) return;
     const draft = takeRefusedDraft();
@@ -179,8 +166,7 @@ export function ChatHubView() {
     setAttachments(draft.attachments);
     setAttachError(draft.message + refusalClientClause(draft.code));
     refreshVisionStatus();
-    // `text` deliberately excluded: this must run exactly once per refusal,
-    // not on every keystroke afterward.
+    // `text` excluded: once per refusal, not per keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.refusedDraft]);
 
@@ -219,11 +205,7 @@ export function ChatHubView() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // The paperclip is NEVER disabled for vision reasons — a tap always opens
-  // the file picker. What a tap DOES do, when picture support is not ready,
-  // is surface the reason: the button's title (a mouse hover) and, now, an
-  // on-demand ImageSupportStatus line reachable by touch, which a disabled
-  // button's title attribute never was.
+  // Never disabled for vision: a disabled button's title can't reach touch, so a tap shows why.
   function onAttachClick() {
     if (gateBlocked) setAttachReasonShown(true);
     fileInputRef.current?.click();
@@ -259,9 +241,7 @@ export function ChatHubView() {
     (raw?: string) => {
       const t = (raw ?? text).trim();
       if ((!t && attachments.length === 0) || busy) return;
-      // Gated here rather than by disabling Send: this is the one path every
-      // way of sending funnels through (the button, Enter, a suggestion chip,
-      // Continue), so gating here covers all of them at once.
+      // Gated here, not on Send: every way of sending (button, Enter, chip, Continue) lands here.
       if (attachments.length > 0 && gateBlocked) {
         setAttachError(COMPOSER_GATE_LINE);
         return;

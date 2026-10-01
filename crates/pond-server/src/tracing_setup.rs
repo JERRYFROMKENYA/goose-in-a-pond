@@ -226,6 +226,9 @@ pub fn init_tracing_with_console(
         .with(db_layer)
         .init();
 
+    // Decided at the top of `main`, before there was a subscriber to hear it.
+    crate::node_path::log_decision();
+
     LogDrainHandle { rx, file_guard }
 }
 
@@ -241,13 +244,7 @@ mod tests {
             "turn_device_identified",
             // Per-turn trim decision; promote with the next compaction work.
             "history_trim_skipped",
-            // Fires on every proposals poll on a one-member pond, because that
-            // is exactly the shape that reaches the fallthrough: an
-            // unidentified session resolves to `Household`, and `sole_member`
-            // then names the only person there. At INFO it would be one line
-            // per poll for the whole life of the process, which is how a log
-            // stops being readable. Its value is in a debug session, where
-            // `RUST_LOG` is raised anyway.
+            // Fires on every proposals poll on a one-member pond; INFO would flood the log.
             "proposal_caller_sole_member",
         ];
 

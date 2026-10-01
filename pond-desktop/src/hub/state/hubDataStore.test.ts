@@ -40,14 +40,6 @@ describe("hubDataStore", () => {
     apiMock.getNowPlaying.mockResolvedValue({ connected: false });
   });
 
-  /**
-   * The demo house is gone, and this is the test that used to require it.
-   *
-   * A pond with nothing paired was handed ten invented devices, three cameras
-   * and six rooms — which made the screen a new household meets the one screen
-   * guaranteed to be false. Zero devices is a state, and every surface that
-   * shows them has an empty state for it.
-   */
   it("reports an empty house as empty rather than borrowing a demo one", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -62,16 +54,6 @@ describe("hubDataStore", () => {
     expect(home.user).toBe("Jerry");
   });
 
-  /**
-   * And nothing is on the screen before the first answer lands, either.
-   *
-   * The seed used to be the demo house, which every consumer then had to
-   * remember to suppress by checking `devicesAreReal`. The drawer did not, so
-   * it listed Living Room, Kitchen, Bedroom, Office and Outdoor to households
-   * that owned none of them, for however long the six requests took — 30s per
-   * abort, 190s if a re-pair runs, and for the whole session if `load()` threw.
-   * An empty seed cannot be mistaken for a house by anybody, guard or no guard.
-   */
   it("seeds nothing at all before the first load", () => {
     const home = getHomeData();
     expect(home.devices).toEqual([]);
@@ -84,12 +66,7 @@ describe("hubDataStore", () => {
     expect(home.weather.cond).toBe("");
   });
 
-  /**
-   * The device list carries identity and capabilities and no state whatsoever
-   * (`routes.rs` list_devices), so these four fields have nothing behind them.
-   * They used to default — and `locked: true` in particular made "All locked"
-   * unfalsifiable: no real-world door could change what the panel said.
-   */
+  /** `list_devices` sends identity and capabilities only, never state. */
   it("invents no on, locked or setpoint for a device that reported none", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
@@ -107,7 +84,6 @@ describe("hubDataStore", () => {
     expect(byId.th.value).toBeUndefined();
   });
 
-  /** The chips read off those same fields, so they say so rather than guess. */
   it("does not let a category chip claim a state nothing reported", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
@@ -122,12 +98,10 @@ describe("hubDataStore", () => {
     expect(byId.locks.status).toBe("Not reported");
     expect(byId.lights.status).toBe("Not reported");
     expect(byId.climate.status).toBe("Not reported");
-    // The Security chip is gone with it: it was pinned first and hardcoded to
-    // "Disarmed", which is an alarm state read off a placeholder.
+    // No Security chip: nothing reports alarm state.
     expect(byId.security).toBeUndefined();
   });
 
-  /** One silent lock is enough to stop the chip saying "All". */
   it("will not say all locked when one lock stayed silent", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([
@@ -141,11 +115,6 @@ describe("hubDataStore", () => {
     expect(locks?.status).toBe("1/1 locked");
   });
 
-  /**
-   * Scenes are the household's schedules. An empty schedule list used to return
-   * the demo file's five, so a pond that had never been given one showed five
-   * tappable scenes.
-   */
   it("shows no scenes when the pond has no schedules", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -226,12 +195,6 @@ describe("hubDataStore", () => {
     expect(home.weather.forecast).toEqual([{ d: "Wed", i: "rain", t: 55 }]);
   });
 
-  /**
-   * Weather off used to render a mock 64° / Partly cloudy / H68 L54 and a
-   * Tue-Wed-Thu strip, which is a forecast for a place the pond does not know.
-   * Now the slice is zeroed and `weatherEnabled` is false, and Home draws a
-   * "set your location" panel where the card would be.
-   */
   it("reports no weather at all when the API says it is disabled", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -245,11 +208,6 @@ describe("hubDataStore", () => {
     expect(home.weather.forecast).toEqual([]);
   });
 
-  /**
-   * The per-field fallbacks were the same fabrication at smaller scale: a real
-   * answer missing a high and low reported the demo numbers beside a real
-   * temperature, which is harder to spot and no more true.
-   */
   it("does not fill a real answer's gaps from the mock record", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -285,17 +243,7 @@ describe("hubDataStore", () => {
     expect(apiMock.listDevices).not.toHaveBeenCalled();
   });
 
-  /**
-   * A 502 is not a household decision.
-   *
-   * `GET /api/v1/weather` answers 200 `{enabled:false}` only when the pond has
-   * no provider configured at all; once a location is set, an upstream failure
-   * or a PAI-2 egress refusal is a 502 with a message saying which. The client
-   * throws on that, `Promise.allSettled` flattened it to null, and null became
-   * `weatherEnabled: false` — so the card told a household whose location was
-   * already set to go and set their location, and tapping through to Settings
-   * and saving fixed nothing, because nothing was unset.
-   */
+  /** `{enabled:false}` means no provider configured; with one set, a failure is a 502. */
   it("does not report a failed weather fetch as weather being off", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -306,7 +254,6 @@ describe("hubDataStore", () => {
     expect(getHomeData().weatherStatus).toBe("unreachable");
   });
 
-  /** The household's own "off" still reads as off, and is still distinguishable. */
   it("reports weather being switched off as off", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -317,12 +264,6 @@ describe("hubDataStore", () => {
     expect(getHomeData().weatherStatus).toBe("off");
   });
 
-  /**
-   * And a failed reload does not wipe a reading that was right all day. `load()`
-   * rebuilds every field, so one 502 during a reconnect used to replace a live
-   * 71 degrees with the "set your location" panel — which the ten-minute poll
-   * cannot undo, because it only ever keeps the last slice.
-   */
   it("keeps the last good reading when a full reload cannot reach weather", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -354,20 +295,10 @@ describe("hubDataStore", () => {
 
     await refreshWeather();
     expect(getHomeData().weather.temp).toBe(16);
-    // Kept, and said to be kept: a card may go on showing the last reading, but
-    // nothing may present it as current.
+    // Kept, but marked so nothing presents it as current.
     expect(getHomeData().weatherStatus).toBe("unreachable");
   });
 
-  /**
-   * A pond with no recipes has no routines.
-   *
-   * It used to have five — Good Morning, Good Night, Movie Time, Away, Focus —
-   * on every fresh install and every unreachable server, listed in the drawer
-   * and on Routines with a control that ran them. Tapping one wrote the fixture
-   * into the household's real `agent_recipes` and sent its prompt to the agent,
-   * in a house that may have had nothing paired.
-   */
   it("shows no routines when the pond has no recipes", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -378,7 +309,6 @@ describe("hubDataStore", () => {
     expect(__getRoutinesForTests()).toEqual([]);
   });
 
-  /** Offline is the same answer: no recipes came back, so there are no routines. */
   it("shows no routines when the recipe call fails", async () => {
     apiMock.getSettings.mockResolvedValue({ user_name: "Ada", assistant_name: "Goose", prompt_style: "balanced" });
     apiMock.listDevices.mockResolvedValue([]);
@@ -389,7 +319,6 @@ describe("hubDataStore", () => {
     expect(__getRoutinesForTests()).toEqual([]);
   });
 
-  /** And nothing is seeded before the first load, either. */
   it("starts with no routines at all", () => {
     expect(__getRoutinesForTests()).toEqual([]);
   });
@@ -406,13 +335,11 @@ describe("hubDataStore", () => {
     await refreshHomeData();
     const snapshot = __getRoutinesForTests();
     expect(snapshot.length).toBe(2);
-    // A recipe whose name happens to match a fixture keeps its OWN description
-    // and gets no schedule. It used to be relabelled "7:00 AM · weekdays" and
-    // given four actions off a file, with "wake up macro" thrown away.
+    // A name matching a fixture routine still keeps its own description and no schedule.
     const morning = snapshot.find((r) => r.name === "Good Morning");
     expect(morning?.does).toEqual(["wake up macro"]);
     expect(morning?.time).toBe("On demand");
-    // Every other recipe derives its chips from its description, as before.
+    // Every other recipe derives its chips from its description.
     const sunset = snapshot.find((r) => r.name === "Sunset Bath");
     expect(sunset?.does).toEqual(["Run tub", "dim lights", "play jazz"]);
     expect(sunset?.time).toBe("On demand");
@@ -430,6 +357,25 @@ describe("hubDataStore", () => {
     await refreshHomeData();
     return getHomeData().nowPlaying;
   }
+
+  it("follows the household's choice: with Apple Music chosen, the card is Apple Music's", async () => {
+    const np = await loadWithNowPlaying({ connected: false, service: "apple", player: "app" });
+    expect(np).toMatchObject({ service: "apple", player: "app", connected: false, playing: false });
+  });
+
+  it("carries the Spotify item's link and what Spotify allows now into the card", async () => {
+    const np = await loadWithNowPlaying({
+      connected: true,
+      service: "spotify",
+      playing: true,
+      track: "So What",
+      artist: "Miles Davis",
+      link: "https://open.spotify.com/track/abc",
+      can: { pause: false, resume: true, next: true, previous: true },
+    });
+    expect(np.link).toBe("https://open.spotify.com/track/abc");
+    expect(np.can).toEqual({ pause: false, resume: true, next: true, previous: true });
+  });
 
   it("surfaces a Spotify authorisation failure instead of an idle player", async () => {
     const np = await loadWithNowPlaying({
@@ -481,8 +427,7 @@ describe("hubDataStore", () => {
     expect(np.artist).toBe("The Weeknd");
     expect(np.playing).toBe(true);
     expect(np.elapsed).toBeCloseTo(0.3);
-    // The raw milliseconds too: the fraction cannot be turned back into mm:ss,
-    // so a card that wants to say 1:00 of 3:20 needs both of these.
+    // Raw milliseconds too, for mm:ss display.
     expect(np.progressMs).toBe(60_000);
     expect(np.durationMs).toBe(200_000);
   });
@@ -496,9 +441,7 @@ describe("hubDataStore", () => {
     const off = await loadWithNowPlaying({ connected: false });
     expect(off.progressMs).toBeNull();
     expect(off.durationMs).toBeNull();
-    // And no borrowed track. A fresh install showed "Weightless / Marconi
-    // Union" here, which is exactly the state most likely to be mistaken for
-    // working playback.
+    // No borrowed track: a fake title would pass for working playback.
     expect(off.track).toBe("");
   });
 

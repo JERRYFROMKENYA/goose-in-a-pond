@@ -1,27 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// The drawer that replaced the sidebar.
-//
-// Both shells used to carry their own navigation, and neither was small: the
-// classic shell a 240px column of fourteen items in three labelled groups, the
-// hub an 86px icon rail of five. The redesign replaces both with one drawer
-// behind a hamburger, and the reason is the panel it targets. At 1024x600 a
-// persistent column is a fifth of the screen spent saying where you are not.
-//
-// Three things the shape buys, none of them cosmetic:
-//
-//   ONE NAV    The twelve sections the classic sidebar kept under MANAGE and
-//              CONFIGURE became one destination, "Manage". The design's own
-//              note is the authority: "the two groups became one destination".
-//   REACHABLE  Nothing was dropped. Every section the fat sidebar listed is
-//              still one tap from every screen, which a five-item rail could
-//              not say -- it left nine of them with no route at all.
-//   TOUCH      Every row is at least 44px and every chip 34px, because the
-//              finger is the pointer this design assumes.
-//
-// Deliberately NOT here: the rest of the Home redesign -- the paged widgets,
-// the suggestion queue, the clock and weather cluster. This is the navigation
-// and nothing else.
-// ────────────────────────────────────────────────────────────
+// The navigation drawer both shells share. Every section stays one tap from every screen, and
+// rows are at least 44px, chips 34px: the finger is the assumed pointer.
 
 import { useEffect, useState } from "react";
 import { Logo } from "../components/Logo";
@@ -31,13 +9,7 @@ import { useHomeData, useRoutines } from "./state/hubDataStore";
 import type { GuiSection } from "../desktopState";
 import "./hubDrawer.css";
 
-/**
- * Where a drawer row sends you.
- *
- * Voice is a mode, not a section, and the two shells reach it differently --
- * so it is its own case rather than a magic section name that one shell would
- * silently fail to recognise.
- */
+/** A drawer row's target; voice is a mode each shell reaches its own way, so it's its own case. */
 export type DrawerNav =
   | { kind: "section"; section: GuiSection }
   | { kind: "voice" };
@@ -48,25 +20,13 @@ interface NavRow {
   section: GuiSection;
 }
 
-/**
- * "Pond" -- the two ways to talk to it.
- *
- * Voice takes `micEl`, not `HP_PATHS.mic`: that entry is a sentinel string for
- * a compound icon, so rendering it as a path draws nothing at all. It fails
- * silently, which is why it is worth naming here.
- */
+/** Voice takes `micEl`: `HP_PATHS.mic` is a compound-icon sentinel and draws nothing as a path. */
 const POND_ROWS: Array<{ label: string; icon: string | React.ReactNode; nav: DrawerNav }> = [
   { label: "Chat",  icon: HP_PATHS.chat, nav: { kind: "section", section: "chat" } },
   { label: "Voice", icon: micEl,         nav: { kind: "voice" } },
 ];
 
-/**
- * "Manage" -- the twelve, in the design's order.
- *
- * The order is the design's and not alphabetical: it is roughly what the
- * household touches most first. Keep it in step with the design file rather
- * than tidying it.
- */
+/** The design's order (most-touched first), not alphabetical; keep it in step with the design. */
 const MANAGE_ROWS: Array<{ label: string; section: GuiSection }> = [
   { label: "Devices",    section: "devices" },
   { label: "Mesh",       section: "mesh" },
@@ -102,24 +62,15 @@ export interface HubDrawerProps {
 }
 
 export function HubDrawer({ open, onClose, active, onNavigate }: HubDrawerProps) {
-  // Pond starts open and Manage starts closed, per the design. Manage is twelve
-  // chips; opening it by default would push Rooms and the routines below the
-  // fold on the panel this targets.
+  // Manage (twelve chips) starts closed so Rooms and routines stay above the fold.
   const [pondOpen, setPondOpen]     = useState(true);
   const [manageOpen, setManageOpen] = useState(false);
 
-  // `devicesAreReal` is the store's own answer to "did this come off the wire",
-  // and rooms are derived from devices, so it is the flag for both. Without it
-  // the drawer listed a household's rooms back to them before a single request
-  // had settled -- Living Room, Kitchen, Bedroom, Office, Outdoor -- in a house
-  // that may have none of them, and the list then silently collapsed to one.
+  // Rooms derive from devices, so `devicesAreReal` gates them too.
   const { rooms, devicesAreReal } = useHomeData();
-  // Routines need no such flag: they are the household's recipes or they are
-  // nothing. The store no longer substitutes a fixture for an empty list.
+  // Routines need no flag: they are the household's recipes or nothing.
   const routines  = useRoutines();
 
-  // Escape closes it. A panel that covers the screen and can only be dismissed
-  // by finding the right pixel is a trap for anyone on a keyboard.
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {

@@ -50,11 +50,6 @@ describe("what it leads with", () => {
     expect(line(d, at(22))).toBe("All locked, and everything is off.");
   });
 
-  /**
-   * The half that is known, when the other half is not. A lock that answered
-   * says something; a lamp that never did says nothing, and "everything is
-   * off" would be speaking for it.
-   */
   it("says only the locks when nothing else reported", () => {
     const d = [
       dev({ id: "Front Door", kind: "lock", locked: true }),
@@ -64,14 +59,7 @@ describe("what it leads with", () => {
   });
 });
 
-/**
- * Nothing read it, so nothing may be said about it.
- *
- * `GET /api/v1/devices` returns identity and capabilities and no state at all,
- * and the store used to paper over that with defaults — `locked` to true, `on`
- * to false. These are the sentences that produced: a reassurance about doors
- * nobody had touched, on a panel, after dark.
- */
+/** `GET /api/v1/devices` carries no state, so a device that didn't report gets no sentence. */
 describe("what it will not claim about a house that has not reported", () => {
   /** The devices exactly as the API describes them: no on, no locked. */
   const silent = [
@@ -89,7 +77,6 @@ describe("what it will not claim about a house that has not reported", () => {
     expect(line(silent, at(14))).not.toContain("off");
   });
 
-  /** One silent lock is enough: "all" is a word about every door, not most. */
   it("will not say all locked when one lock stayed silent", () => {
     const d = [
       dev({ id: "Front Door", kind: "lock", locked: true }),
@@ -99,7 +86,6 @@ describe("what it will not claim about a house that has not reported", () => {
     expect(line(d, at(22))).not.toContain("All locked");
   });
 
-  /** And a silent lock is not an unlocked one — the count is over what answered. */
   it("counts unlocked doors over the locks that answered", () => {
     const d = [
       dev({ id: "Front Door", kind: "lock", locked: false }),
@@ -142,7 +128,6 @@ describe("what is on", () => {
     expect(line(d)).toBe("Partly cloudy, 64° out.");
   });
 
-  /** One light reporting off is a fact about that light, and enough to say it. */
   it("says everything is off when every light said so", () => {
     const d = [
       dev({ id: "A", kind: "light", on: false }),
@@ -176,13 +161,7 @@ describe("a pond with no devices in it", () => {
   });
 });
 
-/**
- * A pond with no weather to report.
- *
- * The slice handed over in that state is `NO_WEATHER` — zeroes, including a
- * zero temperature. Printing it gave ", 0° out.", a reading nobody took, on a
- * screen whose whole claim is that it only says what the pond knows.
- */
+/** The no-weather slice is `NO_WEATHER`, all zeroes: printing it would claim 0°. */
 describe("a pond with no weather in it", () => {
   const nothing: WeatherData = {
     temp: 0, cond: "", icon: "", hi: 0, lo: 0,
@@ -206,16 +185,7 @@ describe("a pond with no weather in it", () => {
     expect(noWeatherLine(at(3))).toBe("The house is quiet, Jerry.");
   });
 
-  /**
-   * The case the old guard let through.
-   *
-   * It read `!cond && !icon`, so a provider that answered with an icon and no
-   * condition word satisfied it and fell into a branch that interpolates `cond`
-   * and `temp` — producing ", 0° out.", a leading comma and a reading nobody
-   * took. This is the vacuity control for the guard above it: with the guard
-   * keyed on `cond` alone, both tests pass; with it keyed on `icon` alone, THIS
-   * one fails and the one above still passes.
-   */
+  /** Control for the guard: keyed on `icon` alone, this fails while the test above still passes. */
   it("says nothing about a sky that sent an icon and no words", () => {
     const iconOnly: WeatherData = { ...nothing, icon: "partly-cloudy-day" };
     for (const now of [at(3), at(9), at(14), at(21)]) {
@@ -228,7 +198,6 @@ describe("a pond with no weather in it", () => {
     );
   });
 
-  /** Devices that reported nothing land here too, not on a sentence about them. */
   it("holds for a house whose devices all stayed silent", () => {
     const d = [dev({ id: "Front Door", kind: "lock" }), dev({ id: "Lamp", kind: "light" })];
     expect(homeLine({ user: "Jerry", devices: d, weather: nothing, now: at(21) })).toBe(

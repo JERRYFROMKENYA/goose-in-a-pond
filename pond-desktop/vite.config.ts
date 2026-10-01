@@ -34,6 +34,17 @@ export default defineConfig(async () => ({
     },
   },
 
+  // Two pages: the app, and the music player window the shell keeps alive (its own bundle, so a
+  // player fault cannot take the app down with it).
+  build: {
+    rollupOptions: {
+      input: {
+        main: resolve(__dirname, "index.html"),
+        player: resolve(__dirname, "player.html"),
+      },
+    },
+  },
+
   // Prevent Vite from hiding Rust compilation errors
   clearScreen: false,
 }));

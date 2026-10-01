@@ -18,11 +18,8 @@ pub fn ensure_drafter_registered(data_dir: &Path, model_name: &str) -> Option<St
     ensure_drafter_registered_with(data_dir, model_name, speculation_enabled())
 }
 
-/// [`ensure_drafter_registered`] with the switch passed in, for a caller holding this turn's
-/// settings row: the process-global gate may already have been moved by a concurrent PUT.
-///
-/// Off, it touches nothing. It takes the registry lock itself, so a caller must never hold a
-/// registry guard across it.
+/// [`ensure_drafter_registered`] with this turn's switch; a concurrent PUT may move the gate.
+/// Off, it does nothing. It takes the registry lock, so never call it holding a registry guard.
 pub fn ensure_drafter_registered_with(
     data_dir: &Path,
     model_name: &str,
@@ -108,11 +105,8 @@ fn point_target_at_drafter(
     }
 }
 
-/// Make every row agree with the switch: OFF clears `draft_model` registry-wide, ON points every
-/// row naming `target` at `drafter_id` (or clears them when there is no usable drafter).
-///
-/// One snapshot, one plan (pond-core's), one save. Returns the changes applied; empty means the
-/// registry already agreed (which does not mean the loaded slot does: see [`SpeculationLedger`]).
+/// Make every row agree with the switch, in one save: OFF clears `draft_model` everywhere, ON
+/// points rows naming `target` at `drafter_id`. Empty result: the rows agreed, maybe not the slot.
 pub fn reconcile_drafter(
     rows: &dyn RegistryRows,
     target: &Path,
@@ -147,9 +141,8 @@ pub fn reconcile_drafter(
     plan
 }
 
-/// Whether a file is a drafter the engine can load: GGUF, and the `gemma4-assistant`
-/// architecture. The same check `ensure_mtp_drafter` makes at startup, so the runtime fetch
-/// cannot install something the startup path would refuse.
+/// A GGUF with the `gemma4-assistant` architecture: the check `ensure_mtp_drafter` makes at
+/// startup, so a runtime fetch cannot install what startup would refuse.
 pub fn is_loadable_drafter(path: &Path) -> bool {
     use std::io::Read;
     let Ok(mut f) = std::fs::File::open(path) else {
@@ -163,12 +156,8 @@ pub fn is_loadable_drafter(path: &Path) -> bool {
     head.starts_with(b"GGUF") && head.windows(16).any(|w| w == b"gemma4-assistant")
 }
 
-/// Fetch this model's drafter through pond-hf-cache and link it where the engine looks.
-///
-/// For the switch turned ON at runtime with the drafter not on disk. Same transport as the
-/// vision encoder (resumable, per-hop egress gating, a mode change mid-transfer pauses it) and
-/// the same validation as startup. A regular file already at the destination is never
-/// overwritten: a loadable one is kept, anything else is renamed aside first.
+/// Fetch this model's drafter via pond-hf-cache and link it where the engine looks. Never
+/// overwrites a regular file there: a loadable one is kept, anything else is renamed aside.
 pub async fn fetch_drafter(data_dir: &Path, chat_model: &str) -> anyhow::Result<PathBuf> {
     let spec =
         drafter_for(chat_model).ok_or_else(|| anyhow::anyhow!("{chat_model} has no drafter"))?;
@@ -218,8 +207,7 @@ pub async fn fetch_drafter(data_dir: &Path, chat_model: &str) -> anyhow::Result<
 
 // ── Applying the switch ─────────────────────────────────────────────────────
 
-/// What decides the drafter a loaded model has: which model, the switch, and whether the file
-/// is there.
+/// What decides a loaded model's drafter: the model, the switch, and whether the file exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DraftTuple {
     /// The canonical registry key the engine loads the model under.
@@ -239,20 +227,9 @@ pub enum LedgerStep {
     EvictAgain { epoch: u64 },
 }
 
-/// Which switch position the engine's LOADED slot reflects.
-///
-/// Every reconcile is followed by an evict, whether or not it changed a row: other writers move
-/// `draft_model` too (a PUT's provider rebuild re-stamps it from the gate before this adapter's
-/// next turn runs), so "the rows already agree" says nothing about what the loaded slot was
-/// built from. The evict is free when nothing is loaded, which covers the first turn of a
-/// process and a model switch.
-///
-/// An evict only acts on a slot that is Loaded; one still Loading (the boot prewarm on the Orin
-/// spends 10-20 s there, a quick OFF then ON lands inside the first reload) is skipped, and that
-/// load completes with the decision it resolved before the reconcile. So a reconcile is only
-/// PENDING until one of two things proves a load happened after it: the evict reports it
-/// emptied a slot, or a later turn of this adapter reports a cold load (`model_load_ms`). Until
-/// then every local turn evicts again before it streams.
+/// Which switch position the engine's LOADED slot reflects. Every reconcile evicts, even with no
+/// row changed (a PUT's rebuild moves `draft_model` too). Evicts skip a still-Loading slot, so a
+/// reconcile stays pending, re-evicting each turn, until an evict empties a slot or a cold load.
 #[derive(Debug, Default)]
 pub struct SpeculationLedger {
     applied: Option<DraftTuple>,
@@ -272,8 +249,7 @@ impl SpeculationLedger {
         }
     }
 
-    /// The rows now agree with `tuple`; the loaded slot does not yet. Returns the epoch to evict
-    /// under.
+    /// The rows now agree with `tuple`, the loaded slot not yet; returns the epoch to evict under.
     pub fn reconciled(&mut self, tuple: DraftTuple) -> u64 {
         self.epoch += 1;
         self.pending = Some((tuple, self.epoch));
@@ -287,8 +263,7 @@ impl SpeculationLedger {
         }
     }
 
-    /// A turn that evicted under `epoch` then reported a cold load, which resolved the rows as
-    /// they stood after the reconcile.
+    /// A turn that evicted under `epoch` then cold-loaded, so the load saw the reconciled rows.
     pub fn loaded(&mut self, epoch: u64) {
         self.settle(epoch);
     }
@@ -355,8 +330,7 @@ mod tests {
         assert!(ensure_drafter_registered(tmp.path(), "gemma-4-E2B-it-qat").is_none());
     }
 
-    /// Off, registration does nothing at all, even with the drafter on disk: the rows are the
-    /// reconcile's to clear, and a register-and-point here would undo it.
+    /// The rows are the reconcile's to clear; registering here would undo it.
     #[test]
     fn the_switch_off_registers_and_points_nothing() {
         let tmp = tempfile::tempdir().unwrap();
@@ -375,8 +349,6 @@ mod tests {
         }
     }
 
-    /// Even a reconcile that changed no row is only pending: a PUT's provider rebuild can have
-    /// re-stamped the rows already, while the loaded slot still carries the old drafter.
     #[test]
     fn a_reconcile_is_pending_until_a_load_proves_it() {
         let mut ledger = SpeculationLedger::default();
@@ -387,8 +359,6 @@ mod tests {
         assert_eq!(ledger.step(&tuple(true)), LedgerStep::Nothing);
     }
 
-    /// The pending-evict guard: an evict that emptied nothing (the slot was still loading)
-    /// leaves the switch pending, and every later turn evicts again until one does.
     #[test]
     fn an_evict_that_emptied_nothing_keeps_the_switch_pending() {
         let mut ledger = SpeculationLedger::default();
@@ -406,8 +376,6 @@ mod tests {
         assert_eq!(ledger.step(&tuple(false)), LedgerStep::Nothing);
     }
 
-    /// Nothing was loaded (the evict had nothing to empty): the turn's own cold load is the
-    /// proof, and only for the epoch it evicted under.
     #[test]
     fn a_cold_load_after_the_reconcile_applies_it_and_an_older_one_does_not() {
         let mut ledger = SpeculationLedger::default();
@@ -434,8 +402,6 @@ mod tests {
         assert!(ledger.begin_fetch());
     }
 
-    /// OFF clears every row that has a drafter, registry-wide, in one save; ON points only the
-    /// rows naming the target.
     #[test]
     fn the_reconcile_applies_the_plan_to_every_row_in_one_save() {
         let tmp = tempfile::tempdir().unwrap();

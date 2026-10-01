@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod answer_reviewer;
+pub mod audio_focus;
 pub mod embedding;
 pub mod inference;
 pub mod inference_pool;

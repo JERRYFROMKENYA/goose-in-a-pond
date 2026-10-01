@@ -1,22 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// ImageSupportStatus — one hairline strip while picture support sets itself
-// up for the active chat model.
-//
-// The WarmupBanner idiom: hairline chrome, slate meta text, no ink offset
-// (the edge marks content — DESIGN.md rule 3), a lucide icon rather than a
-// bare spinner because "Getting picture support ready: 412 MB of 941 MB"
-// says what is happening. Shown ABOVE the AttachmentTray, never in place of
-// it — attaching still works while this reads.
-//
-// Visible in two different ways, on purpose. The transitional states
-// (absent/downloading/verifying/failed/blocked) are things happening TO the
-// household without their asking, so they stay on screen the whole time,
-// same as the WarmupBanner. `not_declared` and `not_on_this_device` are
-// permanent facts about the model in use — a persistent line for those would
-// be chrome nobody asked for on a screen that otherwise says nothing, so it
-// renders only the moment the household reaches for the paperclip or pastes
-// an image, via `revealed`.
-// ────────────────────────────────────────────────────────────
+// Picture-support strip for the active chat model, above the AttachmentTray (attaching still
+// works). In-progress states always show; permanent ones only when `revealed`.
 
 import { Image, ImageOff, Loader2 } from "lucide-react";
 import type { VisionStatus } from "../api/types";
@@ -26,25 +9,15 @@ const PERSISTENT_KINDS = new Set(["absent", "downloading", "verifying", "failed"
 const SPINNING_KINDS = new Set(["downloading", "verifying"]);
 const MUTED_KINDS = new Set(["failed", "blocked"]);
 
-/** Shown once picture support is set up and a message comes back for a state
- *  the server does not send prose for (`message` is null for `not_declared`
- *  — it is a static fact about the model, not something happening). Pinned
- *  to design_v2.md section B1's household copy exactly, and exported so a
- *  composer's tooltip on the paperclip itself can say the same thing. */
+/** Copy for `not_declared`, which has no server prose; pinned to design_v2.md §B1. */
 export const NOT_DECLARED_COPY =
   "This model cannot look at pictures. To send one, choose a model marked Reads pictures on the Models page.";
 
-/** The line under the composer when a send is gated on picture support —
- *  shared by both composers so the wording cannot drift between shells. */
+/** Under-composer line when a send waits on picture support; shared so both shells agree. */
 export const COMPOSER_GATE_LINE =
   "Pictures can be sent once picture support is ready. Remove them to send just the text.";
 
-/**
- * The clause a composer appends to a restored 409's message, so "your draft
- * came back" and "why" read as one sentence. Pinned per design_v2.md section
- * H — `not_ready` and `unsupported` are the only two codes the refusal path
- * carries a specific line for; anything else gets the shared fallback.
- */
+/** Clause for a restored 409's message (design_v2.md §H); unknown codes get the fallback. */
 export function refusalClientClause(code: string | undefined): string {
   if (code === "vision_not_ready") {
     return " Your message and pictures are back in the box; send them when it is ready.";
@@ -65,9 +38,7 @@ function formatRetryClock(unixMs: number): string {
 
 interface ImageSupportStatusProps {
   status: VisionStatus | null;
-  /** Whether the household has, this moment, reached for the paperclip or
-   *  tried to paste an image — the only time a permanent reason earns a
-   *  line. Ignored for the transitional states, which show regardless. */
+  /** They just reached for the paperclip or pasted: only then do permanent reasons show. */
   revealed: boolean;
 }
 

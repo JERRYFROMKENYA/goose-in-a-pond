@@ -42,14 +42,8 @@ use pond_server::conversation_extractor::LlmConversationExtractor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// A stand-in embedder, so the write gate's dedup pass has a vector to work
-/// with without downloading a model.
-///
-/// Every text embeds to the same unit vector, which means every cosine is 1.0
-/// and every candidate after the first lands in the Same band. That is fine
-/// for what these tests assert -- what the MODEL produced, and what the gate
-/// did with the date -- and it is emphatically not a source of any claim about
-/// dedup behaviour.
+/// Maps every text to one unit vector so the write gate's dedup runs without a model.
+/// Every cosine is 1.0, so these tests say nothing about dedup behaviour.
 struct ConstantEmbedder;
 
 #[async_trait]
@@ -89,11 +83,7 @@ async fn build_provider() -> Option<Arc<dyn LlmProvider>> {
 }
 
 // ── Live window extraction ───────────────────────────────────────────────────
-//
-// The Mac is the cheapest place to find schema non-compliance, because it has
-// five GGUF families to the device's one. Point `GIAP_OLLAMA_MODEL` at each in
-// turn: a prompt that only one family obeys is a prompt that will fail on the
-// Orin at three in the morning with nobody watching.
+// Rerun per GGUF family (`GIAP_OLLAMA_MODEL`) to catch prompts only one family obeys.
 fn window(user: &str, assistant: &str, at: DateTime<Utc>) -> Vec<WindowMessage> {
     vec![
         WindowMessage {
@@ -133,10 +123,7 @@ async fn read_window(
     {
         Ok(extraction) => Some(extraction),
         Err(e) => {
-            // A small model that cannot emit the schema is a real finding and
-            // it is the reason the parse-failure rate is a gate -- but it is
-            // not this test's assertion, and failing here would say the code is
-            // broken when the model is.
+            // Unreadable output is the model's fault, not the code's; skip rather than fail.
             println!("[live-test] the model produced nothing readable: {e}");
             None
         }
@@ -165,26 +152,14 @@ async fn live_window_extraction_produces_the_catalogue() {
         !extraction.memories.is_empty(),
         "a window this rich produced nothing at all"
     );
-    // The catalogue is closed, so the parser has already dropped anything
-    // outside it. What is worth printing is how OFTEN that happened: a model
-    // that reaches for `identity` or `knowledge` every time is a model the
-    // prompt is failing to steer, and the fix is the prompt, not the gate.
+    // Off-catalogue items are already dropped; many of them means the prompt needs fixing.
     assert!(
         extraction.rejected <= extraction.memories.len(),
         "more items were outside the five-value catalogue than inside it"
     );
 }
 
-/// The date rule, end to end against a real model: what the prompt asks for,
-/// and what the gate does with the answer.
-///
-/// Nothing edits a note any more, so there is only one question left: of the
-/// notes the model wrote, which would be REFUSED, and did the model file the
-/// date as a reminder so that refusing them costs nothing? Both halves are
-/// printed, because a live test that only asserts is a live test nobody learns
-/// anything from -- the measured split on the shipped model is 31 reminders
-/// across 36 dated windows and not one date lost entirely, and this is where a
-/// device confirms it.
+/// Dated notes must be refused; prints the verdicts and the reminders that keep the dates.
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL or GIAP_LLAMAFILE_URL"]
 async fn live_no_stored_note_carries_a_date() {
@@ -221,10 +196,7 @@ async fn live_no_stored_note_carries_a_date() {
         }
     }
 
-    // The half the refusal depends on. A dated note the model did not also file
-    // as a reminder is a date this pond has lost, and it is the number worth
-    // watching on a device: it is 0 of 19 on the shipped model and 14 of 14 on
-    // one of the others.
+    // A dated note with no matching reminder is a date lost; watch this number on a device.
     if dated > 0 && extraction.reminders.is_empty() {
         println!(
             "[live-test] WARNING: {dated} dated note(s) refused and no reminder filed -- \
@@ -232,7 +204,6 @@ async fn live_no_stored_note_carries_a_date() {
         );
     }
 
-    // The dated half should have gone somewhere the model can name.
     println!("[live-test] {} reminders:", extraction.reminders.len());
     for r in &extraction.reminders {
         println!("  {:?} when {:?}", r.about, r.when_said);
@@ -245,7 +216,6 @@ async fn live_no_stored_note_carries_a_date() {
     }
 }
 
-/// A trivial exchange is worth remembering nothing about.
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL or GIAP_LLAMAFILE_URL"]
 async fn live_window_extraction_keeps_little_from_small_talk() {
@@ -265,8 +235,7 @@ async fn live_window_extraction_keeps_little_from_small_talk() {
     );
 }
 
-/// The whole path, ending in SQLite: what the model said, through the real
-/// write gate, into a real database.
+/// End to end: model output through the real write gate into SQLite.
 #[tokio::test]
 #[ignore = "requires GIAP_OLLAMA_URL or GIAP_LLAMAFILE_URL"]
 async fn live_extraction_stores_to_sqlite() {

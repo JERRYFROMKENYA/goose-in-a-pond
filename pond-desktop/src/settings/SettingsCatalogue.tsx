@@ -57,9 +57,7 @@ function Mark({ consumer }: { consumer: Consumer }) {
 /** Terse retitle summary that tells "nothing needed doing" from "nothing was allowed" (all hand-named). */
 export function summariseRetitle(r: RetitleResult): string {
   if (r.started) return "Renaming — names appear as it goes";
-  // A pond with no titling loop is not a broken pond, and saying so is the
-  // distinction this line exists for: the person must be able to tell "nothing
-  // here does this" from "it did not work".
+  // No titling loop is not a failure, so don't say "it did not work".
   return r.reason ?? "Nothing here to run";
 }
 
@@ -139,17 +137,10 @@ const NULLABLE_TEXT = new Set([
   "voice_kws_whisper_url",
 ]);
 
-/** Inverse of `textValue`. Returns the shape the server expects for this key. */
-/**
- * Text boxes whose server value is a LIST: typed comma-separated, sent as an
- * array. Named once, because a list field missing from here is sent as the raw
- * string -- `suggestions_muted` was, and the server's `Vec<String>` refused it
- * with a 422 that took every other edit in the same Save down with it. Merely
- * typing a character and deleting it marked the page dirty (`""` is not `[]`)
- * with a change it could never save.
- */
+/** List-valued text boxes, typed comma-separated; one left out is sent raw and 422s the whole Save. */
 const LIST_TEXT = new Set(["voice_wake_word_transcriptions", "suggestions_muted"]);
 
+/** Inverse of `textValue`. Returns the shape the server expects for this key. */
 export function parseText(key: string, raw: string): unknown {
   if (LIST_TEXT.has(key)) {
     return raw

@@ -1,0 +1,52 @@
+name: pondcredentials
+services:
+  pondcredentials:
+    # The tag lets a small droplet run an image built elsewhere (`docker save | ssh ... docker load`)
+    # instead of compiling Rust in 512 MB; `docker compose up` builds only when it is missing.
+    image: pondcredentials:local
+    build:
+      context: ../../services/pondcredentials
+      dockerfile: ../../deploy/pondcredentials/Dockerfile
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PONDCREDENTIALS_BIND: 0.0.0.0:8080
+      # Caddy is the only peer, so the address to rate-limit is the one it appends to the header.
+      TRUST_PROXY: '1'
+      APPLE_TEAM_ID: '${APPLE_TEAM_ID:?Set the Apple Developer Team ID}'
+      APPLE_KEY_ID: '${APPLE_KEY_ID:?Set the MusicKit Key ID}'
+      APPLE_PRIVATE_KEY_FILE: /run/secrets/apple_key
+      TOKEN_TTL_DAYS: '${TOKEN_TTL_DAYS:-30}'
+      RATE_LIMIT_PER_MINUTE: '${RATE_LIMIT_PER_MINUTE:-20}'
+    secrets: [apple_key]
+    networks: [internal]
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+    healthcheck:
+      test: [CMD, /pondcredentials, --health-check]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+  gateway:
+    depends_on:
+      pondcredentials:
+        condition: service_healthy
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    restart: unless-stopped
+    environment:
+      CREDENTIALS_HOST: '${CREDENTIALS_HOST:?Set the public domain name}'
+    ports:
+      - '${HTTPS_BIND:-0.0.0.0}:443:443'
+      - '${HTTPS_BIND:-0.0.0.0}:80:80'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./runtime/caddy-data:/data
+      - ./runtime/caddy-config:/config
+    networks: [internal]
+    logging: {driver: json-file, options: {max-size: 10m, max-file: '3'}}
+networks:
+  internal: {}
+secrets:
+  apple_key:
+    file: ./runtime/secrets/apple.p8

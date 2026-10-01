@@ -70,6 +70,7 @@ mac:
   # When signing does arrive: a Developer ID Application certificate,
   # hardenedRuntime true, an entitlements plist carrying
   # com.apple.security.device.audio-input, .camera, .bluetooth,
+  # automation.apple-events (the music extension scripts Music.app),
   # cs.allow-jit and cs.allow-unsigned-executable-memory (V8), and
   # cs.disable-library-validation (the Rust sidecar and node are not signed by
   # this team). Then re-run the microphone and Bluetooth checks from scratch,
@@ -91,6 +92,9 @@ mac:
     NSCameraUsageDescription: >-
       Goose In A Pond uses the camera for face-based user recognition during
       enrollment and wake-on-face identification.
+    NSAppleEventsUsageDescription: >-
+      Goose In A Pond controls the Music app to play, pause and skip songs when
+      you ask it to.
     # Required, not optional, and the consequence of omitting it is not a
     # refused radio: macOS SIGKILLs a process that touches CoreBluetooth
     # without this key. Verified -- the crash report reads, verbatim, "This app

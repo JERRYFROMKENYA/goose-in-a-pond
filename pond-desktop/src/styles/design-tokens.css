@@ -94,11 +94,6 @@
   --color-content:        #FAFAF8;   /* slightly warm content area */
   --color-overlay:        rgba(255, 249, 249, 0.88);  /* canvas frosted glass */
 
-  /* Now Playing album-art scrim — dark enough to keep the track name legible
-     over any cover, without needing per-photo contrast checks. */
-  --np-scrim-top:    rgba(0, 0, 0, 0.2);
-  --np-scrim-bottom: rgba(0, 0, 0, 0.78);
-
   /* Interaction states */
   --color-hover:    rgba(23, 22, 22, 0.04);
   --color-pressed:  rgba(23, 22, 22, 0.08);
@@ -297,11 +292,6 @@
   --color-sidebar:        #17141F;
   --color-content:        #161320;
   --color-overlay:        rgba(19, 17, 25, 0.92);
-
-  /* Lighter than the light-mode scrim — the surrounding UI is already dark,
-     so the art needs less dimming to keep the track name readable. */
-  --np-scrim-top:    rgba(0, 0, 0, 0.1);
-  --np-scrim-bottom: rgba(0, 0, 0, 0.58);
 
   /* Text */
   --color-text:           #F3F1F8;

@@ -1,0 +1,24 @@
+#cloud-config
+# First-boot setup for a DigitalOcean droplet running Ubuntu 24.04: Docker, a little swap, and no
+# password logins. No secret belongs in this file; the Apple key is copied on afterwards, by hand,
+# over ssh. Pass your public key with `doctl ... --ssh-keys`, or add an `ssh_authorized_keys:` list
+# to a private copy of this file (a public key is not a secret, but do not commit yours).
+ssh_pwauth: false
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+runcmd:
+  # Without a registered SSH key DigitalOcean emails a root password that is forced to change at first
+  # login, and that expiry blocks key logins too (no TTY to change it). Nothing here uses the password:
+  # clear the expiry, then lock it, so root is reachable by key only.
+  - chage -E -1 -I -1 -M -1 -d "$(date +%F)" root
+  - passwd -l root
+  # A 512 MB droplet has no headroom for a package upgrade or an image load; swap is disk, not money.
+  - fallocate -l 1G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  - systemctl enable --now docker
+  - mkdir -p /opt/pondcredentials

@@ -125,13 +125,18 @@ test.describe("Hub — Voice sub-screen wiring", () => {
     await expect(sttSelect).toBeVisible({ timeout: 3_000 });
     await expect(sttSelect).toHaveValue("ggml-base.bin");
 
-    const ttsSelect = page.getByRole("combobox", { name: /TTS voice/i });
-    await expect(ttsSelect).toBeVisible({ timeout: 3_000 });
-    await expect(ttsSelect).toHaveValue("en_US-lessac-medium.onnx");
+    // The voice picker is a radiogroup, not a select: VoicePicker.tsx renders one
+    // radio per installed voice so the accent grouping and the per-voice preview
+    // button have somewhere to live. The configured voice is the checked one.
+    const voiceGroup = page.getByRole("radiogroup", { name: "Voice" });
+    await expect(voiceGroup).toBeVisible({ timeout: 3_000 });
+    await expect(voiceGroup.getByRole("radio", { checked: true })).toBeVisible({ timeout: 3_000 });
 
-    await expect(page.getByText(/Speaking rate/i)).toBeVisible({ timeout: 3_000 });
-    const slider = page.locator(".hrange input[type='range']");
-    await expect(slider).toBeVisible({ timeout: 3_000 });
+    // "Speaking pace" on a 0.5x-2.0x scale, shown as a multiplier beside the
+    // slider. It used to be "Speaking rate" as a percentage in a .hrange.
+    const pace = page.getByRole("slider", { name: /speaking pace/i });
+    await expect(pace).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByText(/1\.00×/)).toBeVisible({ timeout: 3_000 });
   });
 
   test("TTS voice picker change calls updateSettings with correct voice", async ({ page }) => {
@@ -142,30 +147,52 @@ test.describe("Hub — Voice sub-screen wiring", () => {
     });
     await goToVoiceScreen(page);
 
-    const ttsSelect = page.getByRole("combobox", { name: /TTS voice/i });
-    await expect(ttsSelect).toBeVisible({ timeout: 5_000 });
+    // Voice.tsx builds the list from api.listModels() filtered to TTS providers,
+    // so a second voice has to exist in the catalogue before there is anything
+    // to switch to. The default mock returns none, which left one radio and
+    // nothing to click.
+    await page.route("**/api/v1/models", (r) =>
+      r.fulfill({
+        json: {
+          gguf: [], llamafile: [], whisper: [], ollama: [], embedding: [],
+          tts: [],
+          tts_kokoro: [{ name: "af_heart" }, { name: "am_michael" }],
+        },
+      }),
+    );
+    await page.reload();
+    await goToVoiceScreen(page);
 
-    await ttsSelect.selectOption("en_US-ryan-medium.onnx");
+    const voiceGroup = page.getByRole("radiogroup", { name: "Voice" });
+    await expect(voiceGroup).toBeVisible({ timeout: 5_000 });
+
+    // Whichever one is not currently selected: the assertion is that choosing a
+    // voice persists it, not which voice happens to sort first.
+    const unchecked = voiceGroup.getByRole("radio", { checked: false }).first();
+    await expect(unchecked).toBeVisible({ timeout: 5_000 });
+    await unchecked.click();
     await page.waitForTimeout(500);
 
     expect(updatePayload).toBeTruthy();
-    expect((updatePayload as Record<string, unknown>).voice_tts_voice).toBe("en_US-ryan-medium.onnx");
+    expect((updatePayload as Record<string, unknown>).voice_tts_voice).toBeTruthy();
+    expect((updatePayload as Record<string, unknown>).voice_tts_voice)
+      .not.toBe(MOCK_SETTINGS.voice_tts_voice);
   });
 
   test("speaking rate slider updates the displayed value", async ({ page }) => {
     await setupVoiceRoutes(page);
     await goToVoiceScreen(page);
 
-    const slider = page.locator(".hrange input[type='range']").first();
-    await expect(slider).toBeVisible({ timeout: 5_000 });
+    // The pace control reads in multiples of natural speed now, so the label is
+    // "1.00×" rather than "100%". The slider's own value is still 0-200.
+    const pace = page.getByRole("slider", { name: /speaking pace/i });
+    await expect(pace).toBeVisible({ timeout: 5_000 });
+    await expect(page.getByText(/1\.00×/)).toBeVisible({ timeout: 3_000 });
 
-    const valDisplay = page.locator(".hrange__val").first();
-    await expect(valDisplay).toContainText("100%");
-
-    await slider.fill("120");
-    await slider.dispatchEvent("input");
+    await pace.fill("120");
+    await pace.dispatchEvent("input");
     await page.waitForTimeout(200);
 
-    await expect(valDisplay).toContainText("120%");
+    await expect(page.getByText(/1\.20×/)).toBeVisible({ timeout: 3_000 });
   });
 });

@@ -146,23 +146,13 @@ impl SessionIdentity {
 }
 
 /// How far batch memory extraction has read into one conversation.
-///
-/// Three columns rather than one because the three questions are different:
-/// *where did the walk stop*, *when did it last look*, and *how many times has
-/// it failed to make sense of what came back since it last moved*. Collapsing
-/// any pair of them loses a decision the engine has to make -- ordering the
-/// backlog needs the stamp, giving up needs the count, and resuming needs the
-/// id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractionCursor {
-    /// The newest message the walk has covered. `None` means this conversation
-    /// has never been examined, which is a different state from "examined and
-    /// found nothing" -- the latter has a stamp.
+    /// Newest message covered. `None` = never examined ("examined, found nothing" has a stamp).
     pub through_message_id: Option<String>,
     /// When the walk last looked at this conversation, successfully or not.
     pub extracted_at: Option<DateTime<Utc>>,
-    /// Consecutive unparseable replies against the CURRENT watermark. Reset to
-    /// zero every time the watermark moves.
+    /// Consecutive unparseable replies at the current watermark; reset whenever it moves.
     pub attempts: u32,
 }
 

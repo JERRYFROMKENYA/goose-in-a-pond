@@ -206,6 +206,121 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn music_keeps_its_own_key_fields_under_developer_settings() {
+        let music = BundledMarketplace::new()
+            .get_by_id("music")
+            .await
+            .unwrap()
+            .expect("music entry");
+        let mut advanced: Vec<&str> = music
+            .required_secrets
+            .iter()
+            .filter(|s| s.advanced)
+            .map(|s| s.key.as_str())
+            .collect();
+        advanced.sort_unstable();
+        assert_eq!(
+            advanced,
+            [
+                "APPLE_MUSIC_KEY_ID",
+                "APPLE_MUSIC_PRIVATE_KEY",
+                "APPLE_MUSIC_TEAM_ID"
+            ],
+            "the ordinary path is a sign-in button; everything else is for a developer"
+        );
+        let spotify = music
+            .required_secrets
+            .iter()
+            .find(|s| s.key == "SPOTIFY_ACCESS_TOKEN")
+            .expect("the Spotify sign-in");
+        assert!(!spotify.advanced, "signing in is the ordinary path");
+        // The service and the player are ordinary choices, shown to everyone, not developer fields.
+        for key in ["MUSIC_SERVICE", "MUSIC_PLAYER"] {
+            let choice = music
+                .required_secrets
+                .iter()
+                .find(|s| s.key == key)
+                .expect("the music choice");
+            assert_eq!(
+                choice.kind,
+                crate::security::domain::secret::SecretKind::Choice
+            );
+            assert!(
+                !choice.advanced && !choice.host_only,
+                "{key} is for the person, and for the extension"
+            );
+        }
+        let services: Vec<&str> = music
+            .required_secrets
+            .iter()
+            .find(|s| s.key == "MUSIC_SERVICE")
+            .unwrap()
+            .options
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(
+            services,
+            ["apple", "spotify"],
+            "Apple Music first: it is the default"
+        );
+    }
+
+    #[test]
+    fn a_requirement_says_it_is_advanced_only_when_it_is() {
+        let plain: crate::security::domain::secret::SecretRequirement = serde_json::from_str(
+            r#"{"key":"K","display_name":"K","description":"","required":false,"kind":"generic"}"#,
+        )
+        .unwrap();
+        assert!(!plain.advanced, "absent means an ordinary field");
+        assert!(
+            !serde_json::to_string(&plain).unwrap().contains("advanced"),
+            "an ordinary field's JSON does not change"
+        );
+        let dev: crate::security::domain::secret::SecretRequirement = serde_json::from_str(
+            r#"{"key":"K","display_name":"K","description":"","required":false,"kind":"generic","advanced":true}"#,
+        )
+        .unwrap();
+        assert!(dev.advanced);
+        assert!(serde_json::to_string(&dev)
+            .unwrap()
+            .contains("\"advanced\":true"));
+    }
+
+    #[tokio::test]
+    async fn music_installs_with_no_secret_and_never_gets_the_apple_signing_key() {
+        let music = BundledMarketplace::new()
+            .get_by_id("music")
+            .await
+            .unwrap()
+            .expect("music entry");
+        assert!(
+            music.required_secrets.iter().all(|s| !s.required),
+            "an Apple-only or Spotify-only user must be able to install music"
+        );
+        let env: Vec<&str> = music.env_secrets().map(|s| s.key.as_str()).collect();
+        for key in [
+            "APPLE_MUSIC_TEAM_ID",
+            "APPLE_MUSIC_KEY_ID",
+            "APPLE_MUSIC_PRIVATE_KEY",
+        ] {
+            assert!(
+                !env.contains(&key),
+                "the host signs developer tokens, so {key} stays out of the child env"
+            );
+        }
+        // Spotify's developer rules forbid voice and AI control of Spotify, so the extension, which
+        // is the assistant's, never holds the token or the client ID; the pond keeps both for the
+        // app's own controls. The music choice does reach it: the extension follows it.
+        for key in ["SPOTIFY_ACCESS_TOKEN", "SPOTIFY_CLIENT_ID"] {
+            assert!(!env.contains(&key), "{key} stays with the pond");
+        }
+        for key in ["MUSIC_SERVICE", "MUSIC_PLAYER"] {
+            assert!(env.contains(&key), "{key} must reach the extension");
+        }
+    }
+
     #[test]
     fn no_stdio_entry_keeps_a_relative_extensions_path_after_rewrite() {
         let mp = BundledMarketplace::with_asset_root("/opt/giap");

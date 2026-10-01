@@ -23,6 +23,9 @@ export function redactSecrets(text: string): string {
         (_m, open: string, close: string) => `${open}[redacted]${close}`)
       // Spotify access tokens start `BQ` and turn up bare in error text.
       .replace(/\bBQ[A-Za-z0-9._-]{20,}/g, "[redacted:token]")
+      // Apple developer tokens are JWTs; the Music User Token is opaque, so it is caught by its header.
+      .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, "[redacted:jwt]")
+      .replace(/(music-user-token"?\s*[:=]\s*"?)[^"\s,}]+/gi, "$1[redacted]")
   );
 }
 

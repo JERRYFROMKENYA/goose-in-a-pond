@@ -1,7 +1,4 @@
-//! SQLite adapter for [`LaneRunLog`] — the inference lane's durable clock.
-//!
-//! One row per job, replaced in place. See `0059_lane_job_runs.sql` for why the
-//! lane needs this to survive a restart at all.
+//! SQLite adapter for [`LaneRunLog`], the inference lane's durable clock; one row per job.
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,15 +17,12 @@ impl SqliteLaneRunLog {
     }
 }
 
-/// RFC3339, second resolution. The lane's smallest interval floor is measured
-/// in minutes, so sub-second precision would be stored and never read.
+/// Second resolution suffices: the lane's smallest interval floor is in minutes.
 fn sql_ts(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// Accepts both this adapter's RFC3339 and SQLite's own `datetime('now')`
-/// spelling, for the same reason `sqlite_suggestion_queue` does: a row written
-/// by a future path leaning on a column default must not be unreadable.
+/// Accepts RFC3339 and SQLite's `datetime('now')` spelling, so column-default rows stay readable.
 fn parse_ts(raw: &str) -> Result<DateTime<Utc>> {
     if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
         return Ok(dt.with_timezone(&Utc));
@@ -49,12 +43,8 @@ impl LaneRunLog for SqliteLaneRunLog {
 
         let mut out = Vec::with_capacity(rows.len());
         for (job, raw) in rows {
-            // Two separate skips, and they are different failures. An
-            // unrecognised job name is expected after a release that removed a
-            // job, so it is silent. An unparseable stamp is a corrupt row, so
-            // it warns — but neither may stop the pond starting, because the
-            // fallback in both cases is the empty clock every release before
-            // this one booted with.
+            // Skip unknown jobs (from another release) silently and corrupt stamps with a warning;
+            // neither may block startup, as the fallback is an empty clock.
             let Some(job) = LaneJob::from_wire(&job) else {
                 continue;
             };
@@ -107,8 +97,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pond_that_has_never_run_a_job_loads_an_empty_clock() {
-        // The starting state of every existing pond, and it must not be an
-        // error: "never" is a reading, not a failure.
         assert!(log().await.load().await.unwrap().is_empty());
     }
 
@@ -121,9 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_run_replaces_the_first_rather_than_adding_a_row() {
-        // The whole table is "when did this last run". Two rows for one job
-        // would make `load` ambiguous and let the older stamp win by map
-        // insertion order.
+        // Two rows for one job would let the older stamp win by map insertion order.
         let l = log().await;
         l.record(LaneJob::Consolidation, at(0)).await.unwrap();
         l.record(LaneJob::Consolidation, at(600)).await.unwrap();
@@ -149,10 +135,7 @@ mod tests {
 
     #[tokio::test]
     async fn every_job_round_trips_under_its_wire_name() {
-        // The primary key is `as_str()` and the loader is `from_wire`. A job
-        // whose two spellings disagree would silently never load its own stamp
-        // — it would write a row and read back nothing, which presents as "the
-        // durable clock does not work" for that one job only.
+        // Keyed by `as_str()`, loaded by `from_wire`: a mismatch silently loses that job's stamp.
         let l = log().await;
         for (i, job) in LaneJob::ALL.iter().enumerate() {
             l.record(*job, at(i as i64)).await.unwrap();
@@ -178,8 +161,6 @@ mod tests {
             .execute(&l.pool)
             .await
             .unwrap();
-        // The real row still arrives. Refusing the load here would turn a
-        // downgrade into a pond that will not start.
         assert_eq!(l.load().await.unwrap(), vec![(LaneJob::Titling, at(0))]);
     }
 
@@ -199,9 +180,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stamp_written_by_the_column_default_spelling_is_still_read() {
-        // Nothing writes this spelling today. The guard is that the next thing
-        // to touch this table — a backfill, a trigger, a hand-run UPDATE —
-        // cannot make a row the loader silently discards.
         let l = log().await;
         sqlx::query("INSERT INTO lane_job_runs (job, last_run_at) VALUES (?, ?)")
             .bind(LaneJob::IndexMaintenance.as_str())

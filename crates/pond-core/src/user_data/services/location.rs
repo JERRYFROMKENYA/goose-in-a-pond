@@ -74,26 +74,8 @@ impl Location {
         !self.name.is_empty()
     }
 
-    /// The household's own day containing `now`, as a UTC half-open pair.
-    ///
-    /// "Today" is a question about where the pond lives, not about UTC. A pond
-    /// in `Africa/Nairobi` counting to UTC midnight would see its calendar card
-    /// go quiet at 03:00 local and stay quiet until 03:00 the next day -- the
-    /// suggestion would be wrong for three hours every morning, in a way that
-    /// looks like an empty diary rather than like a bug.
-    ///
-    /// Half-open `[start, end)`, so an event at exactly midnight belongs to the
-    /// day it opens and to that day only.
-    ///
-    /// # The two days a year this is not a simple lookup
-    ///
-    /// A local midnight can be **ambiguous** (a DST fold repeats the hour) or
-    /// **absent** (a spring-forward jumps over it). `chrono` reports both, and
-    /// neither may be answered with "give up and use `now`": that would return
-    /// a zero-length window, which every suggestor reads as an empty day. The
-    /// fold takes the earlier of the two instants; the gap steps forward an
-    /// hour, which is the first local time that exists. Both keep the window a
-    /// real day, which is the property that matters.
+    /// The household's local day containing `now`, as a half-open UTC `[start, end)` pair.
+    /// Never zero-length across DST folds or gaps: suggestors would read that as an empty day.
     pub fn day_bounds(&self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
         use chrono::TimeZone;
         let tz: chrono_tz::Tz = self.timezone.parse().unwrap_or(chrono_tz::UTC);
@@ -110,9 +92,7 @@ impl Location {
                         .earliest()
                 })
                 .map(|dt| dt.with_timezone(&Utc))
-                // Unreachable for a real zone: an hour past an absent midnight
-                // always exists. `now` rather than a panic because a wrong
-                // window is a quiet card and a panic is a dead route.
+                // Unreachable for a real zone; falling back beats panicking the route.
                 .unwrap_or(now)
         };
         (
@@ -515,9 +495,7 @@ mod day_bounds_tests {
 
     #[test]
     fn the_day_is_the_households_own_and_not_utcs() {
-        // 02:00 UTC is already 05:00 in Nairobi, so the household's day opened
-        // three hours ago at 21:00 UTC the previous date. Counting to UTC
-        // midnight would put this instant in yesterday's window.
+        // Nairobi is UTC+3: 02:00Z is 05:00 local, so the local day began at 21:00Z.
         let (loc, now) = at("Africa/Nairobi", "2026-09-15T02:00:00Z");
         let (start, end) = loc.day_bounds(now);
         assert_eq!(start.to_rfc3339(), "2026-09-14T21:00:00+00:00");
@@ -534,8 +512,7 @@ mod day_bounds_tests {
 
     #[test]
     fn a_spring_forward_that_skips_local_midnight_still_yields_a_real_day() {
-        // Lord Howe and Havana skip midnight itself; Havana's 2026 transition
-        // moves 00:00 to 01:00 on 8 March, so local midnight does not exist.
+        // Havana's 2026-03-08 spring-forward skips local midnight itself.
         let (loc, now) = at("America/Havana", "2026-03-08T12:00:00Z");
         let (start, end) = loc.day_bounds(now);
         assert!(
@@ -577,9 +554,6 @@ mod day_bounds_tests {
 
     #[test]
     fn the_window_never_has_zero_length() {
-        // The failure this guards is the one that reads like an empty diary
-        // rather than like a bug: a zero-length window makes every context
-        // suggestor silent with a plausible reason.
         for zone in [
             "UTC",
             "Africa/Nairobi",

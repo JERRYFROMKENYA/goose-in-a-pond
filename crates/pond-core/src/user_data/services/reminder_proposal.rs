@@ -1,44 +1,5 @@
-//! Turning a stored reminder into a proposal the household already has a queue
-//! for -- best effort, and honest about the times it cannot.
-//!
-//! # Why this is best effort and the table is not
-//!
-//! Migration 0057 stores the date unconditionally, because
-//! [`ProposalAudience::from_scope`] refuses `Household` and `Guest` (PAI-7
-//! invariant 4) and `profile_id` is NULL on every live memory row. A reminder on
-//! a real pond today therefore has nobody it can be addressed to, and a design
-//! that only made proposals would keep losing the date on exactly the pond it
-//! was written to fix.
-//!
-//! So the ordering is: store first, propose when possible. This module is the
-//! second half. A reminder it cannot promote is left `Pending` and stays
-//! readable -- promotion is something that can happen later, when the member is
-//! identified, and not a deadline the row misses once and fails.
-//!
-//! # Every refusal is counted and named
-//!
-//! [`PromotionReport`] has a field per outcome rather than a single "skipped",
-//! because the three mean different things: an unaddressable reminder is a pond
-//! with no profile rows, a capped one is the household being protected from
-//! being pestered, and a failed one is a store that would not take the write.
-//! The first is the normal state of every pond today and is not a fault; the
-//! last is. Reporting them as one number would hide the last behind the first.
-//!
-//! # The daily cap is not bypassed
-//!
-//! [`MAX_PROPOSALS_PER_DAY`] is a limit on how often the pond interrupts one
-//! person, counted through [`ProposalRepository::count_made_since`] over the
-//! last 24 hours -- the same read and the same window `pond-server`'s reviewer
-//! tick uses. A second producer of proposals that counted its own would be a
-//! second budget, and the member would get both.
-//!
-//! # Nothing here parses a date
-//!
-//! [`CapturedReminder::when_said`] is the subject's own words about the timing
-//! and it reaches the proposal's rationale and prompt verbatim. Nothing in this
-//! pipeline knows which Tuesday was meant; a resolved date here would be a guess
-//! wearing the pond's authority, and the person reading the proposal is the one
-//! who knows.
+//! Turns stored reminders into proposals, best effort: one with no member to address stays
+//! `Pending`, since [`ProposalAudience::from_scope`] refuses `Household` and `Guest`.
 
 use crate::user_data::domain::proposal::{BusEventRef, Proposal, ProposalAudience};
 use crate::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
@@ -50,43 +11,25 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use std::collections::BTreeMap;
 
-/// The trigger `kind` every reminder-born proposal carries.
-///
-/// A stable string, because PAI-7 P7's feedback loop compares triggers by
-/// identity: changing this spelling would make every decision a member has
-/// already recorded stop matching the proposals it was about.
+/// Trigger `kind` of reminder-born proposals; stable, since recorded decisions match on it.
 pub const REMINDER_TRIGGER_KIND: &str = "reminder";
 
-/// The confidence a reminder-born proposal is made at.
-///
-/// It is not a model score and must not be read as one. The words came from the
-/// household member's own conversation, so what is uncertain here is not whether
-/// they meant it -- it is whether the extraction lifted the right sentence out.
-/// High, and deliberately short of 1.0, which would assert a certainty the pond
-/// does not have.
+/// Confidence of reminder-born proposals, not a model score; below 1.0 as extraction can err.
 pub const REMINDER_PROPOSAL_CONFIDENCE: f32 = 0.9;
 
 /// Why one reminder did not become a proposal.
-///
-/// Each variant is a different fact about the pond, and they are kept apart for
-/// the reason in the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReminderProposalSkip {
-    /// The reminder has no `profile_id`, so there is no member to address it
-    /// to. The normal state of every pond with no profile rows, which is every
-    /// pond today -- not a failure, and the reason the table exists.
+    /// No `profile_id` to address: normal on a pond without profile rows, not a failure.
     Unaddressable { subject: String },
     /// This member has had their day's proposals.
     DailyCapReached { made: usize, cap: usize },
-    /// The domain refused the proposal. A blank `about`, a blank `when_said`, a
-    /// confidence out of range -- none of which the table's CHECKs allow, so
-    /// this is here to be reported rather than expected.
+    /// The domain refused the proposal; the table's CHECKs should make this unreachable.
     Malformed { reason: String },
 }
 
 impl ReminderProposalSkip {
-    /// Short, stable label for structured logs, in the same shape as
-    /// [`ReviewSkip::as_str`](crate::user_data::services::proactive_review::ReviewSkip::as_str).
+    /// Stable label for structured logs.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Unaddressable { .. } => "unaddressable",
@@ -95,8 +38,7 @@ impl ReminderProposalSkip {
         }
     }
 
-    /// The same fact as a sentence, for the log line and for anything that
-    /// shows a person why a reminder is still only a reminder.
+    /// The same fact as a human-readable sentence.
     pub fn reason(&self) -> String {
         match self {
             Self::Unaddressable { subject } => format!(
@@ -115,11 +57,7 @@ impl ReminderProposalSkip {
     }
 }
 
-/// Build the proposal one stored reminder becomes.
-///
-/// Pure, and fallible in the three ways above minus the cap, which needs a read.
-/// The id and the clock are passed in rather than minted here so a test can name
-/// the proposal it built and assert on its expiry.
+/// Build the proposal one stored reminder becomes; pure, so the daily cap is not checked here.
 pub fn proposal_from_reminder(
     reminder: &CapturedReminder,
     id: impl Into<String>,
@@ -135,12 +73,8 @@ pub fn proposal_from_reminder(
             reason: e.to_string(),
         })?;
 
-    // The conversation and the thing, not the row. A re-walk that files the same
-    // reminder again produces the same identity here, so a member who said no
-    // once is not asked twice about it; a genuinely new mention, in a new
-    // conversation, is a different identity and is still allowed through.
-    // `observed_at` is when the CONVERSATION happened, which is the fact the
-    // feedback loop reasons about -- not when the backlog walk got to it.
+    // Identity is conversation + thing, not row: a re-walk can't re-ask someone who said no.
+    // Observed at `said_at`, not walk time: the feedback loop reasons about the conversation.
     let trigger = BusEventRef::new(
         REMINDER_TRIGGER_KIND,
         Some(reminder.session_id.clone()),
@@ -151,9 +85,7 @@ pub fn proposal_from_reminder(
         reason: e.to_string(),
     })?;
 
-    // The subject's own words on both halves, quoted rather than interpreted.
-    // Invariant 2 wants a rationale, and the honest one here is simply where
-    // this came from and why it is not a memory.
+    // The subject's words, quoted and never parsed: the pond can't know which Tuesday was meant.
     let rationale = format!(
         "{} mentioned {} -- \"{}\" -- in conversation. A one-off date is never kept as a \
          memory, because read back months later it would be false, so it is held here instead. \
@@ -190,36 +122,22 @@ pub struct PromotionReport {
     pub considered: usize,
     /// Reminders that became a proposal and were moved off `Pending`.
     pub proposed: usize,
-    /// Reminders with no member to address, left pending. Expected, and not a
-    /// fault: see the module docs.
+    /// Reminders with no member to address, left pending; expected, not a fault.
     pub unaddressable: usize,
     /// Reminders held back by the daily cap, left pending.
     pub capped: usize,
-    /// Reminders a store error stopped. The one outcome here that is the POND's
-    /// fault, and the reason these are four fields rather than one.
+    /// Stopped by a store error or a malformed proposal; the one outcome that is a fault.
     pub failed: usize,
 }
 
-/// Promote what can be promoted, and say what could not.
-///
-/// Reads the pending reminders, newest conversation first, and for each one that
-/// has a member to address tries to make a proposal inside that member's daily
-/// budget. A reminder that cannot be promoted stays `Pending` and stays
-/// readable; nothing here deletes or expires a row.
-///
-/// The cap is counted once per member and then tracked locally, so a run that
-/// promotes three reminders for one person spends three of their six rather than
-/// re-reading a count that has not been committed yet.
+/// Promote what can be promoted and report the rest, which stays `Pending`.
 pub async fn promote_pending_reminders(
     reminders: &dyn ReminderRepository,
     proposals: &dyn ProposalRepository,
     limit: usize,
     now: DateTime<Utc>,
 ) -> Result<PromotionReport> {
-    // `Household`, deliberately and alone among callers: this pass routes each
-    // reminder to its OWN member's proposal queue, which requires reading every
-    // member's. Nothing it reads leaves this function except as a proposal
-    // addressed to the reminder's owner.
+    // `Household`, the only caller that should: rows leave only as proposals to their owner.
     let pending = reminders
         .list_pending(
             &crate::user_data::domain::profile::ProfileScope::Household,
@@ -230,8 +148,7 @@ pub async fn promote_pending_reminders(
         considered: pending.len(),
         ..Default::default()
     };
-    // profile_id -> proposals already made to that member in the last day,
-    // including the ones this run has just made.
+    // profile_id -> proposals made to them in the last day, this run's included.
     let mut made_today: BTreeMap<String, usize> = BTreeMap::new();
 
     for reminder in pending {
@@ -244,9 +161,7 @@ pub async fn promote_pending_reminders(
         };
         let profile_id = proposal.audience().profile_id().to_string();
 
-        // One read per member per run. An error here is not a reason to skip the
-        // cap -- a budget that fails open is not a budget -- so it counts as a
-        // failure and the reminder stays pending.
+        // Shares the reviewer tick's count and window (one budget); a failed read fails closed.
         let made = match made_today.get(&profile_id) {
             Some(made) => *made,
             None => match proposals
@@ -291,11 +206,7 @@ pub async fn promote_pending_reminders(
         }
         made_today.insert(profile_id, made + 1);
 
-        // The disposition is what stops a second proposal being made out of this
-        // row. Both ways of not moving it are failures and are said loudly
-        // rather than treated as tidying: the proposal is in the queue either
-        // way, and a reminder still pending beside it is one the next run will
-        // propose again.
+        // The disposition stops the next run re-proposing this row; not moving it is a failure.
         match reminders
             .set_disposition(
                 &reminder.id,
@@ -308,8 +219,7 @@ pub async fn promote_pending_reminders(
             Ok(true) => report.proposed += 1,
             Ok(false) => {
                 report.failed += 1;
-                // Somebody dismissed it between the list and this write. The
-                // proposal that was just saved is now one nothing asked for.
+                // Dismissed since the list; the proposal just saved is one nobody asked for.
                 tracing::warn!(
                     reminder_id = %reminder.id,
                     proposal_id = %proposal.id(),
@@ -332,12 +242,7 @@ pub async fn promote_pending_reminders(
     Ok(report)
 }
 
-/// Count a refusal and say why, once, in one place.
-///
-/// The content never rises above DEBUG: an unaddressable reminder is logged at
-/// INFO because a household running with no profile rows deserves to be able to
-/// find out why its dates are not reaching the queue, and the sentence itself is
-/// the household's private words.
+/// Count a refusal and log why at INFO; the reminder's private words never go above DEBUG.
 fn record_skip(
     report: &mut PromotionReport,
     reminder: &CapturedReminder,
@@ -369,9 +274,7 @@ mod tests {
     use crate::user_data::mocks::mock_reminder::MockReminderRepository;
     use std::sync::Mutex;
 
-    /// An in-memory proposal store. Only the three methods this module calls do
-    /// anything; the rest answer emptily, because a fake that pretended to
-    /// implement reads nobody here makes would be a second thing to keep true.
+    /// In-memory proposal store; only the three methods this module calls do anything.
     #[derive(Default)]
     struct FakeProposals {
         saved: Mutex<Vec<Proposal>>,
@@ -437,8 +340,6 @@ mod tests {
         }
     }
 
-    /// The blocker the whole design is shaped around: on a pond with no profile
-    /// rows the reminder is not promoted, is not lost, and is still pending.
     #[tokio::test]
     async fn a_reminder_with_no_member_stays_a_reminder() {
         let reminders = MockReminderRepository::new();
@@ -491,8 +392,6 @@ mod tests {
         assert_eq!(proposals.saved.lock().unwrap().len(), 1);
     }
 
-    /// The subject's own words reach the proposal unparsed, and no resolved date
-    /// appears anywhere in it.
     #[tokio::test]
     async fn the_timing_words_reach_the_proposal_verbatim() {
         let mut r = reminder("r1", Some("profile-jerry"));
@@ -510,8 +409,6 @@ mod tests {
         );
     }
 
-    /// The cap is the household's protection from being pestered, and this
-    /// producer is inside it rather than beside it.
     #[tokio::test]
     async fn the_daily_cap_is_not_bypassed() {
         let reminders = MockReminderRepository::new();
@@ -534,8 +431,6 @@ mod tests {
         assert_eq!(report.failed, 0);
     }
 
-    /// A store that will not take the write is the one outcome that must not be
-    /// reported as an ordinary skip.
     #[tokio::test]
     async fn a_store_that_refuses_the_write_is_a_failure_not_a_skip() {
         let reminders = MockReminderRepository::new();
@@ -561,8 +456,6 @@ mod tests {
         );
     }
 
-    /// Every refusal says why in words, so a household with no proposals can
-    /// find out which of the three reasons it is.
     #[test]
     fn every_refusal_carries_its_reason() {
         for skip in [

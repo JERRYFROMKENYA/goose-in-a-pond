@@ -1,15 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// The bar that opens the drawer.
-//
-// Two controls, both 44px pills, both in the design's header on all eight
-// screens: the hamburger and the bell. Nothing else from that header is here
-// -- the clock, the weather and the avatar belong to the Home redesign, not to
-// navigation.
-//
-// The bell earns its place rather than inheriting it. When the sidebar became
-// a drawer its pinned Notifications row had nowhere to go, and a notification
-// you have to open a menu to discover is one you find late.
-// ────────────────────────────────────────────────────────────
+// Hamburger and bell only: the design header's clock, weather and avatar belong to Home.
 
 import { HubIco } from "./primitives/HubIco";
 import { HP_PATHS } from "./primitives/icons";
@@ -18,7 +7,7 @@ import "./hubDrawer.css";
 export interface ShellBarProps {
   onMenu: () => void;
   onBell: () => void;
-  /** Unread schedule runs. Real count -- the rail used to hardcode 3. */
+  /** Unread schedule runs. */
   unread: number;
 }
 

@@ -1,10 +1,5 @@
-//! Picture support at the HTTP edge (design_v2 section F), driven through the real router.
-//!
-//! The refusals are the point of most of this file: an image turn the active model cannot take
-//! must be a real 409 or 415 BEFORE anything is saved, because a refused turn that left its
-//! question in the history with no answer under it is what the desktop's draft restore exists to
-//! avoid. So every refusal here is checked against the session store, not just the status.
-//! Run: cargo test -p pond-api --test vision_turn_gate
+//! Picture support at the HTTP edge, driven through the real router.
+//! A refused image turn (409/415) must save nothing; each refusal is checked in the store.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,8 +37,7 @@ const E2B_ENCODER_BYTES: u64 = 986_833_728;
 
 // ── An agent that reports picture support and records what it was asked ────────
 
-/// Answers `vision_state` from a per-model table (a model not in it is unknown), and records
-/// every question, every `prepare_model`, every warm-up and every turn that reached it.
+/// Answers `vision_state` from a per-model table (absent = unknown) and records every call.
 struct VisionAgent {
     inner: MockAgent,
     table: Mutex<HashMap<String, EncoderState>>,
@@ -180,14 +174,11 @@ struct Pond {
     tmp: tempfile::TempDir,
 }
 
-/// A router over a real tempdir database (sessions, settings and models are all SQLite, so
-/// "nothing was saved" is asked of the store the pond really writes), with `chat_provider` and
-/// `chat_model` set the way activating a GGUF sets them.
+/// Router over a real SQLite tempdir, so "nothing was saved" asks the store the pond writes.
 async fn pond(agent: Arc<VisionAgent>, provider: &str, model: &str) -> Pond {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
-    // Attachments into the tempdir: the default is the real app-support directory, and these
-    // turns carry pictures.
+    // The default attachment dir is the real app-support directory.
     let sessions = Arc::new(
         SqliteSessionStorage::new(db.system.clone())
             .with_attachment_dir(tmp.path().join("attachments")),
@@ -394,8 +385,6 @@ async fn assert_nothing_saved(pond: &Pond, session_id: &str) {
     );
 }
 
-/// Wait for a background effect, without a fixed sleep that is either too short on a busy CI
-/// runner or wasted everywhere else.
 async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     for _ in 0..200 {
         if check() {
@@ -789,8 +778,7 @@ async fn activating_a_chat_model_prepares_it_and_warms_once() {
     })
     .await;
 
-    // "Use" on the model already in use is not a change: prepared again (cheap, idempotent in
-    // the adapter), but no second warm-up.
+    // Re-activating the current model re-prepares it (idempotent) but doesn't warm again.
     let (status, _) = send(
         &pond,
         request(
@@ -845,9 +833,7 @@ async fn a_finished_gguf_download_prepares_the_model() {
 
 // ── PUT /settings: a new chat model ────────────────────────────────────────────
 
-/// A save that changes the engine's model starts ONE warm-up and hands the model to
-/// `prepare_model`; re-sending the same value is no change and puts no Warming banner up; and an
-/// Ollama tag that names a Gemma family is not a local GGUF, so there is nothing to provision.
+/// Re-sending the same model is no change; an Ollama Gemma tag is not a local GGUF.
 #[tokio::test]
 async fn a_new_chat_model_warms_once_and_only_a_local_one_is_prepared() {
     let pond = pond(Arc::new(VisionAgent::default()), "local", E2B).await;
@@ -889,8 +875,7 @@ async fn a_new_chat_model_warms_once_and_only_a_local_one_is_prepared() {
     );
 }
 
-// Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98), so
-// this is commented out rather than deleted; restore it if it returns.
+// Speculative decoding was removed from the llama.cpp engine; restore this if it returns.
 // // ── PUT /settings: the speculation switch ──────────────────────────────────────
 //
 // /// The only test in this binary that touches the process-global speculation gate, so the

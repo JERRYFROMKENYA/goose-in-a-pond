@@ -3,36 +3,26 @@
 use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 
-/// A transfer that was refused, or that ended without the whole file, for a
-/// reason the caller has to tell apart from the network being down.
-///
-/// Each variant says what happened to `{blob}.incomplete`, because that is
-/// what decides whether calling again helps. Match it with [`transfer_error`].
+/// A refused or incomplete transfer, distinct from the network being down.
+/// Each variant says what became of `{blob}.incomplete`; match it with [`transfer_error`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TransferError {
-    /// The server describes a file of a different size from the one this
-    /// fetch was pinned to (by [`HfFetch::expect_size`], or by the HEAD when
-    /// the GET then disagrees with it). Refused before anything was written.
+    /// Size differs from the pin ([`HfFetch::expect_size`] or the HEAD); nothing was written.
     #[error("the server reports {actual} bytes for this file, expected {expected}")]
     SizeMismatch { expected: u64, actual: u64 },
-    /// No etag the server gave (`etag`, or `x-linked-etag` on any redirect
-    /// hop) matches the one pinned by [`HfFetch::expect_etag`]. Refused before
-    /// anything was transferred.
+    /// No hop's `etag`/`x-linked-etag` matched [`HfFetch::expect_etag`]; nothing transferred.
     #[error("the server's etags {found:?} do not include the pinned {expected}")]
     EtagMismatch {
         expected: String,
         found: Vec<String>,
     },
-    /// The body ended, without an error, before the whole file arrived.
-    /// `.incomplete` is kept, so calling again resumes from `received`.
+    /// The body ended cleanly but early; `.incomplete` is kept, so a retry resumes.
     #[error("the transfer ended after {received} of {total} bytes")]
     Short { received: u64, total: u64 },
-    /// More bytes arrived than the file has. `.incomplete` was deleted: it is
-    /// not a prefix of the file, and resuming from it would never converge.
+    /// Too many bytes arrived; `.incomplete` is deleted since it is not a prefix of the file.
     #[error("the transfer sent more than the {total} bytes this file has ({received} so far)")]
     Overlong { received: u64, total: u64 },
-    /// A resume was answered with a partial body that does not start where it
-    /// was asked to. `.incomplete` is kept as it was.
+    /// A resume's partial body started at the wrong byte; `.incomplete` is left as it was.
     #[error("asked to resume at byte {requested}, the server answered from {answered:?}")]
     RangeMismatch {
         requested: u64,
@@ -40,19 +30,13 @@ pub enum TransferError {
     },
 }
 
-/// The [`TransferError`] behind this error, if that is what it is.
-///
-/// Works through any `.context(..)` a caller added on the way up.
+/// The [`TransferError`] behind `err`, even through `.context(..)` layers.
 pub fn transfer_error(err: &anyhow::Error) -> Option<&TransferError> {
     err.downcast_ref::<TransferError>()
 }
 
-/// [`link_blob`] found something other than a symlink at its destination and
-/// left it where it was.
-///
-/// Its own type because the right response is specific: the caller moves the
-/// file aside (quarantines it) and links again. This crate never deletes a
-/// regular file it did not write.
+/// [`link_blob`] found a non-symlink at its destination and left it in place.
+/// Callers move it aside and relink: this crate never deletes a file it did not write.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{} is not a link into the cache; move it aside before linking", .path.display())]
 pub struct DestNotALink {
@@ -240,29 +224,15 @@ impl<'a> HfFetch<'a> {
         self.repo.blob_path(etag)
     }
 
-    /// Pin the file's size in bytes.
-    ///
-    /// Used as the length when the HEAD gives none, and cross-checked when it
-    /// does: a server that disagrees is describing some other file, so the
-    /// fetch is refused with [`TransferError::SizeMismatch`] before any bytes
-    /// move. It also stops the fast path from returning an existing blob of
-    /// the wrong length. `0` means "no expectation", because `0` is this
-    /// crate's "length unknown".
+    /// Pin the file's size in bytes; `0` means no pin, as `0` is this crate's "length unknown".
+    /// Stands in for a missing HEAD length; a server or cached blob that disagrees is not used.
     pub fn expect_size(mut self, bytes: u64) -> Self {
         self.expected_size = (bytes > 0).then_some(bytes);
         self
     }
 
-    /// Pin the file's identity: for an LFS file on huggingface.co, its
-    /// sha256 (the LFS oid), which the first hop sends as `x-linked-etag`.
-    ///
-    /// The fetch is refused with [`TransferError::EtagMismatch`], before the
-    /// fast path and before any transfer, unless the pin matches the final
-    /// `etag` or an `x-linked-etag` from any hop (ASCII case ignored). On a
-    /// match the blob is named by the pin rather than by the final hop's
-    /// etag. That matters because the final hop is a CDN whose own `etag` is
-    /// a storage hash (the xet hash, measured 2026-09-24), not the sha256, so
-    /// without a pin the blob's name is not its sha256.
+    /// Pin the file's identity; for LFS, its sha256 (the first hop's `x-linked-etag`).
+    /// A match names the blob by the pin: the final CDN hop's `etag` is a xet hash, not sha256.
     pub fn expect_etag(mut self, etag: impl AsRef<str>) -> Self {
         let etag = normalize_etag(etag.as_ref());
         self.expected_etag = (!etag.is_empty()).then_some(etag);
@@ -345,11 +315,8 @@ pub fn build_redirect_aware_client(_token: Option<&str>) -> Result<reqwest::Clie
         .map_err(|e| anyhow!("failed to build redirect-aware client: {e}"))
 }
 
-/// Strip HTTP etag decoration: the weak-validator `W/` prefix and the quotes.
-///
-/// huggingface.co answers a non-LFS file it serves gzipped with a weak etag
-/// (`W/"<sha1>"`, measured 2026-09-24). Left in, the `/` would make the blob
-/// name a nested path. Same rule as `huggingface_hub`'s `_normalize_etag`.
+/// Strip the weak `W/` prefix and quotes, as `huggingface_hub`'s `_normalize_etag` does.
+/// HF gives gzipped non-LFS files weak etags, and the `/` would nest the blob path.
 fn normalize_etag(s: &str) -> String {
     let s = s.trim();
     s.strip_prefix("W/")
@@ -358,12 +325,8 @@ fn normalize_etag(s: &str) -> String {
         .to_string()
 }
 
-/// Whether an etag can be used as a file name inside `blobs/` as it is.
-///
-/// The etag comes from whichever host the redirect chain ended on, and it
-/// becomes a path component, so anything that could leave the directory
-/// (`/`, `\`, `..`) or hide the file (a leading `.`) is refused. Every etag
-/// huggingface.co and its CDNs send is hex, and S3's multipart form adds `-`.
+/// Whether an etag, set by whichever host the redirects ended on, is safe as a `blobs/` name.
+/// Refuses anything that could escape the directory or hide the file (a leading `.`).
 fn blob_name_is_safe(etag: &str) -> bool {
     !etag.is_empty()
         && !etag.starts_with('.')
@@ -376,17 +339,14 @@ fn header_str<'h>(headers: &'h reqwest::header::HeaderMap, name: &str) -> Option
     headers.get(name).and_then(|v| v.to_str().ok())
 }
 
-/// A positive integer header. `0` reads as absent: it is this crate's
-/// "length unknown", never a real file length.
+/// A positive integer header; `0` is absent, being this crate's "length unknown".
 fn header_len(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
     header_str(headers, name)
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
 }
 
-/// Does this response carry an encoded body? Then its `content-length`
-/// counts encoded bytes, not the bytes that reach disk, and is no length for
-/// the file. An unreadable value counts as encoded: failure narrows.
+/// Whether `content-length` counts encoded bytes; an unreadable header counts as encoded.
 fn has_content_encoding(headers: &reqwest::header::HeaderMap) -> bool {
     match headers.get(reqwest::header::CONTENT_ENCODING) {
         None => false,
@@ -400,8 +360,7 @@ fn has_content_encoding(headers: &reqwest::header::HeaderMap) -> bool {
     }
 }
 
-/// The file length a response promises: `content-length` of an unencoded
-/// body. `None` when it is encoded or has no length.
+/// The file length a response promises: `content-length`, unless the body is encoded.
 fn plain_len(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     if has_content_encoding(headers) {
         None
@@ -410,8 +369,7 @@ fn plain_len(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     }
 }
 
-/// A parsed `Content-Range: bytes <start>-<end>/<complete>` (or
-/// `bytes */<complete>` on a 416). `*` parts are `None`.
+/// Parsed `Content-Range: bytes <start>-<end>/<complete>` (or `*/<complete>`); `*` is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ContentRange {
     start: Option<u64>,
@@ -450,10 +408,7 @@ impl<'a> HfFetch<'a> {
             .await
     }
 
-    /// [`download_to_blob`](Self::download_to_blob) against an explicit
-    /// entry URL. The public method is this with `self.url()`; the split
-    /// exists so the tests in this file drive the real algorithm against a
-    /// loopback server instead of a copy of it.
+    /// [`download_to_blob`](Self::download_to_blob) at an explicit URL, for loopback tests.
     pub(crate) async fn download_to_blob_from<F>(
         &self,
         url: &str,
@@ -507,9 +462,7 @@ impl<'a> HfFetch<'a> {
             ));
         }
 
-        // What the server says the file's length is. A pin is checked against
-        // every length the server stated, not just the one used, so a pin that
-        // disagrees with either is caught.
+        // A pin is checked against every length the server stated, not just the one used.
         let head_len = plain_len(headers);
         if let Some(expected) = self.expected_size {
             for actual in [head_len, head_resp.linked_size].into_iter().flatten() {
@@ -600,10 +553,8 @@ impl<'a> HfFetch<'a> {
             Err(_) => 0,
         };
 
-        // Settled before the GET, because a GET cannot settle them: asking for
-        // `bytes={total}-` of a file that is already whole is a 416 on every
-        // retry, forever, and a `.incomplete` longer than the file is not a
-        // prefix of it, so nothing appended to it can come out right.
+        // Settled before the GET: `bytes={total}-` of a whole file 416s on every retry, and an
+        // overlong `.incomplete` is not a prefix, so nothing appended to it can be right.
         if total > 0 && existing_size == total {
             progress(total, total);
             return self
@@ -622,10 +573,7 @@ impl<'a> HfFetch<'a> {
         let mut resp =
             get_with_redirects(client, &final_url, token, range_header.as_deref()).await?;
 
-        // Only reachable with a `.incomplete` and no known length (or a server
-        // that disagrees with the one it gave). If the server says the file is
-        // exactly what is on disk, it is complete; otherwise the prefix is of
-        // no use and the transfer starts again from zero, once, without Range.
+        // Reached only with a `.incomplete` and no known length (or an inconsistent server).
         if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
             let complete = content_range(resp.headers()).and_then(|r| r.complete);
             drop(resp);
@@ -639,16 +587,11 @@ impl<'a> HfFetch<'a> {
             resp = get_with_redirects(client, &final_url, token, None).await?;
         }
 
-        // Append only to an answer that is the rest of THIS prefix. A 200 to a
-        // Range request is the whole file from byte 0, and appending it would
-        // write the prefix twice.
+        // Append only a 206; a 200 to a Range request is the whole file from byte 0.
         let status = resp.status();
         let partial = status == reqwest::StatusCode::PARTIAL_CONTENT;
         let answered_range = content_range(resp.headers());
-        // A 206 must start exactly where this call is: at the prefix's end
-        // when resuming, at 0 when not. Anything else written as if it were
-        // the next bytes would give a file of the right length and the wrong
-        // content.
+        // A 206 must start at `existing_size`, or the file gets the right length, wrong content.
         if partial {
             let answered = answered_range.and_then(|r| r.start);
             if answered != Some(existing_size) {
@@ -660,8 +603,7 @@ impl<'a> HfFetch<'a> {
         }
         let resumed = existing_size > 0 && partial;
 
-        // The whole-file length this answer implies, checked BEFORE the file
-        // is opened, so a disagreement costs nothing already on disk.
+        // Checked before opening the file, so a length disagreement costs nothing on disk.
         let offered = if partial {
             answered_range.and_then(|r| r.complete)
         } else {
@@ -698,8 +640,7 @@ impl<'a> HfFetch<'a> {
                 Ok(Some(chunk)) => chunk,
                 Ok(None) => break,
                 Err(e) => {
-                    // Kept, and flushed so the next call's Range starts after
-                    // every byte that did arrive.
+                    // Flushed so the next call's Range resumes after every byte that arrived.
                     file.flush().await.ok();
                     return Err(anyhow!(e).context(format!("read chunk from {final_url}")));
                 }
@@ -709,8 +650,7 @@ impl<'a> HfFetch<'a> {
                 .with_context(|| format!("write {}", incomplete_path.display()))?;
             downloaded += chunk.len() as u64;
             if total > 0 && downloaded > total {
-                // Stopped at the first byte past the end rather than after
-                // the whole body, so a runaway answer cannot fill the disk.
+                // Stop at the first byte past the end so a runaway answer can't fill the disk.
                 drop(file);
                 let _ = tokio::fs::remove_file(&incomplete_path).await;
                 return Err(anyhow::Error::new(TransferError::Overlong {
@@ -724,16 +664,13 @@ impl<'a> HfFetch<'a> {
                 return Err(anyhow!(Stopped));
             }
         }
-        // A flush that fails (a full disk) must not be followed by a rename:
-        // the blob would be short with nothing left to say so.
+        // A failed flush (full disk) must not reach the rename, or the blob is silently short.
         file.flush()
             .await
             .with_context(|| format!("flush {}", incomplete_path.display()))?;
         drop(file);
 
-        // The body ended without an error but early: how a dropped transfer
-        // looks when the answer is close-delimited. Kept, so the next call
-        // resumes; never renamed, so it is never mistaken for the file.
+        // A close-delimited body cut short: kept to resume, never renamed to the blob.
         if total > 0 && downloaded < total {
             return Err(anyhow::Error::new(TransferError::Short {
                 received: downloaded,
@@ -858,9 +795,7 @@ where
 struct HeadResult {
     final_url: String,
     headers: reqwest::header::HeaderMap,
-    /// `x-linked-etag` from the first hop that sent one. On huggingface.co
-    /// that is the first hop, the 302, and for an LFS file it is the sha256;
-    /// the final hop's headers alone do not carry it.
+    /// First `x-linked-etag` in the chain (HF's 302; an LFS sha256); the final hop lacks it.
     linked_etag: Option<String>,
     /// `x-linked-size` from the first hop that sent one, for the same reason.
     linked_size: Option<u64>,
@@ -1036,20 +971,8 @@ fn create_pointer(blob: &Path, pointer: &Path) -> Result<()> {
 
 // ── Linking a blob to a flat path ────────────────────────────────────────────
 
-/// Point `dest` at `blob` with a symlink, the way the model folders expose a
-/// downloaded blob under its plain file name.
-///
-/// `dest` is replaced only when it is absent or already a symlink (dangling
-/// or not): a link is a pointer this crate may redraw, a regular file is
-/// somebody's bytes. Anything else at `dest` is refused with
-/// [`DestNotALink`] and left exactly as it was, so the caller moves it aside
-/// (quarantines it) first. Nothing here deletes a regular file.
-///
-/// A symlink is replaced by renaming a fresh link over it, so a reader never
-/// finds `dest` missing mid-swap. The check and the rename are two steps, so
-/// a regular file created at `dest` between them would still be replaced;
-/// closing that needs `renameat2(RENAME_NOREPLACE)`, which macOS lacks. A
-/// link that already points at `blob` is left alone.
+/// Symlink `dest` to `blob`, replacing only a symlink; anything else is [`DestNotALink`].
+/// Swaps by rename; a file racing in after the check is replaced (macOS lacks renameat2).
 pub async fn link_blob(blob: &Path, dest: &Path) -> Result<()> {
     let blob = blob.to_path_buf();
     let dest = dest.to_path_buf();
@@ -1082,8 +1005,7 @@ fn link_blob_blocking(blob: &Path, dest: &Path) -> Result<()> {
     }
 }
 
-/// Swap the existing symlink at `dest` for one to `blob`: a new link beside
-/// it, renamed over it.
+/// Swap `dest`'s symlink for one to `blob` by renaming a new link over it.
 #[cfg(unix)]
 fn replace_link(blob: &Path, dest: &Path) -> Result<()> {
     let name = dest
@@ -1091,8 +1013,7 @@ fn replace_link(blob: &Path, dest: &Path) -> Result<()> {
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow!("link path has no file name: {}", dest.display()))?;
     let staged = dest.with_file_name(format!(".{name}.link-{}", std::process::id()));
-    // A leftover from a crashed earlier attempt by a process with this pid.
-    // It is only ever one of these staging links, never a file of anyone's.
+    // Leftover staging link from a crashed attempt with this pid; never a regular file.
     if std::fs::symlink_metadata(&staged).is_ok_and(|m| m.file_type().is_symlink()) {
         let _ = std::fs::remove_file(&staged);
     }
@@ -1104,8 +1025,7 @@ fn replace_link(blob: &Path, dest: &Path) -> Result<()> {
     })
 }
 
-/// Without symlinks the "link" is a copy, and `dest` is already known to be a
-/// link, so removing it removes no one's bytes.
+/// Without symlinks the "link" is a copy; `dest` is known to be one, so removing it is safe.
 #[cfg(not(unix))]
 fn replace_link(blob: &Path, dest: &Path) -> Result<()> {
     std::fs::remove_file(dest).with_context(|| format!("remove link {}", dest.display()))?;
@@ -1474,11 +1394,7 @@ mod tests {
     }
 
     // ── The transfer rules, driven through the real algorithm ───────────────
-    //
-    // Everything below calls `download_to_blob_from`, the body the public
-    // method runs, against a loopback server. `tests/hf_cache_integration_test.rs`
-    // re-implements the algorithm in a shim, so a test added there checks a
-    // copy of it and passes whatever this file does; add them here.
+    // Add transfer tests here: `tests/hf_cache_integration_test.rs` only tests a copy of it.
 
     use pond_core::shared::services::egress::EgressDenied;
     use std::sync::Arc;
@@ -1487,10 +1403,8 @@ mod tests {
     const FILE_ETAG: &str = "0123abcd";
     const FILE_PATH: &str = "/owner/repo/resolve/main/weights.bin";
 
-    /// A cache rooted in `dir`, built with `HF_HOME` and the token vars
-    /// cleared so a developer's own cache is never the one written. The lock
-    /// is released before anything is awaited: the cache reads the env here
-    /// and nowhere else.
+    /// A cache in `dir` with `HF_HOME` and token vars cleared, so a real cache is never written.
+    /// The env lock is dropped before any await; the cache reads the env only in `new`.
     fn scratch_cache(dir: &Path) -> HfCache {
         let _g = EnvGuard::new();
         HfCache::new(dir)
@@ -1556,14 +1470,8 @@ mod tests {
         out
     }
 
-    /// A loopback HTTP/1.1 server that answers from a script, for the one
-    /// shape wiremock cannot produce: a body that ends early WITHOUT an error.
-    /// An answer with no Content-Length is close-delimited, so the connection
-    /// closing IS the end of the body and the read "succeeds" short. That is
-    /// what the 2026-07-28 encoder transfer looked like from the client.
-    ///
-    /// Every HEAD gets `head`; each GET takes the next of `gets`. Returns the
-    /// file URL and the request heads, in order.
+    /// Scripted loopback server for what wiremock can't do: a close-delimited body cut short.
+    /// Every HEAD gets `head`, each GET the next of `gets`; returns the URL and request heads.
     async fn scripted_server(
         head: Vec<u8>,
         gets: Vec<Vec<u8>>,
@@ -1773,9 +1681,7 @@ mod tests {
         assert!(!repo.blob_path(FILE_ETAG).exists());
     }
 
-    /// With no length from the server, the pin is the length. The control
-    /// half runs the same answers unpinned and shows the old acceptance, so
-    /// the refusal is the pin's doing and not some other check's.
+    /// The unpinned control half shows the refusal is the pin's doing, not another check's.
     #[tokio::test]
     async fn expect_size_supplies_the_length_the_head_left_out() {
         let full = file_bytes(1000);
@@ -1860,11 +1766,7 @@ mod tests {
         assert!(!incomplete_of(&repo, "ffff0000").exists());
     }
 
-    /// The shape huggingface.co answers an LFS file with today (measured
-    /// 2026-09-24): the 302 carries the sha256 as `x-linked-etag`, the CDN it
-    /// points at answers with its own storage hash as `etag`. The pin is
-    /// matched on the first hop and names the blob; unpinned, the blob takes
-    /// the CDN's name, as it always has.
+    /// HF's LFS shape: the 302 sends the sha256 as `x-linked-etag`, the CDN its own `etag`.
     #[tokio::test]
     async fn a_pin_matched_by_the_first_hops_linked_etag_names_the_blob() {
         let full = file_bytes(1000);
@@ -2041,9 +1943,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&incomplete).await.unwrap(), &full[..400]);
     }
 
-    /// With no length known the whole-prefix case cannot be settled before
-    /// the GET, so the 416 is where it is settled. Before this, that 416 was
-    /// an error on every retry, forever.
+    /// With no known length, a whole prefix can only be settled at the 416.
     #[tokio::test]
     async fn a_416_for_a_whole_incomplete_of_unknown_length_renames_it() {
         let server = MockServer::start().await;
@@ -2069,8 +1969,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&blob).await.unwrap(), full);
     }
 
-    /// A stop is a pause: the bytes stay, and the next call uses them. Here
-    /// the stop lands after the last byte, so the next call needs no GET.
+    /// The stop lands after the last byte, so the next call needs no GET.
     #[tokio::test]
     async fn stopping_keeps_the_incomplete_and_the_next_call_uses_it() {
         let server = MockServer::start().await;
@@ -2107,9 +2006,7 @@ mod tests {
         assert_eq!(tokio::fs::read(&blob).await.unwrap(), full);
     }
 
-    /// The adapter tells "blocked by the network mode" from "the network is
-    /// down" with `downcast_ref::<EgressDenied>()`, never by the message, so
-    /// the gate's own type has to survive the trip out of this function.
+    /// The adapter downcasts to `EgressDenied` to tell a blocked mode from a down network.
     #[tokio::test]
     async fn a_hop_the_network_mode_refuses_surfaces_as_egress_denied() {
         let server = redirector("https://cdn.invalid/blob").await;

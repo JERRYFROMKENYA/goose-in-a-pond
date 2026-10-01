@@ -47,13 +47,8 @@ pub struct HandshakeResponse {
     pub server_version: String,
     pub capabilities: Vec<String>,
     pub rejection_reason: Option<String>,
-    /// Hex `HMAC-SHA256` proving this server holds the pairing code and serves
-    /// the certificate the client pinned. See the channel-binding note above.
-    ///
-    /// Present exactly when the accepted request carried a
-    /// [`VerifyRequest::channel_binding`]. A client that sent one and did not
-    /// get one back is not talking to the pond it thinks it is, and must treat
-    /// the pair as failed.
+    /// Hex HMAC-SHA256 proving this server holds the pairing code and the pinned certificate.
+    /// Present iff [`VerifyRequest::channel_binding`] was sent; if it is missing, fail the pair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_proof: Option<String>,
 }
@@ -85,12 +80,8 @@ pub struct VerifyRequest {
     /// Optional friendly device name to record in the devices table.
     #[serde(default)]
     pub device_name: Option<String>,
-    /// The server public-key pin this client pinned its connection to, in
-    /// `sha256/<base64>` form, when it reached the server over pinned TLS.
-    ///
-    /// `None` means there was no channel to bind -- the loopback dashboard --
-    /// and selects the unbound MAC. Anything else must equal this server's own
-    /// pin, or the request is rejected: see the channel-binding note above.
+    /// The `sha256/<base64>` key pin the client's TLS is pinned to; must equal this server's pin.
+    /// `None` (loopback dashboard, no channel to bind) selects the unbound MAC.
     #[serde(default)]
     pub channel_binding: Option<String>,
 }
@@ -146,22 +137,8 @@ pub trait Handshake: Send + Sync {
             .map(|caller| caller.client_id))
     }
 
-    /// Revoke every session a device holds, and report how many were live.
-    ///
-    /// Removing a device from the household registry has to take its access
-    /// with it. `session_tokens.device_id` carries no foreign key, and nothing
-    /// cascades onto that table, so deleting the `devices` row on its own left
-    /// the tokens valid -- an operator who removed a lost phone from the device
-    /// list would have been told it was gone while it carried on working.
-    ///
-    /// # Why this has no default
-    ///
-    /// Every other new method on this trait is defaulted, and each of those
-    /// defaults **narrows**: a forgotten override loses a capability. A default
-    /// here would do the opposite. `Ok(0)` would mean "revoked nothing", the
-    /// caller would delete the device row anyway, and the omission would widen
-    /// access while reading like success. So it is required, and an adapter
-    /// that cannot revoke has to say so out loud.
+    /// Revoke every session a device holds; returns how many were live. Required, not defaulted:
+    /// no FK cascades from `devices`, so an `Ok(0)` default would leave removed devices working.
     async fn revoke_device(&self, device_id: &str) -> Result<u64>;
 
     /// Revoke a session token (disconnect a client).

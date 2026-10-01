@@ -32,6 +32,7 @@ Before proposing any build command on a real host, run:
 ```bash
 bash scripts/giap.sh status     # detection banner
 bash scripts/giap.sh doctor     # read-only checks; exits 1 on any FAIL
+bash scripts/giap.sh node       # the right Node for this repo: use one installed, or download one (asks first)
 ```
 
 `giap.sh` is the menu-driven entry point for install, build, service control,

@@ -2,7 +2,7 @@
 // paths, and `base: './'` would change the bytes pond-api embeds. It also gives a real
 // Origin for the server's CORS allowlist, where file:// sends `Origin: null`.
 
-import { protocol, net } from "electron";
+import { protocol, net, type Protocol } from "electron";
 import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -47,9 +47,15 @@ export function registerAppScheme(): void {
   ]);
 }
 
-/** Start serving `distRoot` at app://giap. Call after the app is ready. */
-export function serveRendererFrom(distRoot: string): void {
-  protocol.handle(APP_SCHEME, async (request) => {
+/**
+ * Start serving `distRoot` at app://giap. Call after the app is ready. `target` is the default
+ * session's protocol unless a window runs in its own partition, which needs its own handler.
+ */
+export function serveRendererFrom(
+  distRoot: string,
+  target: Pick<Protocol, "handle"> = protocol,
+): void {
+  target.handle(APP_SCHEME, async (request) => {
     const { pathname } = new URL(request.url);
     const file = resolveAppPath(distRoot, pathname);
     if (file === null) return new Response("forbidden", { status: 403 });

@@ -42,6 +42,16 @@ impl VoiceOutput for FallbackVoiceOutput {
         }
     }
 
+    fn begin_utterance(&self) {
+        self.primary.begin_utterance();
+        self.fallback.begin_utterance();
+    }
+
+    fn end_utterance(&self) {
+        self.primary.end_utterance();
+        self.fallback.end_utterance();
+    }
+
     fn stop_speaking(&self) {
         self.primary.stop_speaking();
     }

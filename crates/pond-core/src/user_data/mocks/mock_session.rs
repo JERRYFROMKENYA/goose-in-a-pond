@@ -19,23 +19,9 @@ pub struct InMemorySessionStorage {
     /// GIAP session id -> (title_source, title_through_message_id). Not left to the trait
     /// defaults, or "never overwrite a name a person typed" would be untestable.
     title_provenance: Arc<RwLock<HashMap<String, (Option<String>, Option<String>)>>>,
-    /// GIAP session id -> how far batch extraction has read into it.
-    ///
-    /// Modelled here rather than left to the trait default for the same reason
-    /// as `title_provenance`: the default reads every conversation as never
-    /// examined and silently discards every write, so a walk driven against it
-    /// re-reads one window forever. A mock that cannot hold a cursor cannot
-    /// test the thing the cursor exists for.
+    /// GIAP session id -> batch-extraction cursor; modelled since the trait default drops writes.
     extraction_cursors: Arc<RwLock<HashMap<String, ExtractionCursor>>>,
-    /// GIAP session id -> who the pond believes was speaking.
-    ///
-    /// Modelled here for the same reason as the cursor above: the trait default
-    /// reads every conversation as unattributed and discards every write, so a
-    /// test of "whose memory is this" cannot reach the branch where the answer
-    /// is somebody. Batch extraction resolves a window's subject from exactly
-    /// this value, and on a multi-member pond the difference between "Amara"
-    /// and "nobody" is the difference between a memory stored and a window
-    /// deliberately left unread.
+    /// GIAP session id -> who the pond believes spoke; modelled, as the default drops writes.
     identities: Arc<RwLock<HashMap<String, SessionIdentity>>>,
 }
 
@@ -217,10 +203,7 @@ impl SessionStorage for InMemorySessionStorage {
             .unwrap_or_else(ExtractionCursor::unstarted))
     }
 
-    /// Move or clear the watermark, mirroring the SQLite adapter -- including
-    /// the part that matters most: `updated_at` is NOT touched. That column is
-    /// an activity source, and a mock that bumped it would let a wiring bug
-    /// pass here and cancel every pass in production.
+    /// Mirrors SQLite, including leaving `updated_at` alone: the idle gate reads it as activity.
     async fn set_extraction_cursor(
         &self,
         session_id: &str,
@@ -259,9 +242,7 @@ impl SessionStorage for InMemorySessionStorage {
         session_id: &str,
         identity: &SessionIdentity,
     ) -> Result<(), SessionStorageError> {
-        // The row has to exist, matching the SQLite adapter: an attribution
-        // accepted and then silently dropped is the failure the identity work
-        // exists to end.
+        // Needs the row, like SQLite: an attribution must never be accepted and then dropped.
         self.get_session(session_id).await?;
         self.identities
             .write()

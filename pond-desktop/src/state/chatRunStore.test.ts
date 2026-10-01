@@ -84,8 +84,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
 }
 
-/** A minimal PreparedImage, named for the preview URL so an assertion reads
- *  as which attachment went where. */
+/** Named for its preview URL, so assertions read as which attachment went where. */
 function fakePreparedImage(previewUrl: string): PreparedImage {
   return {
     data: "AAA",
@@ -97,8 +96,7 @@ function fakePreparedImage(previewUrl: string): PreparedImage {
   };
 }
 
-/** A generator that rejects immediately with `err` — the shape `chatStream`
- *  takes when the server refuses a turn before the first SSE frame. */
+/** How `chatStream` fails when the server refuses a turn before the first SSE frame. */
 function rejectedStream(err: unknown): AsyncGenerator<ChatEvent> {
   return (async function* () {
     throw err;
@@ -381,12 +379,7 @@ describe("image previews", () => {
   });
 });
 
-/**
- * A refused turn (409/413/415/503/...) -- everything BUT 408, which a client
- * timeout also produces and does not mean the server refused it. Every real
- * refusal happens before `persist_user_message`, so the draft belongs back in
- * the composer's box rather than on screen as an error bubble.
- */
+/** Any status but 408 (a client timeout also yields it); refusals precede `persist_user_message`. */
 describe("a refused turn", () => {
   it("restores the draft on a 409 and does not touch the transcript or ownedPreviews", async () => {
     const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
@@ -443,8 +436,6 @@ describe("a refused turn", () => {
     await flush();
 
     const run = getChatRun();
-    // The ordinary error path: an error bubble, one completed turn, nothing
-    // to restore.
     expect(run.messages).toHaveLength(2);
     expect(run.messages[1].error).toBe(true);
     expect(run.completedTurns).toBe(1);
@@ -467,15 +458,7 @@ describe("a refused turn", () => {
   });
 });
 
-/**
- * Images on a replayed conversation.
- *
- * The attachment route is protected and accepts only a bearer header, which an
- * `<img src>` cannot send, so the bare URL this store used to hand both chat
- * surfaces answered 401 on every pond without the loopback dev bypass -- seen
- * against a live server started without it, 2026-09-24. The bytes now come
- * through the client and are shown through object URLs this store owns.
- */
+/** `<img src>` can't send the bearer header, so replayed images are fetched and shown as owned object URLs. */
 describe("history images", () => {
   /** A user row carrying `ids` as attachments, shaped as the history read sends it. */
   function rowWithImages(sessionId: string, ...ids: string[]) {
@@ -494,8 +477,7 @@ describe("history images", () => {
     };
   }
 
-  // Every blob is named for the attachment it holds, and every object URL for
-  // the blob it was made from, so an assertion reads as which image went where.
+  // Blobs and object URLs are named for their attachment, so assertions read as which image went where.
   const named = new Map<Blob, string>();
   const blobFor = (id: string) => {
     const b = new Blob([id], { type: "image/png" });
@@ -533,8 +515,7 @@ describe("history images", () => {
 
     // Through the client, which is what carries the bearer token...
     expect(api.getSessionAttachment).toHaveBeenCalledWith("s-img", "a1");
-    // ...and on screen as the URL made from its bytes. The attachment URL is
-    // what used to be here.
+    // ...and on screen as the URL made from its bytes.
     expect(getChatRun().messages[0].images).toEqual(["blob:pond/a1"]);
   });
 

@@ -1,71 +1,23 @@
-//! ConversationExtractor port — read one window of a conversation and say what
-//! is worth remembering about the person in it.
-//!
-//! # Why the unit is a window
-//!
-//! The port this replaced asked a question about a *turn*: "given this
-//! exchange, what facts are in it?" It ran after every single turn, on the same
-//! model that was serving chat, and paid a fresh prefill each time. The unit was
-//! also the wrong one for the question — whether something is a habit cannot be
-//! seen in one exchange, so "is this a pattern?", which is a third of what a
-//! household wants remembered, was unanswerable by construction.
-//!
-//! This port asks about a *window*: twenty messages, read once, in the pond's
-//! idle time. One call per twenty messages instead of twenty calls, and the
-//! model can see a thing happen twice.
-//!
-//! # The one type change that matters
-//!
-//! [`ExtractionError::Unparseable`] exists because today a malformed response
-//! comes back as `Ok(vec![])` — indistinguishable from "nothing here was worth
-//! keeping". In a per-turn design that costs one turn's facts. In a batch
-//! design it is much worse: the cursor advances past a window nobody read, and
-//! the conversation is never revisited. A parse failure has to be a different
-//! shape from an empty answer, or the engine cannot tell the difference between
-//! progress and silence.
+//! ConversationExtractor port: read one conversation window and say what is worth remembering.
 
 use crate::user_data::domain::memory::{MemorySegment, MemoryTier};
 use crate::user_data::domain::profile::ProfileScope;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
-/// Everything sent for one window, in tokens.
-///
-/// ~575 system + ~200 known-memories + ~1,500 window, against a prompt-side
-/// clamp of 8192 on the local providers. It lives here, beside the port, because
-/// it binds two crates that must agree about it: `pond-core` carves the window
-/// to fit it, and the adapter in `pond-server` measures the assembled prompt
-/// against it before it spends the inference slot. It was previously an adapter
-/// constant with no reader outside its own test, which is how a 40 KB pasted log
-/// came to be sent whole.
+/// Token budget for one window's whole prompt, well under the local providers' 8192 clamp.
+/// Shared: `pond-core` carves the window to fit it and the `pond-server` adapter trims to it.
 pub const EXTRACTION_PROMPT_BUDGET_TOKENS: usize = 2_400;
 
-/// Characters per token, for the estimate the budget is spent in.
-///
-/// The same four-characters-per-token heuristic the injection loop already
-/// spends its memory budget with. It is an ESTIMATE and is named as one: a
-/// tokeniser is per-model and is not reachable from here, so the budget is set
-/// low enough that the estimate being wrong by a third still fits the clamp.
+/// A heuristic (no tokeniser is reachable here); the budget leaves room for it to be a third off.
 pub const CHARS_PER_TOKEN: usize = 4;
 
-/// Roughly how many tokens a string costs.
-///
-/// Rounded UP, so the estimate can only ever over-state what a piece of the
-/// prompt costs. An under-stating estimate is the one that overruns a clamp.
+/// Estimated token cost, rounded up so it never under-states.
 pub fn estimated_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(CHARS_PER_TOKEN)
 }
 
-/// The closed catalogue the model may choose from.
-///
-/// Five values, validated exactly — an unknown label is REJECTED, never
-/// defaulted. Defaulting is how five William Ruto biography facts entered the
-/// live store: `parse_segment_str` mapped everything it did not recognise onto
-/// `knowledge`, so a model answering the wrong question still got a row.
-///
-/// `Routine` is the variant the design exists for. "Is this a habit, a pattern,
-/// a standing way they do things?" is requirement 3, and it is the one question
-/// a per-turn extractor cannot be asked.
+/// The closed catalogue the model may choose from; an unknown label is rejected, never defaulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MemoryKind {
     /// A person or pet the subject knows, and who they are to them.
@@ -92,13 +44,7 @@ impl MemoryKind {
         }
     }
 
-    /// Parse a model-written label.
-    ///
-    /// Normalises case, surrounding whitespace and a trailing plural "s",
-    /// because those three are what a small model actually gets wrong about a
-    /// closed list. Anything else returns `None` and the item is dropped: a
-    /// label outside the catalogue means the model answered a question that was
-    /// not asked, and the honest response to that is to keep nothing.
+    /// Parse a model-written label, forgiving case, padding and a trailing plural "s".
     pub fn parse(raw: &str) -> Option<Self> {
         let cleaned = raw.trim().to_lowercase();
         let cleaned = cleaned.strip_suffix('s').unwrap_or(&cleaned);
@@ -121,17 +67,8 @@ impl MemoryKind {
         MemoryKind::Context,
     ];
 
-    /// Where a kind is filed in the store.
-    ///
-    /// The catalogue is mapped onto the existing `segment` column rather than
-    /// onto free-text `tags`, because `segment` is populated on 379 of 379 live
-    /// rows and indexed, while `tags` is populated on 7 of 379 with four near
-    /// synonyms among them and has no reader anywhere.
-    ///
-    /// `Context` lands in `Identity` — "who the subject is: role, home, the
-    /// work they are living through" is what that segment already means, and
-    /// the store's `Context` segment means something else entirely (transient
-    /// state, short tier, decays in about a week).
+    /// The store segment for a kind. `Context` goes to `Identity`: the store's own `Context`
+    /// segment is transient and decays in about a week.
     pub fn segment(self) -> MemorySegment {
         match self {
             MemoryKind::Relationship => MemorySegment::Relationship,
@@ -142,54 +79,28 @@ impl MemoryKind {
         }
     }
 
-    /// The importance a memory of this kind starts at.
-    ///
-    /// Stated here rather than taken from the model. The old prompt asked for
-    /// an importance and then clamped it to the segment's ceiling, so the model
-    /// could only ever lower it — which is a dial that looks like it does
-    /// something and does not. Phase 3's reinforcement raises this from
-    /// observation count, which is evidence rather than an opinion.
+    /// Starting importance: fixed per kind, never taken from the model.
     pub fn base_importance(self) -> f32 {
         self.segment().default_importance()
     }
 
-    /// How long a memory of this kind is kept.
-    ///
-    /// **`Long` for all five, including `Context`.** Taken explicitly rather
-    /// than through `segment().default_tier()`, which would make a `context`
-    /// memory `Permanent` by way of `Identity`. A household's circumstances
-    /// change: a row asserting a job somebody left, which nothing may ever
-    /// prune, is worse than one that fades.
+    /// `Long` for all five. Not `segment().default_tier()`, which would make `Context` permanent
+    /// through `Identity`, though a household's circumstances change.
     pub fn tier(self) -> MemoryTier {
         MemoryTier::Long
     }
 }
 
-/// Who the window is about, and the names the write gate will accept for them.
-///
-/// Not `settings.user_name` read at the call site, because a pond can have more
-/// than one member and a batch job has no request to resolve one from. It is
-/// resolved per window from the session's own identity, falling back to
-/// settings, and a window whose subject cannot be named is skipped rather than
-/// mined under somebody else's name.
+/// Who the window is about, and the names the write gate accepts for them. Resolved per
+/// window, not from `settings.user_name`, since a pond can have several members.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowSubject {
-    /// What the prompt calls them. Literally `the user` on a pond with no
-    /// configured name — which is the wording the existing write gate already
-    /// accepts, rather than writing the `Friend` placeholder into permanent
-    /// storage.
+    /// What the prompt calls them: `the user` when unnamed, never the `Friend` default.
     pub name: String,
-    /// Extra names `names_subject` must accept as naming this person. Empty
-    /// when the subject is `the user`, because the gate already matches that.
+    /// Extra names `names_subject` must accept; empty for `the user`, which it already matches.
     pub gate_aliases: Vec<String>,
-    /// The household member every memory from this window is stamped to, or
-    /// `None` for the unattributed rows a single-member pond has always
-    /// written.
-    ///
-    /// Carried on the subject rather than resolved again at write time, so the
-    /// name in the prompt and the owner on the row cannot come apart. They are
-    /// two faces of one decision, and a disagreement between them is a memory
-    /// filed under one member and worded about another.
+    /// The member every memory from this window is stamped to; `None` means unattributed. Carried
+    /// here, not re-resolved at write time, so the prompt's name and the row's owner agree.
     pub profile_id: Option<String>,
 }
 
@@ -203,11 +114,7 @@ impl WindowSubject {
         }
     }
 
-    /// A named subject with no household member behind the name.
-    ///
-    /// What `settings.user_name` produces: a pond can be named without having
-    /// any profile rows, and everything it writes stays unattributed — which is
-    /// what all 379 rows already in the store are.
+    /// A named subject with no household member behind it, as `settings.user_name` gives.
     pub fn named(name: impl Into<String>) -> Self {
         let name = name.into();
         Self {
@@ -225,27 +132,8 @@ impl WindowSubject {
         }
     }
 
-    /// The scope every store read about this window must take.
-    ///
-    /// The subject is resolved per window and then the STORE has to be read
-    /// under it, or the resolution is enforced on the prompt's wording and
-    /// nowhere else. [`ProfileScope::Household`] renders as no filter at all,
-    /// so reading a named member's window under it pulls every other member's
-    /// rows -- which are then printed to the model under the literal header
-    /// "Already remembered about {this member}", and scored against this
-    /// member's candidates so one person's true memory is dropped as a
-    /// duplicate of another's.
-    ///
-    /// [`Owner`](ProfileScope::Owner) is that member's rows plus the
-    /// unattributed ones, which is exactly what "what does the pond already
-    /// know about this person" means: the shared household rows are theirs too.
-    ///
-    /// `None` is not a silent fallback to unfiltered. It is only reachable
-    /// where nobody could be told apart in the first place -- a pond with one
-    /// member or none, which is where [`super::super::services::memory_extraction::resolve_window_subject`]
-    /// allows the pond-wide fallback at all -- and there `Household` returns the
-    /// same rows `Owner` would, while keeping the 379 unattributed rows already
-    /// in the store reachable.
+    /// Scope for every store read about this window. `Household` is no filter, so it serves only
+    /// unattributed subjects, which exist only on ponds with at most one member.
     pub fn scope(&self) -> ProfileScope {
         match &self.profile_id {
             Some(id) => ProfileScope::Owner(id.clone()),
@@ -258,9 +146,7 @@ impl WindowSubject {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowMessage {
     pub id: String,
-    /// `"user"` or `"assistant"`. Not the full `Role` enum: a window is built
-    /// from what a person and the pond said to each other, and a system message
-    /// in the middle of it is plumbing.
+    /// `"user"` or `"assistant"`; a window never includes system messages.
     pub role: String,
     pub content: String,
     pub created_at: DateTime<Utc>,
@@ -272,42 +158,30 @@ impl WindowMessage {
     }
 }
 
-/// A memory the store already holds, shown to the model so new evidence can
-/// build on it rather than restate it.
+/// A stored memory, shown to the model so new evidence builds on it rather than restates it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownMemory {
     pub note: String,
-    /// How the row is filed. A string rather than a [`MemoryKind`] because the
-    /// existing store predates the catalogue: its rows carry segments like
-    /// `project` and `knowledge` that the model may no longer choose. It is a
-    /// hint to the reader, not a contract.
+    /// The row's segment, as a string: older rows carry segments no [`MemoryKind`] maps to.
     pub kind_label: String,
-    /// Whether this memory has been seen more than once. Always `false` until
-    /// the observation columns land; rendering it as established before
-    /// anything counts observations would be the pond asserting evidence it
-    /// does not have.
+    /// Seen more than once. Always `false` for now: nothing counts observations yet.
     pub pattern: bool,
 }
 
-/// One window, ready to be read.
 pub struct ExtractionWindow<'a> {
     pub subject: &'a WindowSubject,
     pub assistant_name: &'a str,
     pub session_id: &'a str,
-    /// The last message id in the window. This is the idempotence key and the
-    /// value the cursor advances to.
+    /// Last message id in the window: the idempotence key and the cursor's next value.
     pub window_id: &'a str,
     pub messages: &'a [WindowMessage],
     /// What is already known about the subject, most relevant first.
     pub known: &'a [KnownMemory],
     pub max_memories: usize,
-    /// Whether to ask for reminders at all. `false` for a window whose last
-    /// message is older than the staleness cutoff, which also drops the
-    /// reminders paragraph from the prompt entirely.
+    /// `false` when the window's last message is older than the staleness cutoff.
     pub allow_reminders: bool,
 }
 
-/// One thing worth remembering.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedMemory {
     pub note: String,
@@ -318,21 +192,15 @@ pub struct ExtractedMemory {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtractedReminder {
     pub about: String,
-    /// The subject's own words about the timing, copied from the conversation.
-    /// Deliberately not a parsed date: the model is not asked to work one out,
-    /// because a wrong date is worse than no date.
+    /// The subject's own words about the timing, never a parsed date: a wrong date is worse.
     pub when_said: String,
 }
 
-/// What one window produced.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WindowExtraction {
     pub memories: Vec<ExtractedMemory>,
     pub reminders: Vec<ExtractedReminder>,
-    /// Items the model offered that carried a label outside the catalogue.
-    /// Counted rather than salvaged, so a prompt the model is systematically
-    /// misreading shows up as a number instead of as a store full of
-    /// misfiled rows.
+    /// Items labelled outside the catalogue; counted so a misread prompt shows up as a number.
     pub rejected: usize,
 }
 
@@ -342,26 +210,19 @@ impl WindowExtraction {
     }
 }
 
-/// Why a window could not be read.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractionError {
-    /// No model is configured. The cursor must not move and no attempt is
-    /// counted: nothing was wrong with the window.
+    /// No model configured. The cursor stays and no attempt is counted.
     #[error("no LLM provider available")]
     NoProvider,
     /// The model was called and failed. Same disposition as `NoProvider`.
     #[error("extraction provider failed: {0}")]
     Provider(#[from] anyhow::Error),
-    /// The model answered, and nothing in the answer was JSON. The cursor must
-    /// not move, and this one DOES count an attempt -- three of these against
-    /// one watermark and the walk gives up on that window rather than reading
-    /// it forever.
+    /// The reply held no recoverable JSON. Unlike an empty answer the cursor stays, but it counts
+    /// toward `MAX_PARSE_ATTEMPTS`, after which the walk gives up on the window.
     #[error("no JSON recoverable from the model's reply")]
     Unparseable {
-        /// The first few hundred characters of what came back, for the log.
-        /// Bounded because this reaches a log file, and an unbounded model
-        /// reply in a log is the whole conversation written somewhere with none
-        /// of the store's retention.
+        /// Start of the reply, for the log; bounded because logs bypass the store's retention.
         raw_head: String,
     },
 }
@@ -379,13 +240,6 @@ pub trait ConversationExtractor: Send + Sync {
 mod tests {
     use super::*;
 
-    /// The catalogue is closed, and an unknown label is dropped rather than
-    /// filed somewhere.
-    ///
-    /// This is the measured failure: `parse_segment_str` maps everything it
-    /// does not recognise onto `knowledge`, and five third-party biography
-    /// facts reached the live store that way. A closed list whose parser has a
-    /// fallback is not a closed list.
     #[test]
     fn an_unknown_kind_is_refused_rather_than_defaulted() {
         for label in ["identity", "project", "knowledge", "fact", "", "  "] {
@@ -397,8 +251,6 @@ mod tests {
         }
     }
 
-    /// The three things a small model actually gets wrong about a closed list:
-    /// case, padding, and pluralising the label it was shown.
     #[test]
     fn the_parser_forgives_case_padding_and_a_trailing_plural() {
         assert_eq!(MemoryKind::parse("  Routines  "), Some(MemoryKind::Routine));
@@ -411,12 +263,6 @@ mod tests {
         }
     }
 
-    /// A pond with no configured name says `the user`, not `Friend`.
-    ///
-    /// `Friend` is the shipped default of `settings.user_name`, and writing it
-    /// into permanent storage would produce memories about a person who does
-    /// not exist. `the user` is also the wording the existing write gate
-    /// already accepts, so the anonymous path needs no alias at all.
     #[test]
     fn an_unnamed_pond_writes_the_user_and_needs_no_alias() {
         let subject = WindowSubject::anonymous();
@@ -427,13 +273,6 @@ mod tests {
         assert_eq!(named.gate_aliases, vec!["Jerry".to_string()]);
     }
 
-    /// A member's window is read under THEIR scope, never the household's.
-    ///
-    /// `Household` renders as no filter at all (`scope_sql`), so a read taken
-    /// under it while the prompt says "Already remembered about Amara" shows
-    /// Jerry's rows to a model that has just been told they are Amara's. The
-    /// subject and the scope are two faces of one decision and this is the
-    /// place they are tied together.
     #[test]
     fn a_named_members_window_is_read_under_their_own_scope() {
         let member = WindowSubject::member("profile-amara", "Amara");
@@ -442,9 +281,7 @@ mod tests {
             ProfileScope::Owner("profile-amara".to_string())
         );
 
-        // The two unattributed shapes. Both are only reachable on a pond where
-        // nobody can be told apart, and both keep the existing unattributed
-        // rows readable.
+        // Unattributed subjects exist only where nobody can be told apart.
         assert_eq!(WindowSubject::anonymous().scope(), ProfileScope::Household);
         assert_eq!(
             WindowSubject::named("Jerry").scope(),
@@ -452,11 +289,9 @@ mod tests {
         );
     }
 
-    /// The estimate rounds up, so it can only over-state a cost.
     #[test]
     fn the_token_estimate_never_understates() {
         assert_eq!(estimated_tokens(""), 0);
-        // One character is one token's worth of budget spent, not zero.
         assert_eq!(estimated_tokens("a"), 1);
         assert_eq!(estimated_tokens(&"a".repeat(CHARS_PER_TOKEN)), 1);
         assert_eq!(estimated_tokens(&"a".repeat(CHARS_PER_TOKEN + 1)), 2);

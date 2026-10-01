@@ -1,10 +1,5 @@
-// The Hub's chat is a second rendering of the Chat section's conversation, not
-// a second conversation, so it never loads history itself: a replayed image
-// reaches it through `chatRunStore`. It used to render the bare attachment URL
-// the store handed it, and that URL sits on the protected router, where an
-// `<img src>` -- which cannot send the bearer header -- got a 401 on every pond
-// without the loopback dev bypass. What it must render now is the object URL
-// the store made from bytes the client fetched with its token.
+// The Hub renders the Chat section's conversation, so replayed images arrive via `chatRunStore`
+// as object URLs of token-fetched bytes: a bare attachment URL 401s in `<img src>`.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
@@ -32,9 +27,7 @@ vi.mock("../../api/PondApiClient", () => ({
       state: "skipped", reason: "test", model: "", started_unix_ms: 0,
       finished_unix_ms: null, elapsed_ms: 0,
     }),
-    // Ready by default, so tests that do not care about picture support see
-    // the send gate stay open — see the "picture support" describe below for
-    // the states that close it.
+    // Ready by default, so the send gate stays open outside the "picture support" tests.
     getVisionStatus: vi.fn().mockResolvedValue({
       model: "", state: { kind: "ready", bytes: null }, size_bytes: null, message: null,
     } satisfies VisionStatus),
@@ -51,11 +44,7 @@ vi.mock("../../state/AppContext", () => ({
   useAppDispatch: () => vi.fn(),
 }));
 
-// Only `prepareImage` is faked — everything else (validateAttachmentSet, the
-// MIME lists AttachmentTray itself reads) stays real. happy-dom's <img> never
-// fires a real decode, so prepareImage cannot run end to end here; the tests
-// below only need SOME PreparedImage to reach the composer's state, the way
-// a real decode would.
+// Only `prepareImage` is faked: happy-dom's <img> never decodes, so it can't run here.
 vi.mock("../../lib/imageAttach", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/imageAttach")>();
   return { ...actual, prepareImage: vi.fn() };
@@ -74,9 +63,7 @@ const READY_STATUS: VisionStatus = {
 };
 
 beforeEach(() => {
-  // Call history AND the resolved-value overrides a previous test set both
-  // persist across tests otherwise — `mockResolvedValue` replaces the mock's
-  // implementation for good, not just for the test that called it.
+  // Re-set each test: `mockResolvedValue` overrides outlive the test that set them.
   vi.clearAllMocks();
   __resetChatRunForTests();
   vi.mocked(api.getVisionStatus).mockResolvedValue(READY_STATUS);
@@ -121,13 +108,7 @@ describe("ChatHubView — history images", () => {
   });
 });
 
-/**
- * Picture support's own status, and the send/paste gate it drives.
- *
- * The paperclip is never disabled for a vision reason (see ChatHub.tsx), so
- * these test the actual gate: the composer accepts an attachment into its
- * tray regardless of status, and only refuses to SEND it.
- */
+/** The paperclip is never vision-gated, so these test the real gate: attaching works, sending is refused. */
 describe("ChatHubView — picture support", () => {
   async function attachOneImage() {
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
@@ -205,9 +186,7 @@ describe("ChatHubView — picture support", () => {
     } satisfies VisionStatus);
 
     render(<ChatHubView />);
-    // Wait for the mocked status to actually land before pasting -- otherwise
-    // the paste can race the hook's first fetch and land while gate.blocked
-    // is still evaluating from the (unblocked) capabilities fallback.
+    // Wait for the status first, or the paste races the hook's fetch and sees the unblocked fallback.
     await screen.findByText(/Picture support needs a one-time 941 MB download/);
     const input = screen.getByLabelText("Message input");
     fireEvent.paste(input, { clipboardData: { files: [fakeFile()] } });

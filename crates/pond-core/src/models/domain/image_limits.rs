@@ -32,14 +32,8 @@ pub const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &[
     "image/bmp",
 ];
 
-/// MIME types the ENGINE can decode, a strict subset of [`SUPPORTED_IMAGE_MIME_TYPES`].
-///
-/// mtmd decodes with `stb_image` alone (`mtmd-helper.cpp`), and the vendored `stb_image.h` has
-/// no WebP decoder; the video fallthrough that might have caught it is behind `MTMD_VIDEO`,
-/// which the build never defines. So WebP is accepted at the API and must be re-encoded to one
-/// of these before it reaches the engine: sent as-is it fails deep inside the turn as "Failed to
-/// decode image", and because the picture then stays the newest in history, every later turn
-/// in the conversation fails the same way.
+/// MIME types the ENGINE can decode, a strict subset of [`SUPPORTED_IMAGE_MIME_TYPES`]. mtmd's
+/// `stb_image` has no WebP: re-encode it first, or it breaks every later turn in the conversation.
 pub const ENGINE_DECODABLE_IMAGE_TYPES: &[&str] =
     &["image/jpeg", "image/png", "image/gif", "image/bmp"];
 
@@ -343,8 +337,6 @@ mod tests {
         assert_eq!(extension_for_mime("IMAGE/PNG; q=1"), "png");
     }
 
-    /// What the engine decodes is a subset of what the API accepts, and WebP is the gap the API
-    /// has to close by re-encoding.
     #[test]
     fn the_engine_decodes_everything_accepted_except_webp() {
         for m in ENGINE_DECODABLE_IMAGE_TYPES {

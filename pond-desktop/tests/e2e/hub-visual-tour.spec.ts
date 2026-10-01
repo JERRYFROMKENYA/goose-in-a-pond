@@ -2,14 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { mockAllApiRoutes } from "./helpers/api-mocks";
 import { navigateTo } from "./helpers/nav";
 
-/** Tour by opening the drawer for each destination, then drilling into the
- *  Settings sub-rows.
- *
- *  `drawer` is the row that reaches the view now: the rail's "Goose" is the
- *  drawer's "Chat" under Pond, and its "Routines" is the "Schedules" chip under
- *  Manage, which the hub renders as its routines route. Canvas has no drawer
- *  row -- it is a hidden section reached from a notification -- so it is taken
- *  by its persisted route, handled by `visit` below. */
+/** Drawer-driven tour; Canvas has no drawer row, so `visit` reopens it by its persisted route. */
 const TOP_TOUR: Array<{ drawer: string | null; label: string; check: string }> = [
   { drawer: "Home",      label: "Home",          check: ".dash" },
   { drawer: "Chat",      label: "Chat",          check: ".chat2" },
@@ -18,13 +11,6 @@ const TOP_TOUR: Array<{ drawer: string | null; label: string; check: string }> =
   { drawer: "Settings",  label: "Settings",      check: ".set" },
 ];
 
-/**
- * Reach one of the top destinations.
- *
- * Everything the drawer lists goes through the shared helper. Canvas does not,
- * and re-opening the app on its persisted route is local to this spec rather
- * than in helpers/nav.ts, which is about the drawer.
- */
 async function visit(page: Page, drawer: string | null) {
   if (drawer) {
     await navigateTo(page, drawer);
@@ -222,7 +208,6 @@ test("Hub interaction smoke — tile toggle + routine run + bell shortcut", asyn
   await page.goto("/");
   await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
 
-  // Home's tiles are HomeControlsCard's now; `.dtile` (DashboardGrid) matches nothing.
   const firstTile = page.locator('[data-hook="home-controls"] .hcc__tile').first();
   const beforeStatus = await firstTile.innerText().catch(() => "n/a");
   await firstTile.click();
@@ -240,9 +225,7 @@ test("Hub interaction smoke — tile toggle + routine run + bell shortcut", asyn
     await page.screenshot({ path: "/tmp/hub-tour/interact_notifications.png" });
   }
 
-  // Routine run button — reached through the drawer's "Schedules" chip, which
-  // is the routines route in this shell (a reload would reset the route, since
-  // addInitScript pins it to home).
+  // Via the drawer's "Schedules" chip: a reload would reset the route, as addInitScript pins home.
   await navigateTo(page, "Schedules");
   await expect(page.locator(".rt")).toBeVisible();
   const runBtn = page.locator(".rt-card__run").first();

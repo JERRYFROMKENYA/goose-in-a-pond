@@ -1,29 +1,5 @@
-// ────────────────────────────────────────────────────────────
-// Home's status strip.
-//
-// The design draws a single 60px header carrying the hamburger, the bell, the
-// arrange control, the temperature, the clock and the avatar. This is only its
-// right-hand half, because the left-hand half already exists: `ShellBar` is
-// rendered above this view with both of those 44px pills already wired -- the
-// hamburger to the drawer, the bell to the notifications route. Drawing them
-// again here would give the panel two menus and two bells.
-//
-// So the strip carries exactly what the design's header has and the shell does
-// not, and it belongs to Home rather than to the shell because every item on it
-// is about this screen: the arrange control edits this screen's layout, and the
-// weather, clock and avatar are the screen's own content. Chrome above Home on
-// the 600px panel comes to 60 + 44 = 104px.
-//
-// Everything sits in ONE cluster, flush right, in the design's own order --
-// arrange pill, temperature, date/time, avatar. The strip has no left-hand
-// slot on purpose: the shell's hamburger already starts at x=20 on the row
-// above, so anything this file put at its own left edge would stack a second
-// left-aligned control directly under the first, in the one position the
-// design keeps empty.
-//
-// It is 44px rather than 60 for that reason -- the second bar has to pay for
-// itself in the height it takes from the widgets below it.
-// ────────────────────────────────────────────────────────────
+// Home's status strip: the right half of the design's header. ShellBar above already has the
+// hamburger and bell, so nothing goes on the left, and it is 44px, not 60, to spare the widgets.
 
 import React from "react";
 import { HubIco } from "../primitives/HubIco";
@@ -32,10 +8,9 @@ import { useNow } from "../state/useNow";
 import "./home-status-bar.css";
 
 export interface HomeStatusBarProps {
-  /** True while the household is arranging Home. */
   arranging: boolean;
   onToggleArrange: () => void;
-  /** Outdoor temperature as the pond reports it, or null when weather is off, unset, or unanswered. Null hides the slot. */
+  /** Outdoor temperature; null (weather off, unset or unanswered) hides the slot. */
   temp: number | null;
   /** The name the pond knows, for the monogram. Empty string when it has none. */
   userName: string;
@@ -47,8 +22,7 @@ export function HomeStatusBar({
   temp,
   userName,
 }: HomeStatusBarProps): React.ReactElement {
-  // A panel on a shelf is never reloaded, so a clock read once at mount would
-  // be wrong within the minute and stale by morning. `useNow` re-ticks.
+  // `useNow` re-ticks: a shelf panel is never reloaded, so a mount-time clock goes stale.
   const now = useNow();
 
   const name = userName.trim();

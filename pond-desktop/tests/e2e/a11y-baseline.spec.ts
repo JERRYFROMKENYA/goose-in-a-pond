@@ -22,19 +22,12 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    // `.dash` is Home's root on both surfaces. The old `.home2` gate named a
-    // class that stopped rendering when Home was pared back, so this scan was
-    // timing out rather than scanning anything.
+    // `.dash` is Home's root on both surfaces.
     await expect(page.locator(".dash")).toBeVisible({ timeout: 10_000 });
     await scanAndAssert(page, "Home");
   });
 
-  /**
-   * Arrange mode brings up two sets of controls at once — a toolbar on every
-   * widget and a row per card in the sheet — and they share accessible names
-   * because they are the same acts. That is correct and it is also exactly the
-   * shape that produces unlabelled icon buttons if anything drifts.
-   */
+  /** Toolbars and sheet rows share names by design: where unlabelled icon buttons creep in. */
   test("Home while arranging has no violations", async ({ page }) => {
     await mockAllApiRoutes(page);
     await page.addInitScript(() => {
@@ -50,12 +43,7 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     await scanAndAssert(page, "Home (arranging)");
   });
 
-  /**
-   * Canvas is the one screen the drawer cannot reach. It is a hidden section
-   * (`HIDDEN_SECTIONS` in desktopState.ts) whose only route in the hub is a
-   * notification's "View on Canvas", so this lands on it by its persisted route
-   * rather than by a click that no longer exists anywhere.
-   */
+  /** Canvas is a hidden section no click reaches, so it loads by its persisted route. */
   test("Canvas section has no violations", async ({ page }) => {
     await mockAllApiRoutes(page);
     await page.addInitScript(() => {
@@ -78,9 +66,7 @@ test.describe("a11y baseline (WCAG 2 A/AA)", () => {
     });
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/");
-    // The gate is the drawer's trigger, because the drawer is what this test
-    // navigates with. Routines is the "Schedules" chip under Manage: the hub
-    // renders that section as its routines route.
+    // Gate on the drawer trigger this test navigates with; "Schedules" is the routines route.
     await expect(page.locator('[aria-label="Open menu"]')).toBeVisible({ timeout: 10_000 });
     await navigateTo(page, "Schedules");
     await expect(page.locator(".rt")).toBeVisible({ timeout: 10_000 });

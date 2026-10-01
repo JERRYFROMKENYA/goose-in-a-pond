@@ -36,10 +36,6 @@ describe("useSuggestedPrompts", () => {
     );
   });
 
-  /// The chips these replaced named hardware: "Lock everything", "Bedroom to
-  /// 67", "Show the driveway". On a pond with no lock, no thermostat and no
-  /// camera each one reached a model that could only say so. The fallback must
-  /// therefore never claim anything about the house.
   it("falls back to questions about the assistant, never about the house", async () => {
     answers([]);
     const { result } = renderHook(() => useSuggestedPrompts(null));
@@ -72,17 +68,13 @@ describe("useSuggestedPrompts", () => {
     );
   });
 
-  /// The chips can be personal. When the audience changes -- a "New
-  /// conversation" on a shared panel -- the last person's must not survive a
-  /// fetch for the next one that finds nothing, or fails.
+  // Chips can be personal, and a shared panel's next person may be someone else.
   it("drops the last audience's prompts when the next fetch comes back empty", async () => {
     answers(["When is my appointment at the clinic?"]);
     const { result, rerender } = renderHook(({ sid }) => useSuggestedPrompts(sid), {
       initialProps: { sid: "s-liz" as string | null },
     });
-    // The control: the personal prompt really was on screen first. Without
-    // this the assertion below passes on the initial fallback, before the
-    // fetch it is about has ever settled.
+    // Control: without it the assertion below passes on the initial fallback.
     await waitFor(() => expect(result.current).toEqual(["When is my appointment at the clinic?"]));
 
     answers([]);

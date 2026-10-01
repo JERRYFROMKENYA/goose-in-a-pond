@@ -20,15 +20,7 @@ pub enum MemorySegment {
     Relationship,
     /// Ongoing tasks, goals, work projects.
     Project,
-    /// Something the user does again and again: a habit, a standing way they
-    /// do things.
-    ///
-    /// The variant the batch engine exists for. "Is this a one-off, or a
-    /// pattern?" is the third of what a household wants remembered, and it is
-    /// the question a per-turn extractor cannot be asked — a habit is not
-    /// visible inside one exchange. No migration: `memories.segment` is bare
-    /// TEXT with no CHECK constraint, so the new label round-trips through
-    /// serde the day the variant exists.
+    /// A habit, a standing way the user does things; only batch extraction can see one.
     Routine,
     Knowledge,
     /// Transient context (current situation, ongoing state).
@@ -43,10 +35,7 @@ impl MemorySegment {
             Self::Identity => 0.8,
             Self::Preference => 0.7,
             Self::Relationship => 0.7,
-            // Between a preference and a project: a habit is more durable than
-            // a piece of work, and less definitive than a stated preference,
-            // because it is inferred from what somebody did rather than from
-            // what they said they wanted.
+            // Below a stated preference (it's inferred), above a project (it's more durable).
             Self::Routine => 0.65,
             Self::Project => 0.6,
             Self::Knowledge => 0.5,
@@ -208,21 +197,7 @@ impl MemoryFragment {
     }
 
     /// Create a fragment from one window of batch extraction.
-    ///
-    /// Separate from [`from_extraction`](Self::from_extraction) rather than a
-    /// widening of it, because the two disagree about the tier and only one of
-    /// them can be right. `from_extraction` derives `tier` from the segment,
-    /// and `Identity::default_tier()` is `Permanent` — so a `context` memory
-    /// ("who the subject is: role, home, the work they are living through")
-    /// would be filed as something that never decays and is never pruned. The
-    /// batch catalogue says `Long` for all five kinds: a household's
-    /// circumstances change, and a permanent row asserting a job somebody left
-    /// is worse than one that fades.
-    ///
-    /// Changing `from_extraction` instead would have moved the tier under
-    /// ~20 existing fixtures and under every row the MCP `save_memory` tool
-    /// writes. The `source` string is the same `"extraction"`, so the desktop's
-    /// provenance badge keeps working.
+    /// Takes `tier` because the segment default would make `Identity` facts never decay.
     pub fn from_window_extraction(
         id: String,
         profile_id: Option<String>,
@@ -272,33 +247,10 @@ pub enum FactDefect {
     /// A verbatim copy of the extraction prompt's worked example. Small models copy examples,
     /// and these facts pass every other check, so they are refused outright.
     EchoedExample,
-    /// The note carries a calendar date, so the whole note is refused.
-    ///
-    /// Not a last resort any more: this IS the date rule. Nothing rewrites a
-    /// note to take a date out of it — four passes at that stored "The user
-    /// swims morning.", "The user prefers model of the tractor." and "The user
-    /// keeps the oven." — so a dated note is refused whole and the model is the
-    /// only thing that decides what a memory says.
-    ///
-    /// The trade is deliberate and asymmetric. A memory is read back six months
-    /// later with no conversation around it, and "the dentist is on Tuesday" is
-    /// by then not merely useless but false. A refused fact is still in the
-    /// conversation and can be extracted again; a mangled one is shown to the
-    /// household forever. Anything whose point was the date belongs in a
-    /// reminder, which expires — and the prompt asks the model to file one,
-    /// which the shipped model does for 31 of its 36 dated windows, losing no
-    /// date entirely across 72.
+    /// The note carries a calendar date, so it is refused whole: rewriting one mangles it.
+    /// Read back months later a dated fact misleads; dates belong in reminders, which expire.
     CalendarDate,
-    /// The sentence stops on a word that was leading into something else.
-    ///
-    /// "The user's anniversary is", "The user's cat is called". Long enough,
-    /// third person, self-contained, and saying nothing whatever.
-    ///
-    /// This rung was written to catch what the date STRIPPER left behind, and
-    /// the stripper is gone. It stays because a model truncates its own reply
-    /// too — one of 432 measured replies stopped mid-sentence on a token limit
-    /// — and because it costs one word-list lookup on the last token. It no
-    /// longer fires on anything this pond generates itself.
+    /// The sentence stops on a word leading into something else ("The user's cat is called").
     Fragment,
 }
 
@@ -506,16 +458,10 @@ pub fn fact_defect(content: &str) -> Option<FactDefect> {
     if is_extraction_example(trimmed) {
         return Some(FactDefect::EchoedExample);
     }
-    // The date rule, in the one place that decides whether a fact is storable.
-    // It used to run BEFORE this function as a rewrite, and this rung was what
-    // caught whatever the rewrite missed; now there is no rewrite and this is
-    // the whole of it. See the long note above [`carries_calendar_date`].
     if carries_calendar_date(trimmed) {
         return Some(FactDefect::CalendarDate);
     }
-    // After the date rung, so a dated sentence is refused for the date rather
-    // than for how it ends. What this catches now is a model that stopped
-    // mid-sentence -- measured once in 432 replies, on a token limit.
+    // After the date rung, so a dated sentence is refused for its date, not its ending.
     if tokens.last().is_some_and(|(_, lower)| {
         DANGLING_TAIL_WORDS.contains(&lower.as_str())
             || DANGLING_TAIL_VERBS.contains(&lower.as_str())
@@ -525,12 +471,7 @@ pub fn fact_defect(content: &str) -> Option<FactDefect> {
     None
 }
 
-/// Words a finished sentence does not end on.
-///
-/// Copulas, prepositions, conjunctions and determiners — every one of them
-/// announces something that is not there. Kept deliberately short: every entry
-/// permanently discards a fact, and the only thing it has to catch is a reply
-/// that stopped before its own last word.
+/// Words a finished sentence does not end on. Keep it short: each entry discards facts for good.
 const DANGLING_TAIL_WORDS: &[&str] = &[
     "is", "are", "was", "were", "be", "been", "being", "am", "and", "or", "but", "of", "on", "in",
     "at", "to", "by", "with", "for", "from", "into", "the", "a", "an", "every", "each", "about",
@@ -538,17 +479,7 @@ const DANGLING_TAIL_WORDS: &[&str] = &[
     "before", "after",
 ];
 
-/// The same argument, one part of speech over: verbs a clause does not end on.
-///
-/// "The user's cat is called." is long enough, third person, self-contained,
-/// very nearly a sentence, and says nothing at all. Each of these exists only
-/// to introduce the word that is missing, so a clause ending on one has lost
-/// its content.
-///
-/// The sentence above is not hypothetical: it is what the date stripper stored
-/// when it read the cat's name, Midnight, as a time. The stripper is gone and
-/// the cat's name is kept whole now — `carries_calendar_date` does not treat
-/// "midnight" as a date at all — but a truncated reply still ends this way.
+/// Verbs a clause does not end on: each only introduces the word that is missing.
 const DANGLING_TAIL_VERBS: &[&str] = &[
     "called",
     "named",
@@ -560,57 +491,9 @@ const DANGLING_TAIL_VERBS: &[&str] = &[
 ];
 
 // ── Dates ───────────────────────────────────────────────────────────────────
-//
-// # Why there is no stripper here any more
-//
-// There used to be one. It read a note the model had written, decided which
-// words in it were a date, and rewrote the sentence without them. It was
-// widened four times, and each pass fixed its own list of probes and left a new
-// class of wreckage behind:
-//
-//   pass 1  "swims each Saturday morning"           -> "The user swims morning."
-//   pass 2  "prefers the 2019 model of the tractor" -> "The user prefers model of the tractor."
-//   pass 3  "keeps the oven at 180"                 -> "The user keeps the oven." + a reminder for 180
-//   pass 4  a damage gate that refused the mangles -- and refused 19 of 19
-//           clean strips along with them, because it could not tell a clean
-//           result from wreckage either
-//
-// That is not a bug that was four fixes away. Deciding which words in a
-// sentence are a date, and whether the sentence still says what it said once
-// they are gone, is a judgement about MEANING. A word list over whitespace
-// tokens cannot make it: "2019" is a date in "moved to Kisumu in 2019" and a
-// model number in "the 2019 model of the tractor", and nothing in the token
-// stream separates them. The thing that CAN separate them wrote the sentence.
-//
-// So the rewriting is gone and this is a DETECTOR: it answers yes or no, and a
-// note it says yes to is refused rather than repaired. A refused fact is still
-// in the conversation and can be extracted again; a repaired one is read back
-// to the household forever with a word missing from the middle of it.
-//
-// Two consequences worth stating, because they are what makes the detector
-// cheap enough to be safe:
-//
-//  - It only has to be right about whole sentences, never about spans. No
-//    contiguity walk, no lead-popping, no damage gate -- those existed to
-//    decide where an edit began and ended, and there is no edit.
-//  - A false positive now costs a good fact, so the rules are narrower than the
-//    stripper's were and fire only on shapes the local models were MEASURED to
-//    leak (432 live replies, six models): weekdays and months for an
-//    appointment, biographical and version years, clock times, relative days,
-//    numbered days of the month, counted stretches of time. A bare integer
-//    after "at" is NOT one of them -- that was the oven, and the six models
-//    return that sentence clean 36 times of 36 -- and neither is "midnight",
-//    which is a cat in this household, nor a modal "may".
-//
-// Two classes are still over-fired on, knowingly, and they are the boundary
-// this design draws rather than an edge nobody thought about. A year used as a
-// NAME -- "the 2019 model of the tractor" -- is refused alongside a year used
-// as a date, because `(19|20)\d\d` is all either of them looks like from here.
-// A digit ordinal naming a floor -- "on the 4th floor" -- is refused alongside
-// a day of the month, for the same reason. Each loses one true fact that is
-// still sitting in the conversation; storing either keeps something that reads
-// as a date for as long as the pond runs. The model is the only thing that
-// could draw those two lines, which is why the prompt asks it to.
+// Detect, never rewrite: whether a sentence survives losing its date is a question of meaning.
+// A false positive costs a good fact, so rules cover only shapes models were measured to leak.
+
 /// Month names and the abbreviations a model actually writes.
 const MONTH_WORDS: &[&str] = &[
     "january",
@@ -639,11 +522,7 @@ const MONTH_WORDS: &[&str] = &[
     "dec",
 ];
 
-/// "may" is a month and it is also a modal, and the modal is the commoner
-/// reading by far in a household's memories. It counts as a date only where a
-/// preposition or a day number has already fixed it as one — "in May", "3 May"
-/// — and never on its own, because "The user may travel to Kisumu" is a fact
-/// this pond refused for months and should not have.
+/// Usually the modal: a date only after a preposition or beside a day number ("in May", "3 May").
 const AMBIGUOUS_MONTH: &str = "may";
 
 const WEEKDAY_WORDS: &[&str] = &[
@@ -656,35 +535,20 @@ const WEEKDAY_WORDS: &[&str] = &[
     "sunday",
 ];
 
-/// Named stretches of the week, which are NOT days and never a date on their
-/// own: "The user works at the weekend" names nothing that can go stale.
-///
-/// They are here for the recurrence rules only, where their plural is a habit
-/// that marks itself -- "eats no meat on weekdays" -- and for "next weekend",
-/// which the relative-head rule reaches on its own.
+/// Parts of the week: never a date alone ("works at the weekend"), only part of a recurrence.
 const PERIOD_WORDS: &[&str] = &["weekday", "weekend"];
 
-/// Weekday abbreviations, kept OUT of [`WEEKDAY_WORDS`] on purpose.
-///
-/// "sat" is also a verb, "mar" is also a month abbreviation, "sun" is also a
-/// noun a household says every day. They are only consulted where something
-/// else has already fixed the reading: after "next" or "this", and inside the
-/// `from X to Y` recurrence frame, where the token on the other side of "to"
-/// is the disambiguator.
+/// Weekday abbreviations, kept out of [`WEEKDAY_WORDS`]: "sat" and "sun" are ordinary words.
+/// Consulted only where context fixes the reading ("next sat", "from Mon to Fri").
 const WEEKDAY_ABBREVIATIONS: &[&str] = &[
     "mon", "tue", "tues", "wed", "weds", "thu", "thur", "thurs", "fri", "sat", "sun",
 ];
 
-/// Single-word relative days.
-///
-/// "midnight" and "noon" are deliberately absent. Neither was ever measured
-/// leaking out of a model, both are ordinary English nouns, and one of them is
-/// a cat in this household — "The user's cat is called Midnight" is the exact
-/// fact the old relative-time list destroyed.
+/// Single-word relative days; not "midnight"/"noon", ordinary nouns models never leaked.
 const RELATIVE_WORDS: &[&str] = &["today", "tomorrow", "yesterday", "tonight", "overmorrow"];
 
-/// Words that turn a preceding "next", "last" or "this" into a date.
 const RELATIVE_HEADS: &[&str] = &["next", "last", "this", "coming", "past"];
+/// Words that turn a preceding "next", "last" or "this" into a date.
 const RELATIVE_TAILS: &[&str] = &[
     "week",
     "weekend",
@@ -702,11 +566,7 @@ const RELATIVE_TAILS: &[&str] = &[
 /// Prepositions that put a date after them.
 const DATE_PREPOSITIONS: &[&str] = &["on", "in", "at", "by", "since", "until", "till", "from"];
 
-/// Spelled days of the month.
-///
-/// Never consulted on its own: "first" is a date in "on the first" and is not
-/// one in "waters the beds first thing every morning", and "the second of four"
-/// is birth order. What decides it is the words either side.
+/// Spelled days of the month; a date only by the words either side ("on the first").
 const ORDINAL_WORDS: &[&str] = &[
     "first",
     "second",
@@ -741,8 +601,7 @@ const ORDINAL_WORDS: &[&str] = &[
     "thirty-first",
 ];
 
-/// Spelled clock hours. A date only after a [`CLOCK_LEADS`] word: "at six" is a
-/// time, "has six chickens" is a count.
+/// Spelled clock hours; a date only after a [`CLOCK_LEADS`] word ("at six", not "six chickens").
 const HOUR_WORDS: &[&str] = &[
     "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
     "twelve",
@@ -766,72 +625,41 @@ const CLOCK_LEADS: &[&str] = &[
     "at", "by", "around", "before", "after", "from", "until", "till",
 ];
 
-/// What leads into a counted stretch of time: "in three weeks" is a date,
-/// "works in three offices" is not.
+/// What leads into a counted stretch of time ("in three weeks", not "in three offices").
 const DURATION_LEADS: &[&str] = &["in", "within"];
 
 // ── Recurrence ──────────────────────────────────────────────────────────────
-/// Words that turn a named weekday, month or clock time into a pattern rather
-/// than a point on a calendar.
+
+/// Words that make a weekday, month or clock time a pattern, not a calendar point.
 const RECURRENCE_MARKERS: &[&str] = &["each", "every", "daily", "nightly", "weekly", "monthly"];
 
-/// What joins one item of a recurrence to the next: "each March and October",
-/// "from Monday to Friday". Only consulted immediately after a token already
-/// found to recur, so an ordinary "and" never drags a weekday into one.
+/// Joins recurrence items ("each March and October"); only read right after a recurring token.
 const RECURRENCE_CONNECTIVES: &[&str] = &["and", "or", "to", "through", "thru"];
 
-/// Whether this token names a weekday, a month, or a named stretch of the week.
-///
-/// The recurrence rules' notion of a calendar name, which is wider than the
-/// date rule's: "each weekend" is a pattern, and "the weekend" is not a date.
+/// Whether this token names a weekday, month or week-part (for the recurrence rules).
 fn is_calendar_name(lower: &str) -> bool {
     WEEKDAY_WORDS.contains(&lower) || MONTH_WORDS.contains(&lower) || PERIOD_WORDS.contains(&lower)
 }
 
-/// Whether this token names one day of the week or one month — the two that
-/// DO name a point on a calendar when nothing marks them as recurring.
+/// Whether this token names a weekday or month: a calendar point unless marked as recurring.
 fn is_day_or_month_name(lower: &str) -> bool {
     WEEKDAY_WORDS.contains(&lower) || MONTH_WORDS.contains(&lower)
 }
 
-/// The same, plus the abbreviations — only where the caller has already fixed
-/// the reading. See [`WEEKDAY_ABBREVIATIONS`].
+/// `is_calendar_name` plus [`WEEKDAY_ABBREVIATIONS`], for callers that already fixed the reading.
 fn is_calendar_name_or_abbrev(lower: &str) -> bool {
     is_calendar_name(lower) || WEEKDAY_ABBREVIATIONS.contains(&lower)
 }
 
-/// A weekday or month written plural: "Saturdays", "weekdays".
-///
-/// A plural weekday cannot name one day. It is a recurrence by its own grammar,
-/// which is why it needs no marker in front of it.
+/// A plural calendar name ("Saturdays", "weekdays"), which recurs without a marker.
 fn is_plural_calendar_name(lower: &str) -> bool {
     lower
         .strip_suffix('s')
         .is_some_and(|stem| stem.len() > 3 && is_calendar_name(stem))
 }
 
-/// Which token positions name a weekday or month that RECURS.
-///
-/// This is the distinction that survives the stripper, because it is not about
-/// editing at all: it is the line between a habit and an appointment. "The user
-/// swims each Saturday morning" names no day on any calendar — there is nothing
-/// to put in a diary and nothing in it can become false — and it is precisely
-/// what the `routine` kind exists to capture. "The user has a dentist
-/// appointment next Tuesday" names one day, is unrecoverable once the
-/// conversation is gone, and is wrong by the following week.
-///
-/// The models will not drop these. The shipped model and the larger one kept
-/// the weekday in all 12 recurring windows between them -- 6 of 6 each, at
-/// greedy and at both seeds -- and granite did the same. A detector that called
-/// those a date would refuse every one of them and delete the habit, so the
-/// prompt asks for the timing to stay and this is where the gate agrees.
-///
-/// Four shapes: marked ("each Saturday"), plural ("on Saturdays"), a span
-/// ("from Monday to Friday"), and a continuation ("each March and October").
-///
-/// NOT a recurrence: a numbered day of the month, even a repeating one ("the
-/// 1st of every month"). That is the day a reminder is set for, and the number
-/// is the whole content of it.
+/// Which token positions name a weekday or month that recurs: a habit, not an appointment.
+/// A numbered day never recurs, even "the 1st of every month": that is a reminder's day.
 fn recurrence_positions(words: &[String]) -> Vec<bool> {
     let mut out = vec![false; words.len()];
     let at = |j: usize| words.get(j).map(String::as_str);
@@ -855,9 +683,7 @@ fn recurrence_positions(words: &[String]) -> Vec<bool> {
             out[i] = true;
             continue;
         }
-        // "from Monday to Friday", "Mon to Fri". The frame is what makes an
-        // abbreviation readable, so both sides are checked before either is
-        // accepted.
+        // "from Monday to Friday", "Mon to Fri": the frame is what makes an abbreviation safe.
         if at(i + 1) == Some("to") && at(i + 2).is_some_and(is_calendar_name_or_abbrev) {
             out[i] = true;
             out[i + 2] = true;
@@ -873,13 +699,7 @@ fn recurrence_positions(words: &[String]) -> Vec<bool> {
     out
 }
 
-/// Whether the sentence describes something that happens again and again.
-///
-/// Used only to spare a CLOCK TIME inside a habit: "drinks chai at six every
-/// morning" is a routine whose six o'clock is part of the pattern, not an
-/// appointment, and the shipped model leaks exactly this shape on 3 windows of
-/// 3. A specific date in the same sentence is still a date — nothing about
-/// "every" makes "3 November 2027" repeat.
+/// Whether the sentence is a habit; used only to spare clock times ("chai at six every day").
 fn is_habitual(words: &[String], recurring: &[bool]) -> bool {
     recurring.iter().any(|r| *r)
         || words
@@ -888,17 +708,7 @@ fn is_habitual(words: &[String], recurring: &[bool]) -> bool {
 }
 
 /// Whether a note carries a calendar date, and therefore cannot be stored.
-///
-/// The whole date rule, in one answer. Nothing edits the sentence: the caller
-/// refuses it or keeps it exactly as the model wrote it.
-///
-/// Conservative by construction — every `true` here permanently discards a fact
-/// the model thought was worth remembering — so each rule below is anchored to
-/// a shape that was measured coming out of a local model with a date in it, and
-/// the ambiguous readings a household actually produces (a temperature after
-/// "at", a floor number, a version year, birth order, a cat called Midnight)
-/// are left alone on purpose. Each of those has a fixture in
-/// `memory_reachability_corpus` naming it.
+/// Each `true` discards a fact, so rules match only shapes models were measured to leak.
 pub fn carries_calendar_date(content: &str) -> bool {
     let raw: Vec<&str> = content.split_whitespace().collect();
     let words: Vec<String> = raw.iter().map(|w| bare_token(w)).collect();
@@ -915,12 +725,10 @@ pub fn carries_calendar_date(content: &str) -> bool {
         let next2 = words.get(i + 2).map(String::as_str);
         let prev_in = |set: &[&str]| prev.is_some_and(|p| set.contains(&p));
         let next_in = |set: &[&str]| next.is_some_and(|n| set.contains(&n));
-        // Whether this token ends its clause: "on the fourteenth." is a date,
-        // "the fourteenth row" modifies a noun.
+        // Clause-final: "on the fourteenth." is a date, "the fourteenth row" is not.
         let closes = raw[i].ends_with(['.', ',', ';', ':', '!', '?']) || i + 1 >= raw.len();
 
-        // A weekday or month that does not recur. The appointment class, and
-        // the one every model leaks.
+        // A non-recurring weekday or month: an appointment.
         if is_day_or_month_name(w)
             && (w != AMBIGUOUS_MONTH
                 || prev_in(DATE_PREPOSITIONS)
@@ -936,40 +744,29 @@ pub fn carries_calendar_date(content: &str) -> bool {
         if RELATIVE_HEADS.contains(&w) && next.is_some_and(is_relative_tail) {
             return true;
         }
-        // A year, a decade, an ISO or slash date. The one place the detector
-        // knowingly over-fires: a year used as a name is refused with the rest.
+        // A year, decade, ISO or slash date; knowingly over-fires on a year used as a name.
         if is_year_like(w) || is_numeric_date_group(w) {
             return true;
         }
-        // A numbered day of the month: "the 1st", "on the 14th", and "3
-        // November" where only the month says what the number is.
+        // A numbered day: "on the 14th", or "3 November" where the month says what 3 is.
         if is_numeric_ordinal(w) || (is_day_number(w) && next_in(MONTH_WORDS)) {
             return true;
         }
-        // A spelled day of the month: "on the fourteenth", "the third of May".
-        // Gated on both sides, because the bare word is far commoner as an
-        // ordinary ordinal — "the second of four" is birth order.
+        // A spelled day ("the third of May"); gated both sides, as bare ordinals are commoner.
         if ORDINAL_WORDS.contains(&w)
             && (prev_in(DATE_PREPOSITIONS) || prev == Some("the"))
             && (closes || (next == Some("of") && next2.is_some_and(|n| MONTH_WORDS.contains(&n))))
         {
             return true;
         }
-        // "in three weeks", "within 10 days" — a stretch of calendar time,
-        // which is a date said relatively.
+        // "in three weeks", "within 10 days": a date said relatively.
         if (HOUR_WORDS.contains(&w) || is_all_digits(w))
             && prev_in(DURATION_LEADS)
             && next_in(DURATION_UNITS)
         {
             return true;
         }
-        // Clock times, last, and skipped entirely inside a habit.
-        //
-        // A bare integer is NEVER one of these. "The user keeps the oven at
-        // 180" was read as six past midnight by the rule this replaces, and the
-        // shipped models return that sentence clean on 36 windows of 36. A
-        // clock time here has to wear the morphology of one: a colon, a
-        // meridiem, an o'clock, or a spelled hour.
+        // Clock times go last, as a habit skips them; never a bare integer ("the oven at 180").
         if habitual {
             continue;
         }
@@ -988,10 +785,7 @@ pub fn carries_calendar_date(content: &str) -> bool {
     false
 }
 
-/// One token, lowercased, with the punctuation around it taken off.
-///
-/// Edge-only trimming, so the separators inside a date survive: "2027-11-03."
-/// loses its full stop and keeps its hyphens, and "09:00" keeps its colon.
+/// One token, lowercased, with only edge punctuation trimmed: "09:00" keeps its colon.
 fn bare_token(raw: &str) -> String {
     raw.trim_matches(|c: char| !c.is_alphanumeric())
         .to_lowercase()
@@ -1025,15 +819,8 @@ fn is_year_like(lower: &str) -> bool {
             .is_some_and(is_year)
 }
 
-/// A date written as numbers with separators: `2027-11-03`, `14/03/1984`,
-/// `03.11.2027`, `03/11/27`.
-///
-/// The class a whitespace tokeniser cannot otherwise reach — the whole date is
-/// one token. Narrow in the ambiguous direction: two numbers joined by a slash
-/// are a blood pressure or a score as often as a date, so a group counts only
-/// when it carries a four-digit year, or has three parts joined by a slash or a
-/// hyphen. `2019.1` is a version string and is left alone; a dot-separated date
-/// has all three parts.
+/// A numeric date in one token: `2027-11-03`, `14/03/1984`, `03.11.2027`, `03/11/27`.
+/// Needs a year or three parts: `120/80` is a blood pressure and `2019.1` a version.
 fn is_numeric_date_group(lower: &str) -> bool {
     for sep in ['-', '/', '.'] {
         if !lower.contains(sep) {
@@ -1053,12 +840,7 @@ fn is_numeric_date_group(lower: &str) -> bool {
     false
 }
 
-/// An ordinal written with digits: "3rd", "21st", "4th".
-///
-/// A floor and a placing in an exam are written this way too, and both are
-/// refused with the days of the month. That is the second place the detector
-/// knowingly over-fires, and it is the cheaper direction: "on the 4th" is a
-/// date in every household that has ever written it down.
+/// An ordinal in digits ("4th"); knowingly over-fires on floors and exam placings.
 fn is_numeric_ordinal(lower: &str) -> bool {
     lower
         .strip_suffix("st")
@@ -1085,9 +867,8 @@ fn is_clock_token(lower: &str) -> bool {
     false
 }
 
-/// Facts from the extraction prompt's worked example; only exact, case-insensitive echoes are
-/// refused. Empty because the prompt has no worked example. Keep the two in step: a prompt that
-/// gains one must list its output here (`the_prompt_and_the_echo_gate_agree_about_examples`).
+/// Outputs of the extraction prompt's worked example, refused on exact (case-insensitive) echo.
+/// Empty while the prompt has none; `the_prompt_and_the_echo_gate_agree_about_examples` pins it.
 pub const EXTRACTION_EXAMPLE_FACTS: &[&str] = &[];
 
 fn is_extraction_example(content: &str) -> bool {
@@ -1109,21 +890,8 @@ pub fn names_user(content: &str) -> bool {
     names_subject(content, &[])
 }
 
-/// Whether a fact names the person the window was about.
-///
-/// The widening [`names_user`] needed once the prompt stopped saying "the
-/// user". The batch prompt tells the model to write the subject BY NAME —
-/// "Jerry's sister is Amara" — and the literal-token test would have read every
-/// one of those as a fact about somebody else, demoting `relationship`,
-/// `preference` and `context` to `knowledge`: the exact bin the catalogue says
-/// the extractor may never produce.
-///
-/// `aliases` are the names the window's subject goes by. They are matched
-/// token-wise and case-insensitively, with a possessive tolerated, because a
-/// substring match on a short name finds it inside other words ("Al" inside
-/// "also"). The `user` tokens stay accepted whatever the aliases are: an
-/// unnamed pond still writes "the user", and the 379 rows already in the store
-/// were all written that way.
+/// Whether a fact names the window's subject, as "the user" or by one of `aliases`.
+/// Aliases match whole tokens, since a substring would find "Al" in "also".
 pub fn names_subject(content: &str, aliases: &[String]) -> bool {
     let tokens = split_tokens(content);
     tokens.iter().any(|(_, normalised)| {
@@ -1136,9 +904,7 @@ pub fn names_subject(content: &str, aliases: &[String]) -> bool {
             .or_else(|| normalised.strip_suffix("s'"))
             .unwrap_or(normalised);
         aliases.iter().any(|alias| {
-            // A multi-word alias ("Aunt Florence") is matched on its first
-            // word: `split_tokens` gives one token at a time, and a display
-            // name is identified by the part a sentence actually repeats.
+            // Multi-word aliases match on the first word, the part a sentence repeats.
             alias
                 .split_whitespace()
                 .next()
@@ -1148,17 +914,8 @@ pub fn names_subject(content: &str, aliases: &[String]) -> bool {
 }
 
 // ── Does a reminder cover this note ─────────────────────────────────────────
-/// Words that are common enough to appear in two unrelated sentences about one
-/// household, and so cannot be evidence that two of them are about one thing.
-///
-/// Short and deliberately conservative in the opposite direction from the date
-/// lists: an entry here can only ever cause a date to be counted LOST, and an
-/// over-count of loss is visible on the Memory panel and correctable. A missing
-/// entry is the bug this list exists to avoid -- a note reported as kept
-/// because it shared the word "plans" with a reminder about something else.
-///
-/// Nothing under four characters is here, because nothing under four characters
-/// is consulted: the length rule in [`is_distinctive_token`] drops those first.
+
+/// Words too common to show two notes share a subject; an entry can only make a date count LOST.
 const UNDISTINCTIVE_WORDS: &[&str] = &[
     "user",
     "have",
@@ -1258,16 +1015,7 @@ const UNDISTINCTIVE_WORDS: &[&str] = &[
 ];
 
 /// Whether a token could distinguish one note from another.
-///
-/// Three exclusions, each for its own reason:
-///  - anything a calendar name -- a weekday, a month, an ordinal, a duration
-///    unit, a relative day, a bare number. Every dated note and every reminder
-///    carries one, so sharing one says nothing: two unrelated appointments in
-///    one window are both "next Tuesday".
-///  - the subject's own aliases. The write gate REQUIRES a subject bin's note to
-///    name the subject, so "Jerry" is in almost every note this is asked about,
-///    and reminders name them too.
-///  - words too common to mean anything, and words too short to be safe.
+/// Calendar words and the subject's aliases can't: nearly every note and reminder has them.
 fn is_distinctive_token(lower: &str, aliases: &[String]) -> bool {
     if lower.len() < 4 || lower.chars().all(|c| c.is_ascii_digit()) {
         return false;
@@ -1301,8 +1049,7 @@ fn is_distinctive_token(lower: &str, aliases: &[String]) -> bool {
     })
 }
 
-/// The distinctive words of a sentence, singularised so "tractors" and
-/// "tractor" are one word.
+/// A sentence's distinctive words, singularised so "tractors" matches "tractor".
 fn distinctive_tokens(content: &str, aliases: &[String]) -> Vec<String> {
     split_tokens(content)
         .into_iter()
@@ -1311,53 +1058,12 @@ fn distinctive_tokens(content: &str, aliases: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Whether a stored reminder is plausibly ABOUT this refused note.
-///
-/// # Why this exists
-///
-/// A dated note is refused whole and the date survives only as a reminder, so
-/// "was this date kept" is a question about ONE note, not about the window it
-/// arrived in. The window test it replaces read "some reminder landed" and
-/// applied that to every dated note in the window: two dated notes and one
-/// reminder reported both as kept, and the second date left the pond with every
-/// counter reading clean.
-///
-/// # What the rule is
-///
-/// One shared distinctive word. The reminder's `about` text and the note are
-/// each reduced to their content words -- calendar names, the subject's own
-/// names, common words and anything under four characters removed -- and the
-/// note is covered when any survives in both.
-///
-/// # What it can and cannot do
-///
-/// It CAN tell apart two dated notes in one window that are about different
-/// things, which is the whole failure it was written for: "the dentist" does
-/// not cover "collecting the tractor on 3 March".
-///
-/// It CANNOT do any of these, and none of them is a bug to be fixed here:
-///  - **Synonyms and paraphrase.** A reminder about "the surgery" does not
-///    cover a note about "the dentist". This under-counts: the date IS in the
-///    store and the pond reports it lost. That is the deliberate direction --
-///    an over-count of loss is a visible banner, an under-count is the silent
-///    discard being fixed.
-///  - **Two events sharing a noun.** "service the tractor" covers "collecting
-///    the tractor on 3 March", because one shared noun is all this can see.
-///    That is the one direction it over-reports, and it needs a window
-///    containing two different dated events about the same object.
-///  - **Morphology beyond a plural `s`.** "collecting" and "collect" are two
-///    words to it.
-///
-/// Matching by wording is exactly the judgement the date word lists kept
-/// getting wrong, which is why this is a coarse overlap test with the
-/// uncertainty resolved towards LOST, and never an attempt to read the
-/// sentence.
+/// Whether a stored reminder is plausibly about this refused note: one shared distinctive word.
+/// Coarse on purpose, erring toward "lost": a synonym ("surgery" for "dentist") won't match.
 pub fn reminder_covers_note(about: &str, note: &str, subject_aliases: &[String]) -> bool {
     let note_words = distinctive_tokens(note, subject_aliases);
     if note_words.is_empty() {
-        // Nothing to match on. A note made entirely of a name and a date is a
-        // note this cannot connect to anything, and the honest answer is that
-        // the date was not shown to be kept.
+        // Nothing to match on (only a name and a date), so the date isn't shown to be kept.
         return false;
     }
     let about_words = distinctive_tokens(about, subject_aliases);
@@ -1874,8 +1580,6 @@ mod tests {
         ("Our dog is called Rex.", FactDefect::FirstPerson),
         ("Tea.", FactDefect::TooShort),
         ("   ", FactDefect::TooShort),
-        // The last-resort date rung. These reach `fact_defect` only when the
-        // caller forgot to strip first, which is the case it exists for.
         (
             "The user's dentist appointment is on Tuesday.",
             FactDefect::CalendarDate,
@@ -2037,12 +1741,6 @@ mod tests {
 
     // ── Dates ────────────────────────────────────────────────────────────
 
-    /// The dated shapes the local models were MEASURED to write into a note.
-    ///
-    /// Six models, 432 live replies through this prompt and this parser. Every
-    /// row here is a class that came back with a date in the `note` field, and
-    /// every one of them is refused whole -- the sentence is never edited, so
-    /// there is nothing to check about what survived.
     #[test]
     fn the_dated_shapes_the_models_actually_write_are_refused() {
         for note in [
@@ -2085,15 +1783,6 @@ mod tests {
         }
     }
 
-    /// A recurrence is a habit, and it reaches the store as the model wrote it.
-    ///
-    /// This is the half the stripper destroyed four times over: "swims each
-    /// Saturday morning" became "The user swims morning." A weekday inside a
-    /// pattern names no day on any calendar -- there is nothing to diary and
-    /// nothing in it can become false -- and the models keep writing it that
-    /// way: 12 recurring windows of 12 across the shipped model and the larger
-    /// one, at greedy and at both seeds. So the prompt asks for the timing to
-    /// be kept, and the gate keeps it.
     #[test]
     fn a_recurrence_is_a_habit_and_is_never_refused() {
         for note in [
@@ -2105,8 +1794,7 @@ mod tests {
             "The user works at the weekend.",
             "The user plants maize in the long rains each March and October.",
             "The user is at the workshop from Monday to Friday.",
-            // The clock time belongs to the habit too, and the shipped model
-            // writes this shape on 3 windows of 3.
+            // The clock time belongs to the habit too.
             "The user runs the Jarida standup every Monday at 09:00.",
             "The user drinks chai at six each morning.",
         ] {
@@ -2123,25 +1811,19 @@ mod tests {
         }
     }
 
-    /// The numbers and names a household writes that are NOT dates.
-    ///
-    /// Every row here was being MANGLED into the store by one of the four
-    /// stripper passes, and each one is a false positive the detector must not
-    /// have: a false positive now costs the whole fact.
+    /// Numbers and names a household writes that are NOT dates.
     #[test]
     fn the_not_dates_the_stripper_kept_eating() {
         for note in [
-            // Pass 3: any number after "at" at a clause end was a clock hour,
-            // and nothing capped it at 24. The six models return these clean
-            // on 36 windows of 36.
+            // A bare number after "at" is not a clock hour.
             "The user keeps the oven at 180.",
             "The user sets the thermostat at 21.",
             "The user keeps the tyres at 40 psi.",
-            // A relative-time word list ate the cat.
+            // A cat's name, not a time.
             "The user's cat is called Midnight.",
             // The modal, which a word list reads as the month of May.
             "The user may travel to Kisumu.",
-            // Birth order, which the ordinal rule took as a day of the month.
+            // Birth order, not a day of the month.
             "The user's daughter Amara is the second of four.",
             // Two numbers and a slash, with no year in them.
             "The user's blood pressure runs 120/80.",
@@ -2164,23 +1846,7 @@ mod tests {
         }
     }
 
-    /// The boundary this change draws on purpose, written down where it will be
-    /// found.
-    ///
-    /// A year used as a name is refused along with a year used as a date. From
-    /// inside a token stream "the 2019 model of the tractor" and "moved to
-    /// Kisumu in 2019" are the same four digits, and the pass that tried to
-    /// separate them stored "The user prefers model of the tractor."
-    ///
-    /// The same goes for a digit ordinal: "on the 4th floor" and "on the 4th"
-    /// are one shape.
-    ///
-    /// Both are refusals of a true fact, and both are cheaper than the
-    /// alternative: the fact is still in the conversation and can be extracted
-    /// again, while a stored year is read back for as long as the pond runs.
-    /// The model is the only thing that could tell these apart, which is what
-    /// the prompt now asks it to do -- it is measured putting the specific date
-    /// in `reminders` on 31 of its 36 dated windows, and losing no date at all.
+    /// Deliberate over-fire: a year or digit ordinal that isn't a date looks exactly like one.
     #[test]
     fn the_year_that_is_a_name_is_refused_with_the_year_that_is_a_date() {
         for note in [
@@ -2198,11 +1864,6 @@ mod tests {
         }
     }
 
-    /// Nothing about the detector edits anything.
-    ///
-    /// The property the whole change is for, asserted as a property rather than
-    /// left as a description: the gate's only output is yes or no, and what the
-    /// caller stores is the model's own sentence.
     #[test]
     fn the_gate_returns_a_verdict_and_never_a_sentence() {
         let note = "The user runs the Jarida standup every Monday at 09:00.";
@@ -2244,8 +1905,6 @@ mod tests {
 
     #[test]
     fn a_reminder_about_something_else_covers_nothing() {
-        // The measured case: one window, two dated notes, one reminder. The
-        // tractor date is not in the store and must not be reported as kept.
         assert!(!reminder_covers_note(
             "the dentist",
             "Jerry is collecting the tractor on 3 March.",
@@ -2255,8 +1914,6 @@ mod tests {
 
     #[test]
     fn a_shared_date_alone_is_not_a_match() {
-        // Two different Tuesday appointments share every word this could match
-        // on except the one that matters.
         assert!(!reminder_covers_note(
             "the dentist on Tuesday",
             "Jerry sees the farrier next Tuesday.",
@@ -2266,8 +1923,6 @@ mod tests {
 
     #[test]
     fn the_subjects_own_name_is_not_a_match() {
-        // Every note in a subject bin names the subject -- the write gate
-        // requires it -- so a name can never be the evidence.
         assert!(!reminder_covers_note(
             "Jerry",
             "Jerry is collecting the tractor on 3 March.",
@@ -2286,8 +1941,7 @@ mod tests {
 
     #[test]
     fn a_paraphrase_is_reported_as_uncovered() {
-        // Documented limit, asserted so it stays a known shape rather than a
-        // surprise: this under-reports keeping, never over-reports it.
+        // A known limit, pinned on purpose.
         assert!(!reminder_covers_note(
             "the surgery",
             "Jerry has a dentist appointment next Tuesday.",

@@ -1,15 +1,4 @@
-// ────────────────────────────────────────────────────────────
-// The notification feed, and what it is allowed to remember.
-//
-// Seven fixtures used to be concatenated onto the live list unconditionally --
-// no environment gate, no offline branch -- so a household opening the bell saw
-// a front door "unlocked remotely at 8:14 AM", a driveway camera and a garage
-// door left open, presented as their own history under an "Earlier" heading.
-// Three of them were unread, which put "3 unread" in the header one tap after a
-// bell that showed no badge at all, because the badge counts real schedule
-// runs. The "Nothing here yet" empty state was unreachable in every
-// configuration this app could be in.
-// ────────────────────────────────────────────────────────────
+// The feed holds only real schedule runs: no fixtures, so its count matches the bell's badge.
 
 import { render, screen, cleanup } from "@testing-library/react";
 import { describe, expect, it, beforeEach, vi } from "vitest";
@@ -54,7 +43,6 @@ describe("what the feed will not remember", () => {
     expect(screen.getByText("You're all caught up")).toBeTruthy();
   });
 
-  /** The three that made the header disagree with the bell, by name. */
   it("invents no security, camera or battery events", () => {
     render(<NotificationsView />);
     expect(screen.queryByText("Front door unlocked")).toBeNull();
@@ -64,11 +52,7 @@ describe("what the feed will not remember", () => {
     expect(screen.queryByText("Earlier")).toBeNull();
   });
 
-  /**
-   * The header's count and the shell bar's badge read the same list now. The
-   * badge is `unreadRunCount` over `scheduleRuns`; anything else in this feed
-   * makes the two disagree in the same app at the same moment.
-   */
+  /** The bell's badge is `unreadRunCount` over `scheduleRuns`; the header must count the same. */
   it("counts exactly the unread runs the bell counts", () => {
     appState.scheduleRuns = [
       run({ id: "r1", read: false }),
@@ -86,7 +70,6 @@ describe("what the feed will not remember", () => {
     expect(screen.queryByText("Nothing here yet")).toBeNull();
   });
 
-  /** Offline is empty, not furnished. */
   it("stays empty when the server is unreachable", () => {
     appState.serverOnline = false;
     render(<NotificationsView />);

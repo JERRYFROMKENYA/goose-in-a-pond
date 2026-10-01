@@ -20,6 +20,9 @@ pub trait VoiceOutput: Send + Sync {
     /// Clearing per utterance would forget a barge-in during sentence one by sentence two.
     fn begin_utterance(&self) {}
 
+    /// The turn `begin_utterance` began is over, however it ended.
+    fn end_utterance(&self) {}
+
     /// Stop playback now (wake-word barge-in); must be safe when nothing is playing.
     fn stop_speaking(&self) {}
 

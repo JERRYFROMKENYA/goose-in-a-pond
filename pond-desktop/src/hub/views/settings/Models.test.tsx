@@ -28,14 +28,11 @@ const MODELS = [
 
 const ROLES = { chat: { provider: "gguf", model: "gemma-4-E2B-it-Q4_K_M" }, tool: null, asr: null, tts: null, embedding: null };
 
-/** Draw-only settings reply -- the fields this view actually reads. */
 function modelsSettings(overrides: Record<string, unknown> = {}) {
   return { ...overrides };
 }
 
-// Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-// so the Speed card these tests drove is commented out; they are kept, commented, to restore
-// with it.
+// Commented out with the Speed card (speculative decoding left the engine); restore with it.
 // async function renderModels() {
 //   render(<ModelsDetail go={() => {}} />);
 //   await screen.findByText("Language models");
@@ -76,9 +73,7 @@ describe("Hub Models, while speculative decoding is out of the engine", () => {
   });
 });
 
-// Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-// so the Speed card these tests drove is commented out; they are kept, commented, to restore
-// with it.
+// Commented out with the Speed card (speculative decoding left the engine); restore with it.
 // // The hub Toggle seeds its own state from its `on` prop once (controls.tsx),
 // // and settings arrive a render after mount — these assert what is DRAWN
 // // after the async load, not merely that a control exists. Same regression

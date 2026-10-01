@@ -11427,6 +11427,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "aws-lc-rs",
  "axum 0.8.9",
  "base64 0.22.1",
  "chrono",
@@ -11436,6 +11437,7 @@ dependencies = [
  "if-addrs 0.13.4",
  "image 0.25.10",
  "include_dir",
+ "jsonwebtoken",
  "libc",
  "mime_guess",
  "pond-adapters-caldav",
@@ -11443,6 +11445,7 @@ dependencies = [
  "pond-adapters-local-inference",
  "pond-adapters-ollama",
  "pond-adapters-weather",
+ "pond-apple-token",
  "pond-core",
  "pond-hf-cache",
  "pond-infra",
@@ -11463,6 +11466,17 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "pond-apple-token"
+version = "0.1.0"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "jsonwebtoken",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

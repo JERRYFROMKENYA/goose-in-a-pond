@@ -44,14 +44,8 @@ pub struct SqliteHandshakeAdapter {
 }
 
 impl SqliteHandshakeAdapter {
-    /// `spki_pin` is this server's own public-key pin, in `sha256/<base64>`
-    /// form, and it is what a client's channel binding is checked against.
-    ///
-    /// It is a required argument rather than a builder step because a forgotten
-    /// builder step would leave channel binding inert -- pairing would keep
-    /// working, and nothing would notice that the property had gone. A caller
-    /// with no TLS identity to name says so with `None`, which rejects any
-    /// client that claims a binding rather than ignoring it.
+    /// `spki_pin` is this server's key pin (`sha256/<base64>`), which channel bindings must match.
+    /// Required, not a builder step, so it can't be silently forgotten; `None` rejects any binding.
     pub fn new(pool: Pool<Sqlite>, spki_pin: Option<String>) -> Self {
         let hostname = hostname::get()
             .map(|h| h.to_string_lossy().to_string())
@@ -116,8 +110,7 @@ impl SqliteHandshakeAdapter {
             server_version: self.server_version.clone(),
             capabilities: self.capabilities.clone(),
             rejection_reason,
-            // Set only by the bound branch of `verify_handshake`; every other
-            // response has no transcript to prove anything over.
+            // Only `verify_handshake`'s bound branch has a transcript to prove over.
             server_proof: None,
         }
     }
@@ -283,9 +276,7 @@ impl Handshake for SqliteHandshakeAdapter {
     }
 
     async fn revoke_device(&self, device_id: &str) -> Result<u64> {
-        // Marked rather than deleted, like every other revocation here: the row
-        // is what `validate_token` reads, and a deleted row and an unknown
-        // token are indistinguishable to an auditor later.
+        // Marked, not deleted: to an auditor a deleted row looks like an unknown token.
         let revoked = sqlx::query(
             "UPDATE session_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL",
         )
@@ -297,9 +288,7 @@ impl Handshake for SqliteHandshakeAdapter {
     }
 
     async fn revoke_token(&self, token: &str) -> Result<()> {
-        // The route has already authenticated this token. A refresh may have rotated
-        // its row while durable network revocation was being queued. Revoke the
-        // device selected by that authenticated row, including any completed rotation.
+        // Revoke the token's device, so a rotation done while this was queued is revoked too.
         sqlx::query("UPDATE session_tokens SET revoked_at = ? WHERE device_id = (SELECT device_id FROM session_tokens WHERE token_hash = ?) AND revoked_at IS NULL")
             .bind(Self::now().to_rfc3339())
             .bind(Self::sha256_hex(token.as_bytes()))
@@ -335,11 +324,8 @@ impl Handshake for SqliteHandshakeAdapter {
     }
 
     async fn verify_handshake(&self, request: VerifyRequest) -> Result<HandshakeResponse> {
-        // 0. A client that names the key it pinned must have pinned THIS
-        //    server's. Checked before the challenge is consumed, so a client
-        //    that reached the wrong pond can simply start again once it has
-        //    the right pin; and checked at all, because a binding the server
-        //    ignored would be a binding an interceptor could strip.
+        // 0. A client naming a pinned key must have pinned ours. Checked before the challenge is
+        //    consumed, so a client at the wrong pond can retry with the right pin.
         if let Some(claimed) = request.channel_binding.as_deref() {
             let ours = self.spki_pin.as_deref();
             if ours != Some(claimed) {
@@ -403,9 +389,7 @@ impl Handshake for SqliteHandshakeAdapter {
             return Ok(self.reject("no_active_pairing_code"));
         }
 
-        // The plaintext rides out with the hash: the server proof below is
-        // keyed by the same code, and re-reading the cache to find it again
-        // would be a second chance to pick a different one.
+        // Keep the plaintext with its hash: the server proof must be keyed by this same code.
         let mut matched: Option<(String, String)> = None;
         {
             let cache = ISSUED_CODE_CACHE.read().await;
@@ -489,11 +473,8 @@ impl Handshake for SqliteHandshakeAdapter {
             expires_at = %expires.to_rfc3339(),
             "device paired (two-phase handshake)"
         );
-        // The other half of the binding: a client that named a key gets back a
-        // proof over the same transcript, which only something holding the
-        // pairing code can produce. Without it, an interceptor that terminated
-        // the client's TLS could invent an acceptance and a token of its own,
-        // and the phone would be paired with the interceptor.
+        // A bound client gets a proof over the same transcript, keyed by the pairing code, so a
+        // TLS-terminating interceptor can't fake an acceptance.
         let server_proof = request.channel_binding.as_deref().and_then(|spki| {
             pair_mac(
                 code_plaintext.as_bytes(),
@@ -742,9 +723,8 @@ mod tests {
         .unwrap()
     }
 
-    /// The MAC a client computes when it bound the channel -- the same shape
-    /// the app computes, spelled out here rather than reusing `pair_mac`, so a
-    /// change to the transcript has to be made twice to go unnoticed.
+    /// A bound client's MAC as the app computes it, written out rather than calling `pair_mac`
+    /// so a transcript change must be made twice to go unnoticed.
     fn bound_client_mac(code: &str, challenge_b64: &str, client_id: &str, spki: &str) -> String {
         let challenge = B64.decode(challenge_b64.as_bytes()).unwrap();
         let mut mac = HmacSha256::new_from_slice(code.as_bytes()).unwrap();
@@ -1333,12 +1313,7 @@ mod tests {
     }
 
     // ---- Channel binding -------------------------------------------------
-    //
-    // The property these hold down: a phone that pinned the WRONG key ends
-    // pairing in a visible failure instead of a successful pair with whoever
-    // supplied that key. Without it, the pin has to reach the phone by a
-    // trustworthy route, which in practice meant somebody reading fifty-one
-    // characters of base64 off a dashboard and typing them without a slip.
+    // A phone that pinned the WRONG key must fail visibly, not pair with whoever served it.
 
     /// This pond's own pin, as `tls_identity::pin()` spells one.
     const OURS: &str = "sha256/TnkUsN+AaLec3BDTh/KUwSokXTmCq2+4rlfBnmJxPkE=";
@@ -1363,8 +1338,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The proof a client recomputes to satisfy itself it is talking to the
-    /// pond that holds the code, and not to something that terminated its TLS.
+    /// The proof a client recomputes to confirm it reached the pond holding the code.
     fn expected_server_proof(
         code: &str,
         challenge_b64: &str,
@@ -1413,9 +1387,7 @@ mod tests {
         );
     }
 
-    /// The case the binding exists for: something on the LAN answers as the
-    /// pond -- an mDNS reply is enough -- and offers its own key. The phone
-    /// pins it, and MACs over it.
+    /// Something on the LAN (an mDNS reply suffices) answers as the pond with its own key.
     #[tokio::test]
     async fn a_client_that_pinned_an_interceptors_key_cannot_pair() {
         let hs = fresh_pinned(OURS).await;
@@ -1437,9 +1409,7 @@ mod tests {
             Some("channel_binding_mismatch")
         );
 
-        // And the refusal costs the honest client nothing: the challenge is
-        // checked before it is consumed, so the same one still works once the
-        // phone is pointed at the real pond.
+        // The challenge wasn't consumed, so it still works against the real pond.
         let honest = hs
             .verify_handshake(VerifyRequest {
                 challenge_id: init.challenge_id,
@@ -1452,11 +1422,7 @@ mod tests {
         assert!(honest.accepted, "{:?}", honest.rejection_reason);
     }
 
-    /// The downgrade. An interceptor cannot pass the bound MAC, so the next
-    /// thing it would try is to drop the field and let the unbound branch take
-    /// the MAC instead. That branch computes a different transcript, and
-    /// computing either one needs the pairing code the interceptor does not
-    /// have.
+    /// Dropping the field sends a bound MAC to the unbound branch, whose transcript differs.
     #[tokio::test]
     async fn stripping_the_binding_off_a_bound_mac_does_not_downgrade_it() {
         let hs = fresh_pinned(OURS).await;
@@ -1476,10 +1442,7 @@ mod tests {
         assert_eq!(resp.rejection_reason.as_deref(), Some("invalid_mac"));
     }
 
-    /// A pond with no TLS identity has nothing to compare a claimed binding
-    /// against. Refusing is the narrowing answer; ignoring the claim would
-    /// make the field advisory, and an advisory binding is one an interceptor
-    /// can strip.
+    /// Ignoring the claim instead would make the binding advisory, and so strippable.
     #[tokio::test]
     async fn a_binding_claimed_against_a_pond_with_no_identity_is_refused() {
         let hs = fresh().await;
@@ -1502,12 +1465,7 @@ mod tests {
         );
     }
 
-    /// Removing a device has to remove its access.
-    ///
-    /// `session_tokens.device_id` carries no foreign key and nothing cascades
-    /// onto that table, so for as long as this did not exist, deleting a
-    /// `devices` row left every token it had been issued validating happily.
-    /// An operator removing a lost phone was told it was gone.
+    /// `session_tokens.device_id` has no foreign key, so nothing cascades from `devices`.
     #[tokio::test]
     async fn revoking_a_device_ends_every_session_it_holds() {
         let hs = fresh().await;
@@ -1525,8 +1483,7 @@ mod tests {
             hs.validate_token(&tablet).await.unwrap(),
             "revoking one device must not disconnect the household"
         );
-        // And the refresh token dies with it, or the phone simply mints a new
-        // session and the revocation lasts until the next expiry.
+        // The refresh token dies too, or the phone would just mint a new session.
         let refreshed = hs
             .refresh(RefreshRequest {
                 refresh_token: first.refresh_token.unwrap(),
@@ -1542,8 +1499,7 @@ mod tests {
     #[tokio::test]
     async fn revoking_a_device_with_no_sessions_is_not_an_error() {
         let hs = fresh().await;
-        // Idempotent, because the delete path calls it before dropping the row
-        // and a retried delete must not fail on the second attempt.
+        // Idempotent: the delete path calls it first, and a retried delete must not fail.
         assert_eq!(hs.revoke_device("never-paired").await.unwrap(), 0);
         let code = hs.issue_pairing_code().await.unwrap().code;
         assert!(pair(&hs, &code, "phone").await.accepted);
@@ -1551,14 +1507,8 @@ mod tests {
         assert_eq!(hs.revoke_device("phone").await.unwrap(), 0);
     }
 
-    /// The transcript, against vectors computed outside both implementations.
-    ///
-    /// These exact strings are asserted again in the app, in
-    /// `goose-on-the-go/services/__tests__/hmac.test.ts :: the pairing
-    /// transcript`. That is the point of them: the two sides compute the same
-    /// bytes in different languages, and a change to either that nobody carried
-    /// across shows up here as a failing vector rather than in the field as a
-    /// pairing that will not complete and says only `invalid_mac`.
+    /// Vectors computed outside both implementations; the app asserts the same strings in
+    /// `goose-on-the-go/services/__tests__/hmac.test.ts`, so keep the two in step.
     #[test]
     fn the_transcript_matches_the_app() {
         let challenge: Vec<u8> = (0u8..32).collect();
@@ -1577,17 +1527,14 @@ mod tests {
             mac(SERVER_LABEL, Some(spki)),
             "73171bac55bb3346045142bb0647057067d94712f5fab82d2260bf91c106ebe0",
         );
-        // The original shape, for a client older than the binding. It has to
-        // stay byte-for-byte what it was or every such client stops pairing.
+        // The unbound shape older clients compute; it must never change.
         assert_eq!(
             mac(CLIENT_LABEL, None),
             "b922abd25f5f1519c9d0f8ccabab4ed17b3e888a3b868be9cfdc320de017ec30",
         );
     }
 
-    /// The dashboard pairs over loopback HTTP, where there is no certificate to
-    /// bind to and nothing in the middle to bind against. It keeps the original
-    /// transcript, and gets no proof back because there is none to make.
+    /// The dashboard pairs over loopback HTTP: no certificate to bind, so no proof comes back.
     #[tokio::test]
     async fn an_unbound_client_still_pairs_with_a_pinned_pond() {
         let hs = fresh_pinned(OURS).await;

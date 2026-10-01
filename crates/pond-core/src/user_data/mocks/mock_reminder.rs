@@ -1,14 +1,5 @@
 //! In-memory [`ReminderRepository`], and a broken one.
-//!
-//! The dedup rule here is a deliberate twin of the UNIQUE constraint in
-//! migration 0057: same window, same `reminder_dedup_key`, no second row. These
-//! two must agree or every mock-backed test is testing a fiction — the same
-//! contract `mock_memory`'s `scope_matches` holds against `sqlite_memory`'s
-//! `scope_sql`.
-//!
-//! [`FailingReminderRepository`] exists because a store that cannot be made to
-//! fail cannot show that a failure is counted, and "the date is lost" is the one
-//! outcome here that has to be visible rather than merely handled.
+//! Dedup must match migration 0057's UNIQUE constraint on window and `reminder_dedup_key`.
 
 use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::reminder::{CapturedReminder, ReminderDisposition};
@@ -28,15 +19,13 @@ impl MockReminderRepository {
         Self::default()
     }
 
-    /// Everything the store is holding, in the order it was written.
+    /// Every row held, in write order.
     pub fn rows(&self) -> Vec<CapturedReminder> {
         self.rows.lock().unwrap().clone()
     }
 }
 
-/// The SQL adapter's scope predicate, restated for the in-memory rows. It has
-/// to match, or a mock-backed test would pass on a read the real store refuses
-/// -- or, worse, the other way round.
+/// The SQL adapter's scope predicate, restated for in-memory rows; the two must agree.
 fn in_scope(scope: &ProfileScope, row_owner: Option<&str>) -> bool {
     match scope {
         ProfileScope::Owner(id) => row_owner.is_none() || row_owner == Some(id.as_str()),
@@ -76,9 +65,7 @@ impl ReminderRepository for MockReminderRepository {
         Ok(pending)
     }
 
-    /// Only a PENDING row moves, matching the `AND disposition = 'pending'`
-    /// clause in `sqlite_reminder`. A mock that moved any row would let a test
-    /// prove a double-dismiss is harmless when against the real store it is not.
+    /// Only a pending row moves, matching `sqlite_reminder`'s `AND disposition = 'pending'`.
     async fn set_disposition(
         &self,
         id: &str,
@@ -101,10 +88,7 @@ impl ReminderRepository for MockReminderRepository {
     }
 }
 
-/// A reminder store that cannot write.
-///
-/// A full disk, a locked database, a table that never migrated. Whatever the
-/// cause, the engine's response has to be the same: count it and say so.
+/// A reminder store that cannot write; the engine must count the failure and say so.
 #[derive(Default)]
 pub struct FailingReminderRepository;
 

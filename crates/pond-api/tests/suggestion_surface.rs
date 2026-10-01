@@ -1,20 +1,4 @@
-//! The suggestion surface over HTTP.
-//!
-//! The claims that only a route can make, and that the pure tests in
-//! `pond_core::user_data::services::suggestion` cannot:
-//!
-//! 1. **It answers without a session.** This is the whole reason the route
-//!    exists beside `/proposals` rather than inside it: `state.sessionId` is
-//!    null on a cold desktop launch and is never persisted, so a surface that
-//!    requires one is blank on exactly the launch it was built to fill.
-//! 2. **It never 403s.** `/proposals` refuses a caller it cannot resolve to one
-//!    member, correctly, because a proposal is addressed. A suggestion is not.
-//! 3. **`considered` names every suggestor even when all of them are silent**,
-//!    so an empty column can be told apart from a broken engine -- which is the
-//!    state the proposal column has been in since it shipped.
-//! 4. **A multi-member pond with nobody identified is offered nothing
-//!    personal** -- and is still offered the house's own facts, so the guest
-//!    rule narrows the screen rather than emptying it.
+//! The suggestion route over HTTP: the claims the pure `suggestion` service tests can't make.
 
 use std::sync::Arc;
 
@@ -55,9 +39,7 @@ impl OnboardingRepository for CompletedOnboarding {
     }
 }
 
-/// A registry holding `n` devices, so the `devices_online` suggestor has
-/// something real to count. `NoDevices` would make every test of a firing
-/// suggestor pass for the wrong reason.
+/// Gives `devices_online` something real to count; `NoDevices` would make tests vacuous.
 struct SomeDevices(usize);
 
 #[async_trait::async_trait]
@@ -107,9 +89,7 @@ async fn make_app(device_count: usize) -> Harness {
     let pool = db.system.clone();
     let storage = Arc::new(SqliteSessionStorage::new(pool.clone()));
     let profiles = Arc::new(SqliteProfileRepository::new(pool.clone()));
-    // The real store, not `MockSettingsRepository`: the mock persists 23 of
-    // the 138 fields and silently drops the rest, so a test that flips
-    // `suggestion_generation_enabled` would read the default straight back.
+    // Not `MockSettingsRepository`: it persists few fields, not `suggestion_generation_enabled`.
     let settings = Arc::new(pond_infra::sqlite_settings::SqliteSettingsRepository::new(
         pool.clone(),
     ));
@@ -251,8 +231,7 @@ async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, Value) {
     (status, body)
 }
 
-/// A session bound to a member at `Explicit` strength -- what
-/// `PUT /sessions/{id}/user` writes, and the plainest way to be identified.
+/// A session bound to `profile_id` at `Explicit` strength, as `PUT /sessions/{id}/user` does.
 async fn session_of(h: &Harness, id: &str, profile_id: &str) -> String {
     use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
     use pond_core::user_data::ports::session_storage::SessionStorage;
@@ -271,11 +250,8 @@ async fn session_of(h: &Harness, id: &str, profile_id: &str) -> String {
     id.to_string()
 }
 
-/// A question composed from one member's own note, queued as the lane would.
-///
-/// The note goes into the real `memory_fragments` table, not the mock memory
-/// repository, because `offerable` joins it to decide the offer is still live
-/// -- a queued question whose note has gone is never shown.
+/// Queue a question composed from `member`'s own note, as the lane would.
+/// The note goes in the real `memory_fragments`: `offerable` joins it to check it's live.
 async fn compose_for(h: &Harness, member: &str, memory_id: &str, prompt: &str) {
     use pond_core::user_data::ports::suggestion_queue::SuggestionQueueRepository;
     use pond_core::user_data::services::suggestion_generation::GeneratedSuggestion;
@@ -335,7 +311,6 @@ fn considered(body: &Value) -> Vec<String> {
 
 // ── The claims ───────────────────────────────────────────────────────────────
 
-/// Claim 1 and 2. No `session_id` at all, and the route answers.
 #[tokio::test]
 async fn the_route_answers_with_no_session_at_all() {
     let h = make_app(19).await;
@@ -354,12 +329,9 @@ async fn the_route_answers_with_no_session_at_all() {
     );
 }
 
-/// Claim 3. Silence is enumerated rather than implied.
 #[tokio::test]
 async fn considered_names_every_suggestor_even_when_all_are_silent() {
-    // No extensions are installed on this harness, so every suggestion is
-    // dropped for having nothing that could answer it. That is the worst case
-    // for the record and therefore the right one to pin.
+    // No extensions on this harness, so every suggestor is silent: the worst case to pin.
     let h = make_app(0).await;
     let _jerry = member(&h, "Jerry").await;
 
@@ -384,8 +356,6 @@ async fn considered_names_every_suggestor_even_when_all_are_silent() {
     }
 }
 
-/// Claim 4. Two members and nobody identified: the house's facts, none of the
-/// person's.
 #[tokio::test]
 async fn a_multi_member_pond_is_offered_nothing_personal() {
     let h = make_app(19).await;
@@ -412,8 +382,7 @@ async fn a_multi_member_pond_is_offered_nothing_personal() {
     }
 }
 
-/// One member is the personal case, which is the whole point of gating on
-/// not-Guest rather than on Owner.
+/// The reason personal suggestions gate on not-Guest rather than on Owner.
 #[tokio::test]
 async fn one_member_is_the_personal_case_without_anyone_identifying_themselves() {
     let h = make_app(19).await;
@@ -428,8 +397,7 @@ async fn one_member_is_the_personal_case_without_anyone_identifying_themselves()
     );
 }
 
-/// The route must never refuse. `/proposals` answering 403 is what kept the
-/// Home column empty; this one has no audience to fail to resolve.
+/// Unlike `/proposals`, suggestions have no addressee to fail to resolve.
 #[tokio::test]
 async fn the_route_never_refuses_whoever_is_asking() {
     for members in 0..3 {
@@ -446,14 +414,7 @@ async fn the_route_never_refuses_whoever_is_asking() {
     }
 }
 
-/// One member must never be offered a question composed from another's note.
-///
-/// THE DEFECT: the route mapped every non-Guest caller to `Household`, whose
-/// read predicate is empty. `Household` is only ever RESOLVED on a pond of one,
-/// where it is that member -- but an identified member on a pond of two
-/// resolves to `Owner(them)`, which was widened to `Household` and read every
-/// member's rows. Liz's question, derived from Liz's private note, reached
-/// Jerry's screen with its "saved 3 days ago" reason attached.
+/// `Owner(them)` on a pond of two must not widen to `Household`, which reads every member.
 #[tokio::test]
 async fn an_identified_member_is_never_offered_another_members_composed_question() {
     let h = make_app(19).await;
@@ -477,11 +438,7 @@ async fn an_identified_member_is_never_offered_another_members_composed_question
     );
 }
 
-/// The control: the member the note belongs to IS offered it.
-///
-/// Without this the test above would pass for the wrong reason -- a queue this
-/// harness cannot read, an `offerable` join that finds no live note, a route
-/// that never serves the composed tier at all.
+/// Control: without it the test above passes if the composed tier is never served.
 #[tokio::test]
 async fn the_member_a_note_belongs_to_is_offered_the_question_composed_from_it() {
     let h = make_app(19).await;
@@ -500,12 +457,7 @@ async fn the_member_a_note_belongs_to_is_offered_the_question_composed_from_it()
     );
 }
 
-/// Nobody identified on a pond of two sees no composed question at all.
-///
-/// The existing multi-member test checks only the template tier's personal
-/// suggestors, every one of which is silent on this harness for its own reason
-/// (no calendar, no mail, a mock memory store) -- so it could not have caught
-/// a composed question leaking to the guest tier.
+/// The template-tier multi-member test can't catch this: its suggestors are all silent here.
 #[tokio::test]
 async fn nobody_identified_on_a_pond_of_two_is_offered_no_composed_question() {
     let h = make_app(19).await;
@@ -536,13 +488,7 @@ async fn nobody_identified_on_a_pond_of_two_is_offered_no_composed_question() {
     );
 }
 
-/// Switching "Suggest things to ask" off takes composed questions off Home at
-/// once, and switching it back on returns the same ones.
-///
-/// The toggle's own description promises "Off, Home still suggests -- but only
-/// the same general questions every day". It used to stop only NEW
-/// composition, so every question already queued stayed on screen -- the one
-/// thing a household turns it off to prevent.
+/// Off must hide already-queued composed questions too; back on returns the same ones.
 #[tokio::test]
 async fn turning_composed_suggestions_off_takes_the_queued_ones_off_home() {
     use pond_core::user_data::ports::settings::SettingsRepository;
@@ -552,8 +498,7 @@ async fn turning_composed_suggestions_off_takes_the_queued_ones_off_home() {
     let question = "What did I decide about the garden fence?";
     compose_for(&h, &jerry, "m-jerry-fence", question).await;
 
-    // On: the question is there. This is the control -- without it, "off shows
-    // nothing" would pass on a harness that never serves the composed tier.
+    // Control: without it, "off" would pass on a harness that never serves the composed tier.
     let (_, body) = get_json(&h.app, "/api/v1/suggestions").await;
     assert!(
         prompts(&body).iter().any(|p| p == question),
@@ -570,8 +515,7 @@ async fn turning_composed_suggestions_off_takes_the_queued_ones_off_home() {
         "off: a queued composed question is still on Home; body: {body}"
     );
 
-    // On again: the same question, not one rebuilt by a later pass -- the row
-    // was kept, which is what makes the switch reversible without a night.
+    // Same queued row, not a rebuild: back on needn't wait for another composition pass.
     let mut on = h.settings.get().await.unwrap();
     on.suggestion_generation_enabled = true;
     h.settings.update(&on).await.unwrap();

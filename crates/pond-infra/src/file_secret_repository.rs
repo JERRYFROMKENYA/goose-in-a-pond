@@ -177,6 +177,174 @@ impl SecretRepository for FileSecretRepository {
     }
 }
 
+/// The store read by a second process on the same data dir, which must never write it: nothing is
+/// created (no key), migrated or written, and every read is fresh from disk, so it sees what the
+/// pond's own [`FileSecretRepository`] wrote since. That one rewrites the whole file from its cache
+/// on every `set`, so a second writer would lose the other's changes.
+pub struct ReadOnlySecretStore {
+    data_dir: PathBuf,
+}
+
+impl ReadOnlySecretStore {
+    pub fn new(data_dir: &std::path::Path) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+        }
+    }
+
+    /// Everything in the store now; an absent or empty store is empty. Plaintext is read as it is:
+    /// migrating it is the pond's job.
+    fn read_all(&self) -> Result<HashMap<String, String>> {
+        let path = self.data_dir.join("secrets.json");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let text = raw.trim();
+        if text.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let json = if secret_crypto::looks_encrypted(text) {
+            let key_path = secret_crypto::key_path(&self.data_dir);
+            let key = secret_crypto::load_key(&key_path)?
+                .with_context(|| format!("{} does not exist", key_path.display()))?;
+            secret_crypto::decrypt(&key, text)?
+        } else {
+            text.to_string()
+        };
+        serde_json::from_str(&json).context("the secret store is not a JSON object of strings")
+    }
+}
+
+impl std::fmt::Debug for ReadOnlySecretStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadOnlySecretStore")
+            .field("data_dir", &self.data_dir)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl SecretRepository for ReadOnlySecretStore {
+    async fn get(&self, key: &str) -> Result<Option<String>> {
+        if let Ok(val) = std::env::var(key) {
+            return Ok(Some(val));
+        }
+        Ok(self.read_all()?.remove(key))
+    }
+
+    async fn set(&self, key: &str, _value: &str) -> Result<()> {
+        anyhow::bail!(
+            "refusing to write {key}: this process reads the secret store and never writes it"
+        )
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        anyhow::bail!(
+            "refusing to delete {key}: this process reads the secret store and never writes it"
+        )
+    }
+
+    async fn list_keys(&self) -> Result<Vec<String>> {
+        Ok(self.read_all()?.into_keys().collect())
+    }
+
+    async fn has(&self, key: &str) -> Result<bool> {
+        Ok(self.get(key).await?.is_some())
+    }
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn it_reads_what_the_pond_wrote_including_after_it_was_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pond = FileSecretRepository::new(tmp.path()).unwrap();
+        pond.set("GIAP_TEST_TOKEN", "first").await.unwrap();
+
+        let reader = ReadOnlySecretStore::new(tmp.path());
+        assert_eq!(
+            reader.get("GIAP_TEST_TOKEN").await.unwrap().as_deref(),
+            Some("first")
+        );
+
+        // The pond refreshes a token while the reader is alive: the reader sees the new one.
+        pond.set("GIAP_TEST_TOKEN", "refreshed").await.unwrap();
+        assert_eq!(
+            reader.get("GIAP_TEST_TOKEN").await.unwrap().as_deref(),
+            Some("refreshed")
+        );
+        assert!(reader.has("GIAP_TEST_TOKEN").await.unwrap());
+        assert_eq!(reader.get("GIAP_TEST_ABSENT").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn it_never_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pond = FileSecretRepository::new(tmp.path()).unwrap();
+        pond.set("GIAP_TEST_TOKEN", "kept").await.unwrap();
+        let before = std::fs::read(tmp.path().join("secrets.json")).unwrap();
+
+        let reader = ReadOnlySecretStore::new(tmp.path());
+        assert!(reader.set("GIAP_TEST_TOKEN", "overwritten").await.is_err());
+        assert!(reader.delete("GIAP_TEST_TOKEN").await.is_err());
+        assert_eq!(
+            std::fs::read(tmp.path().join("secrets.json")).unwrap(),
+            before,
+            "the store changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_data_dir_gets_no_key_and_no_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reader = ReadOnlySecretStore::new(tmp.path());
+        assert_eq!(reader.get("GIAP_TEST_TOKEN").await.unwrap(), None);
+        assert!(reader.list_keys().await.unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(tmp.path()).unwrap().count(),
+            0,
+            "reading created a file: the pond would then find a key it did not make"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plaintext_store_is_read_and_left_for_the_pond_to_migrate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("secrets.json");
+        std::fs::write(&store, r#"{"GIAP_TEST_LEGACY":"legacy-value"}"#).unwrap();
+
+        let reader = ReadOnlySecretStore::new(tmp.path());
+        assert_eq!(
+            reader.get("GIAP_TEST_LEGACY").await.unwrap().as_deref(),
+            Some("legacy-value")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&store).unwrap(),
+            r#"{"GIAP_TEST_LEGACY":"legacy-value"}"#,
+            "the reader migrated the store"
+        );
+        assert!(
+            !secret_crypto::key_path(tmp.path()).exists(),
+            "the reader made a key"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_store_without_its_key_is_an_error_not_an_empty_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pond = FileSecretRepository::new(tmp.path()).unwrap();
+        pond.set("GIAP_TEST_TOKEN", "locked away").await.unwrap();
+        std::fs::remove_file(secret_crypto::key_path(tmp.path())).unwrap();
+
+        let reader = ReadOnlySecretStore::new(tmp.path());
+        assert!(reader.get("GIAP_TEST_TOKEN").await.is_err());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

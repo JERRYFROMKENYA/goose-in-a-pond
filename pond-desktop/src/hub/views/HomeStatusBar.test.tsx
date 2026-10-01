@@ -1,15 +1,5 @@
-// Where the strip's items sit, not just that they render.
-//
-// This file exists because the one defect it pins was invisible to every
-// existing test: `DashboardGrid.test.tsx` asserts that `.hbar__temp` is absent
-// when weather is off and nothing else about this strip, so the arrange pill
-// could sit at the panel's far left -- stacked under the shell's hamburger, in
-// the one header position the design keeps empty -- through a green suite.
-//
-// Placement is the assertion, so these tests read the DOM's own ordering
-// rather than a class name. No CSS is loaded under happy-dom, so nothing here
-// can claim a pixel; what it can prove is which cluster owns which child, and
-// in what order, which is what the defect got wrong.
+// Where the strip's items sit. happy-dom loads no CSS, so these assert DOM order: which cluster
+// owns which child, and in what order.
 
 import { render, screen, cleanup } from "@testing-library/react";
 import { describe, expect, it, afterEach } from "vitest";
@@ -42,8 +32,7 @@ describe("HomeStatusBar placement (design 2a header)", () => {
   it("leaves the strip's left edge empty, where the shell's hamburger already is", () => {
     const { strip } = renderStrip(false);
 
-    // One cluster, and it is the right-hand one. A second child here is a
-    // control at x=20 directly beneath the shell bar's own left cluster.
+    // Only the right cluster: a left child would sit beneath the shell bar's own left cluster.
     expect(strip.children).toHaveLength(1);
     expect(strip.firstElementChild?.classList.contains("hbar__right")).toBe(true);
     expect(strip.querySelector(".hbar__left")).toBeNull();
@@ -70,8 +59,7 @@ describe("HomeStatusBar placement (design 2a header)", () => {
     expect(caption).not.toBeNull();
     expect(caption?.textContent).toContain("use the arrows to reorder");
 
-    // Immediately left of the pill, not a left-edge sibling of the cluster --
-    // the collision the pill itself was moved out of.
+    // Just left of the pill, not a left-edge sibling of the cluster.
     expect(strip.children).toHaveLength(1);
     expect(indexIn(right, caption)).toBeLessThan(
       indexIn(right, right.querySelector(".hbar__arrange")),

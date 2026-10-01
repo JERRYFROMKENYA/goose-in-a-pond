@@ -346,6 +346,91 @@ MCP connectivity probe).~~ *Superseded 2026-08-06 by P6a: five of the six are ga
 `UNGATED_SENDERS`; this is not done until that list is empty, and the cap is what stops it becoming
 a parking lot.
 
+**2026-09-29 -- the music player adds three outbound paths and one hole that is named, not closed.**
+None is a Rust sender, so none is in `EGRESS_TRACKED`; each is enforced another way.
+(1) *An extension's own calls.* `POST /api/v1/extension/egress` (internal token, loopback only) lets
+an extension ask the host before it sends: the host runs `check_egress_for` and records
+`egress.http` or `egress.denied` attributed to `giap-<extension>`. It is **opt-in for the extension**:
+the Apple provider asks; Spotify's `fetch` calls did not, so under Offline the Spotify extension was
+still not stopped. **Corrected later 2026-09-29: Spotify's calls now ask too** (see the last note in
+this list). (2) *The player window.* Chromium makes those requests, so the shell asks
+`POST /api/v1/player/egress-policy` once per host per minute, refuses a host it cannot ask about, and
+sends the origin only, never a path or query; the route is loopback-only and records under
+`giap-player`. Commands to the player follow the same mode, except that transport (pause, next,
+volume) is never refused: a policy that cannot stop music already playing is a bug.
+(3) **The Widevine module.** Chromium's component updater downloads and refreshes it from Google,
+outside both of the above, so **`network_mode = offline` does not stop it.** It is named here so it
+cannot become a footnote. The fix is to hold the updater until the setting allows it, and it is not
+built. Detail and the rest of the player's model: `docs/architecture/music-player.md`.
+**Superseded 2026-09-30:** the player is no longer in the app. It is a page the pond serves, in the
+person's own browser (the services document nothing else), so the app ships stock Electron with no
+Widevine module and hole (3) is gone. A browser offers no per-request filter to a page, so (2) is
+narrower now: the page asks `/player/egress-policy` before it loads a service's script, and under
+Offline loads nothing; what the service's script then fetches, the pond does not see. Spotify's token is
+`host_only` and no longer reaches the Music extension, because the assistant no longer controls
+Spotify (Spotify's Developer Policy III.3, Terms IV.2.a.i).
+
+**2026-09-29 (later) -- the pond can now call a Jarida-hosted host, and it is off until told to.**
+`pondcredentials` (`services/pondcredentials`) serves Apple Music developer tokens so a household
+needs no Apple key. A pond with no key of its own asks it, through `egress::begin_as(..,
+"giap-credentials")`: refused under Offline before anything is sent, and logged under that name. It
+calls about once a month (the token lives 30 days), sends no identifier and no body, and only when
+`POND_CREDENTIALS_URL` is set, which nothing sets by default **[superseded: see the note below, it is
+now on by default]**. What the host learns is that an address
+asked, at a time; the service keeps no address, and its proxy has no access log. What it cannot
+promise is what the hosting provider's network keeps. Whether Apple's terms allow one team's token to
+serve independent installations is unchecked and is a condition for turning it on.
+`docs/architecture/pondcredentials.md`.
+
+**2026-09-29 (later still) -- the credentials service is now ON BY DEFAULT, and calls more often than the note above said.**
+`DEFAULT_MANAGED_URL` is set to `https://credentials.jarida.io` (Jerry's decision). A pond with no key of
+its own now asks it without being told to. Two things the earlier note got wrong or left out. (1)
+*Frequency:* the pond's token cache is in memory, so it fetches **once per start of the pond**, not about
+monthly; a desktop app opened daily calls daily. (2) *Trigger:* the player window asks for the token as
+soon as it starts, **whether or not the household uses Apple Music**, and once it has one it loads
+Apple's MusicKit script from Apple's CDN. So every desktop pond contacts Jarida's host, then Apple's, at
+every start. Unchanged: the call goes through `egress::begin_as(.., "giap-credentials")` and shows in the
+egress log; `network_mode = offline` refuses it before anything is sent; a stored local key means it is
+never asked; nothing identifying is sent; the service keeps no address. **How to turn it off:**
+`POND_CREDENTIALS_URL=off`, or `network_mode = offline`; there is no UI switch (a household toggle was
+offered and declined for now). Not built, and worth building: asking only after someone presses Sign in
+(or has signed in before), and persisting the token across restarts. Apple's terms on sharing the token
+remain unanswered (section 2.8 of the developer agreement). `docs/architecture/pondcredentials.md`.
+
+**2026-09-29 (last) -- the credentials service is still on by default, but a pond now calls it only when someone wants Apple Music, and rarely.**
+This replaces the two paragraphs above on *when* a pond calls; everything else in them stands. (1)
+*Trigger:* Apple's adapter sleeps until a person presses **Sign in to Apple Music**, or has signed in in
+that window before. Until then no token is asked for, Apple's MusicKit script is not loaded, and nothing
+leaves the pond; the only thing asked is a probe of the pond itself, which never reaches the network. A
+household that never uses Apple Music never calls Jarida's host and never contacts Apple's. (2)
+*Frequency:* the token is kept in the pond's secret store (`APPLE_MUSIC_MANAGED_TOKEN`, a name only in
+`GET /secrets`; a developer token is public by design), so a restart reads it with no call; the pond asks
+again about every 24 days, or when the kept one is damaged, lapsed, or for another address. (3)
+*Verified in the real app,* on a scratch pond with the default and no key: no calls at launch; one press
+of Sign in gave one call to `credentials.jarida.io` and then Apple's hosts; a restart with no finished
+sign-in made none; a restart with a sign-in remembered made none to Jarida. Unchanged: the call goes
+through `egress::begin_as(.., "giap-credentials")`, is refused under Offline before it is sent, and shows
+in the egress log; `POND_CREDENTIALS_URL=off` turns it off; a stored local key means it is never asked;
+Apple's terms on sharing the token remain unanswered. A sign-in made before this change counts only once
+it is done again.
+
+**2026-09-29 (later still) -- Spotify gets the same gate, and a third-party script now sees the person's Spotify token.**
+(1) *Closed:* every call the Spotify extension makes to `api.spotify.com` asks `POST /extension/egress`
+first, the retry after a token refresh included, so `network_mode` and the Logs screen cover it as they
+do Apple's; a refusal is the host's own sentence and nothing is sent. The hole in the first player note
+above is closed for the extension. (2) *New:* the in-app Spotify player is a Web Playback SDK device, and
+the SDK signs in with the person's own access token. `GET /api/v1/player/user-token` gives it to the
+paired page (session only; an extension's internal token is refused), and Spotify's script, loaded from
+`sdk.scdn.co`, runs in that window with it. The extension already held the same token; what is new is a
+third party's code seeing it. Renewal goes through the same egress gate. No identifier is sent that was
+not already sent. (3) *Consequence for households:* the sign-in now asks for `streaming`,
+`user-read-email` and `user-read-private`, so everyone signs in to Spotify once more. (4) *Under
+`allowlist` or `offline` the in-app player is refused*, because Spotify's hosts are classed sensitive
+like Apple's; only `open` lets it run. (5) *Not settled:* Spotify's developer terms restrict ingesting
+Spotify Content into an AI model and limit the licence to private personal use; see "Spotify's terms" in
+`docs/architecture/music-player.md`. That predates this change and applies to the Spotify tools that
+already shipped.
+
 **A file-level guard is necessary and not sufficient, and P6a is where that stopped being a
 footnote.** `egress_tracked_files_reach_the_tracker` checks for ONE tracker symbol per FILE, so a
 file with several senders goes green on the first one gated. Three files in the list have more than

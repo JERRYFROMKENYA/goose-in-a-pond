@@ -28,17 +28,14 @@ pub trait Agent: Send + Sync {
         ModelCapabilities::default()
     }
 
-    /// Where picture support stands for `model` under `provider`, as a pure read: header, size
-    /// and sidecar at most, never a hash, a rename or a fetch, so a model list may call it per
-    /// row. `None` means this agent does not know, and callers fail open to the adapter's own
-    /// backstop rather than refuse on no information.
+    /// Picture support for `model`: a pure read (no hash, rename or fetch), safe per list row.
+    /// `None` means unknown; callers then fail open to the adapter's own backstop.
     fn vision_state(&self, _provider: &str, _model: &str) -> Option<EncoderState> {
         None
     }
 
-    /// A model just arrived (download finished) or became the active chat model: start
-    /// whatever it needs to be fully usable, such as its vision encoder, in the background.
-    /// Must return at once and never fail the caller; the default has nothing to prepare.
+    /// Start background prep (e.g. the vision encoder) for a just-downloaded or activated model.
+    /// Must return at once and never fail the caller.
     fn prepare_model(&self, _model: &str) {}
 
     /// Compact this session now, on the user's instruction; returns tokens retained if reported.
@@ -121,9 +118,7 @@ mod tests {
         );
     }
 
-    /// An agent that does not implement picture support reports "unknown", which the API passes
-    /// through, and has nothing to prepare. Reporting NotDeclared by default would refuse every
-    /// image on every backend that simply has not been taught the port.
+    /// Defaulting to NotDeclared would refuse every image on backends that lack the port.
     #[test]
     fn an_agent_that_does_not_report_vision_is_unknown_and_prepares_nothing() {
         let agent: Box<dyn Agent> = Box::new(NoSessionStoreAgent);

@@ -1,0 +1,22 @@
+# Its own workspace, on purpose: the pond's workspace pulls in the goose submodule and every native
+# engine, none of which a token service needs, and this has to build in a small Docker image with
+# only this directory copied in. `crates/pond-api` depends on `token` by path, so the pond and the
+# service sign with the same code.
+[workspace]
+resolver = "2"
+members = ["token", "server"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+rust-version = "1.91.1"
+license = "MIT"
+
+[workspace.dependencies]
+# jsonwebtoken 10 panics at the first sign unless exactly one crypto backend is on. aws_lc_rs, not
+# rust_crypto: the latter pulls in `rsa`, whose Marvin side channel (RUSTSEC-2023-0071) has no fix,
+# and the pond's audit exception rests on rsa never being linked. Kept identical to the pond's.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "aws_lc_rs"] }
+base64 = "0.22.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

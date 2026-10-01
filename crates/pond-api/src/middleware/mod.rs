@@ -199,16 +199,13 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::PUT, "/settings", Exposure::UntilOnboarded),
     // Warm-up banner during the wizard; afterwards `PondApiClient.get` sends the bearer token.
     (Method::GET, "/warmup", Exposure::UntilOnboarded),
-    // Local Piper, no user data. `playTtsSentence` (WebVoiceBackend.ts) and `fetch_tts_bytes`
-    // (audio_cmd.rs) call it tokenless over loopback; HostOnly keeps them and gates remote callers.
+    // Local Piper, no user data; `playTtsSentence` and `fetch_tts_bytes` call it tokenless.
     (Method::POST, "/tts", Exposure::HostOnly),
     // Wizard voice setup; afterwards PondApiClient.ts sends the token (verified, unlike /tts).
     (Method::POST, "/voice/tts/apply", Exposure::UntilOnboarded),
     (Method::POST, "/voice/calibrate", Exposure::UntilOnboarded),
     (Method::DELETE, "/voice/calibrate", Exposure::UntilOnboarded),
-    // Discovery needs system information before pairing. Test routes retain
-    // local compatibility; network callers must authenticate. Transcription
-    // and agent diagnostics are in the protected router.
+    // Discovery needs system info before pairing; transcription and diagnostics stay protected.
     (Method::GET, "/system/info", Exposure::Always),
     (Method::GET, "/test", Exposure::HostOnly),
     (Method::POST, "/test/speak", Exposure::HostOnly),
@@ -219,6 +216,13 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::GET, "/oauth/callback", Exposure::Always),
     // ...and extensions' refresh, checked against internal_extension_token in the handler.
     (Method::POST, "/oauth/refresh", Exposure::Always),
+    // The music player bridge. Extension subprocesses call the first three with the internal
+    // token, checked in the handler; the shell's main process, which holds no session, calls the
+    // last. HostOnly: every legitimate caller dials 127.0.0.1 by construction.
+    (Method::POST, "/player/command", Exposure::HostOnly),
+    (Method::GET, "/player/status", Exposure::HostOnly),
+    (Method::POST, "/extension/egress", Exposure::HostOnly),
+    (Method::POST, "/player/egress-policy", Exposure::HostOnly),
 ];
 
 /// Segment-wise route match; `{brace}` matches exactly one non-empty segment, never more.
@@ -245,8 +249,7 @@ fn path_matches(pattern: &str, path: &str) -> bool {
 
 /// This request's exposure class, or `None` when the route is not on the allowlist.
 fn route_exposure(method: &Method, path: &str) -> Option<Exposure> {
-    // Dashboard assets and development pages are local compatibility surfaces.
-    // A forwarding header cannot grant the actual peer this exemption.
+    // Dashboard and dev pages: tokenless only from loopback, never via a forwarding header.
     if !path.starts_with("/api/") {
         return Some(Exposure::HostOnly);
     }
@@ -324,8 +327,7 @@ pub async fn log_requests(req: Request, next: Next) -> Response {
     response
 }
 
-/// Global bearer-token authentication; `PUBLIC_ROUTES` entries bypass it only when their exposure
-/// admits this peer in the current onboarding state.
+/// Bearer-token auth; a `PUBLIC_ROUTES` entry skips it only if its exposure admits the peer.
 pub async fn auth_middleware(
     State(state): State<Arc<crate::AppState>>,
     headers: axum::http::HeaderMap,
@@ -342,8 +344,7 @@ pub async fn auth_middleware(
         .unwrap_or(false);
 
     if let Some(exposure) = route_exposure(req.method(), path.path()) {
-        // Only onboarding-dependent classes cost a database read. Static
-        // assets, health and local compatibility routes do not need one.
+        // Only onboarding-dependent classes read the database; the rest ignore `onboarded`.
         let onboarded = matches!(
             exposure,
             Exposure::UntilOnboarded | Exposure::UntilOnboardedThenHostOnly
@@ -383,11 +384,7 @@ pub async fn auth_middleware(
     // proof (`PairedDevice` beats face and explicit id). `device_rung_wiring.rs` guards this.
     let (mut principal, principal_device) = match state.handshake.caller_for_token(&token).await {
         Ok(Some(caller)) => {
-            // Copied out before the principal takes it, so `with_device` is
-            // still handed `caller.device_id` and nothing else.
-            // `device_rung_wiring` reads this line to prove that, and a clone
-            // inside the call is enough to fail it -- correctly, because the
-            // next thing to appear there would be a header.
+            // Cloned first: `device_rung_wiring` needs bare `caller.device_id` in the call below.
             let on_lan = caller.device_id.clone();
             (
                 Principal::token(caller.client_id).with_device(caller.device_id),
@@ -403,15 +400,7 @@ pub async fn auth_middleware(
         principal = principal.with_remote_addr(ci.0.to_string());
     }
 
-    // A device that authenticates from the household's own network has just
-    // proved it is still part of the household, which is what its remote access
-    // is renewed by. Recorded here because this is the one place that knows both
-    // facts at once: which device the token belongs to, and that the peer is on
-    // a directly attached LAN rather than the tailnet.
-    //
-    // Through an extension the server installs, so this crate keeps no knowledge
-    // of how presence is stored, and a build without the embedded network simply
-    // has nobody to tell.
+    // Authenticating from the household LAN, not the tailnet, renews a device's remote access.
     if let Some(presence) = req
         .extensions()
         .get::<Arc<dyn pond_core::security::ports::remote_access::DevicePresence>>()
@@ -578,6 +567,22 @@ mod tests {
             );
         }
 
+        for (method, path) in [
+            (Method::POST, "/api/v1/player/command"),
+            (Method::GET, "/api/v1/player/status"),
+            (Method::POST, "/api/v1/extension/egress"),
+            (Method::POST, "/api/v1/player/egress-policy"),
+        ] {
+            assert!(
+                answers_without_token(&method, path, ONBOARDED, FROM_THE_HOST),
+                "{method} {path} must reach its handler on the host"
+            );
+            assert!(
+                !answers_without_token(&method, path, SETTING_UP, FROM_THE_LAN),
+                "{method} {path} has no caller off the host"
+            );
+        }
+
         // Refused in the WIDEST state (mid-onboarding, on the host) means refused everywhere.
         for (method, path) in [
             (Method::POST, "/api/v1/handshake/revoke"),
@@ -586,6 +591,18 @@ mod tests {
             (Method::POST, "/api/v1/oauth/authorize"),
             (Method::POST, "/api/v1/chat"),
             (Method::GET, "/api/v1/devices"),
+            // Neighbours of the player exemptions: method- and segment-exact, no prefix. The page's
+            // own routes are not exempt at all: it holds a session like any other client.
+            (Method::GET, "/api/v1/player/command"),
+            (Method::POST, "/api/v1/player/status"),
+            (Method::POST, "/api/v1/player/command/x"),
+            (Method::GET, "/api/v1/player/egress-policy"),
+            (Method::POST, "/api/v1/extension/egress/x"),
+            (Method::GET, "/api/v1/player/events"),
+            (Method::POST, "/api/v1/player/reply"),
+            (Method::GET, "/api/v1/musickit/developer-token"),
+            (Method::GET, "/api/v1/player/user-token"),
+            (Method::GET, "/api/v1/secrets"),
         ] {
             assert!(
                 !answers_without_token(&method, path, SETTING_UP, FROM_THE_HOST),
@@ -742,10 +759,15 @@ mod tests {
 
         let expected = vec![
             "DELETE /voice/calibrate = UntilOnboarded".to_string(),
+            "GET /player/status = HostOnly".to_string(),
             // Nothing secret (phase, model name, timestamps); the boot warm-up precedes any token.
             "GET /test = HostOnly".to_string(),
             "GET /warmup = UntilOnboarded".to_string(),
             "PATCH /profiles/{id} = UntilOnboarded".to_string(),
+            // The music player bridge and extension egress: the handlers check the internal
+            // token (the shell's egress-policy asks nothing secret); HostOnly because no
+            // legitimate caller is off the host.
+            "POST /extension/egress = HostOnly".to_string(),
             // One outbound geocoding call for a place NAME; no household data leaves. Wizard-only.
             "POST /handshake/revoke = Authenticated".to_string(),
             "POST /location/detect = UntilOnboarded".to_string(),
@@ -753,6 +775,8 @@ mod tests {
             "POST /onboard/complete = UntilOnboarded".to_string(),
             "POST /onboard/reset = UntilOnboardedThenHostOnly".to_string(),
             "POST /onboard/step/{name} = UntilOnboarded".to_string(),
+            "POST /player/command = HostOnly".to_string(),
+            "POST /player/egress-policy = HostOnly".to_string(),
             "POST /profiles = UntilOnboarded".to_string(),
             "POST /test/speak = HostOnly".to_string(),
             "POST /tts = HostOnly".to_string(),
@@ -853,15 +877,24 @@ mod tests {
         )
     }
 
-    /// Exceptions are listed one by one, not by prefix, so no third `/oauth/*` route slips in.
+    /// Protected-router routes whose handler authenticates the caller itself. Listed one by one,
+    /// not by prefix, so no neighbouring route slips in.
+    const HANDLER_AUTHENTICATED: &[(Method, &str)] = &[
+        // Browser redirect target: tokenless, authenticated by the PKCE state nonce.
+        (Method::GET, "/oauth/callback"),
+        // Extension subprocesses; checked against internal_extension_token in the handler.
+        (Method::POST, "/oauth/refresh"),
+        // The music player bridge: extension subprocesses again, the internal token.
+        (Method::POST, "/player/command"),
+        (Method::GET, "/player/status"),
+        (Method::POST, "/extension/egress"),
+        // The shell's main process holds no session; loopback only, and it asks nothing secret.
+        (Method::POST, "/player/egress-policy"),
+    ];
+
     #[test]
     fn every_protected_route_requires_a_token() {
-        let allowed_without_token: &[(Method, &str)] = &[
-            // Browser redirect target: tokenless, authenticated by the PKCE state nonce.
-            (Method::GET, "/oauth/callback"),
-            // Extension subprocesses; checked against internal_extension_token in the handler.
-            (Method::POST, "/oauth/refresh"),
-        ];
+        let allowed_without_token = HANDLER_AUTHENTICATED;
 
         let routes = routes_in(protected_block());
         assert!(
@@ -903,10 +936,10 @@ mod tests {
         .map(|(m, p)| format!("{m} {p}"))
         .collect();
 
-        // oauth entries are covered by `every_protected_route_requires_a_token` instead.
+        // Protected-router entries are covered by `every_protected_route_requires_a_token`.
         let allowlist: std::collections::BTreeSet<String> = PUBLIC_ROUTES
             .iter()
-            .filter(|(_, p, _)| !p.starts_with("/oauth/"))
+            .filter(|(m, p, _)| !HANDLER_AUTHENTICATED.contains(&(m.clone(), p)))
             .map(|(m, p, _)| format!("{m} {p}"))
             .collect();
 

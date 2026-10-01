@@ -45,8 +45,6 @@ export function Chat() {
   const state    = useAppState();
   const dispatch = useAppDispatch();
 
-  // The starting quips, from the suggestion engine rather than a fixed list.
-  // See `useSuggestedPrompts`.
   const chips = useSuggestedPrompts(state.sessionId);
 
   // Turn state lives in `state/chatRunStore`: any sidebar press unmounts Chat, and the turn must survive it.
@@ -98,20 +96,13 @@ export function Chat() {
   const modelSelectorRef = useRef<HTMLDivElement>(null);
   const fileInputRef     = useRef<HTMLInputElement>(null);
 
-  // Picture support's own lifecycle — download progress, readiness, a device
-  // that declines the encoder entirely. `useVisionStatus` is the primary
-  // attach decision now; `capabilities.vision` above is the fallback while a
-  // per-model answer is unknown (an older server, or the probe still in
-  // flight).
+  // The primary attach decision; `capabilities.vision` is the fallback while this is unknown.
   const { status: visionStatus, refresh: refreshVisionStatus } = useVisionStatus();
-  // Whether the household has just now reached for the paperclip or tried to
-  // paste — the only moment a PERMANENT reason (not_declared /
-  // not_on_this_device) earns a line; see ImageSupportStatus.
+  // Set on a paperclip tap or paste, the only time a permanent reason earns a line (see ImageSupportStatus).
   const [attachReasonShown, setAttachReasonShown] = useState(false);
 
   const visionKind = visionStatus?.state.kind;
   const visionKnown = !!visionStatus && visionKind !== "unknown";
-  // gate.blocked: status known && kind !== "ready".
   const gateBlocked = visionKnown
     ? visionKind !== "ready"
     : capabilitiesKnown && !visionCapable;
@@ -171,11 +162,7 @@ export function Chat() {
     setAttachments((prev) => [...prev, ...prepared]);
   }, [attachments]);
 
-  // The paperclip is NEVER disabled for vision reasons — a tap always opens
-  // the file picker. What a tap DOES do, when picture support is not ready,
-  // is surface the reason: the button's title (a mouse hover) and, now, an
-  // on-demand ImageSupportStatus line reachable by touch, which a disabled
-  // button's title attribute never was.
+  // Never disabled for vision: a tap opens the picker and, if blocked, shows the reason for touch users.
   function onAttachClick() {
     if (gateBlocked) setAttachReasonShown(true);
     fileInputRef.current?.click();
@@ -207,11 +194,7 @@ export function Chat() {
       .catch(() => { setCapabilitiesKnown(false); });
   }, [state.serverOnline]);
 
-  // A refused turn (409/413/415/...) hands its draft back here rather than
-  // leaving an error bubble nobody can act on. `run.refusedDraft` is
-  // referentially stable across commits that do not touch it, so this only
-  // fires once per refusal, and `takeRefusedDraft` clears it so a second
-  // effect run (StrictMode) cannot restore the same draft twice.
+  // Restores a refused turn's draft; fires once per refusal, as `run.refusedDraft` is referentially stable.
   useEffect(() => {
     if (!run.refusedDraft) return;
     const draft = takeRefusedDraft();
@@ -220,8 +203,7 @@ export function Chat() {
     setAttachments(draft.attachments);
     setAttachError(draft.message + refusalClientClause(draft.code));
     refreshVisionStatus();
-    // `input` deliberately excluded: this must run exactly once per refusal,
-    // not on every keystroke afterward.
+    // `input` excluded: once per refusal, not per keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [run.refusedDraft]);
 
@@ -307,8 +289,7 @@ export function Chat() {
         await api.activateModel(provider, name, "chat");
       }
       dispatch({ type: "SET_LAST_RESPONSE_META", payload: { modelName: name, modelRole: "chat", completionTokens: 0 } });
-      // The new model may have a different (or no) encoder, or none at all
-      // for mesh -- ask again rather than waiting for the next poll tick.
+      // The new model may have a different encoder, or none (mesh); don't wait for the next poll.
       refreshVisionStatus();
     } catch (e) {
       console.warn("Model switch failed:", e);
@@ -494,9 +475,7 @@ export function Chat() {
     // question), so a busy send with an empty box is a no-op that keeps the tray.
     if (busy && !text) return;
 
-    // Gated here rather than by disabling Send: this is the one path every
-    // way of sending funnels through (the button, Enter, a suggestion chip,
-    // Continue), so gating here covers all of them at once.
+    // Gated here, not by disabling Send: every way of sending funnels through this path.
     if (attachments.length > 0 && gateBlocked) {
       setAttachError(COMPOSER_GATE_LINE);
       return;

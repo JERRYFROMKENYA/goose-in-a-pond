@@ -33,12 +33,7 @@ import type { SettingsRowId } from "./data/settingsConfig";
 type HubRoute = "home" | "chat" | "canvas" | "routines" | "settings" | "notifications";
 
 // ─── The drawer speaks GuiSection; the hub speaks HubRoute ────
-//
-// One drawer serves both shells, so it emits the vocabulary they share. These
-// two tables are that translation, and they are deliberately partial: a section
-// with no hub screen is NOT an error and must not be silently swallowed. It
-// falls through to SET_SECTION, which leaves the hub and lands in the classic
-// shell — which is the blend, not a failure of it.
+// Deliberately partial: a section with no hub screen falls through to the classic shell.
 const HUB_ROUTE_FOR: Partial<Record<GuiSection, string>> = {
   dashboard:     "home",
   chat:          "chat",
@@ -123,8 +118,7 @@ export function Hub() {
     writeStoredRoute(r);
   }
 
-  // A settings sub-screen marks "Settings" in the drawer unless the sub-screen
-  // is itself one of the twelve under Manage, in which case it marks that chip.
+  // Sub-screens mark "Settings" unless they are one of the Manage chips.
   const drawerActive: GuiSection = SECTION_FOR_HUB_ROUTE[route] ?? "settings";
 
   function navigate(nav: DrawerNav) {
@@ -141,31 +135,12 @@ export function Hub() {
     dispatch({ type: "SET_SECTION", payload: nav.section });
   }
 
-  /**
-   * One way a GuiSection is resolved in this shell, not two.
-   *
-   * Home's own calls to action emit sections -- "Add your first device" emits
-   * `devices` -- and they used to be handed to `go`, which speaks hub routes.
-   * `devices` matched nothing, fell through `renderView`'s fallback, and
-   * re-rendered the very screen the household had just tapped to leave, with
-   * the drawer marking Settings and the bad route persisted to localStorage.
-   * `navigate` is the function that already knows a section with no hub screen
-   * belongs to the classic shell, so everything goes through it.
-   */
+  /** Sections go through `navigate`, which sends ones with no hub screen to the classic shell. */
   function goToSection(section: GuiSection) {
     navigate({ kind: "section", section });
   }
 
-  /**
-   * A notification's call to action, carrying the run it was raised for.
-   *
-   * The run is the whole point of "View on Canvas": without it Canvas opens
-   * with nothing to show and the household is left to work out what they were
-   * meant to be looking at. The classic shell has always set this context; the
-   * hub dropped it, because its `go` speaks routes and knows nothing about
-   * runs. Sections are resolved through `goToSection` for the same reason
-   * everything else is.
-   */
+  /** A notification's call to action, keeping the run "View on Canvas" needs. */
   function openFromNotification(section: string, run?: ScheduleRunNotification) {
     if (run) dispatch({ type: "SET_DEBRIEF_CONTEXT", payload: { type: "debrief", run } });
     goToSection(section as GuiSection);
@@ -186,7 +161,6 @@ export function Hub() {
       return <Detail go={go} />;
     }
 
-    // Fallback
     return <HomeView go={goToSection} />;
   }
 

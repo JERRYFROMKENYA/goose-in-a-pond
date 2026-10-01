@@ -26,11 +26,7 @@ function healthy(over: Partial<ExtractionStatus> = {}): ExtractionStatus {
 afterEach(() => cleanup());
 
 describe("ExtractionBanner and the dates a pass threw away", () => {
-  /// The pond this was written for. A model that puts dates in notes and files
-  /// no reminders at all -- one of them did that on every one of 432 measured
-  /// opportunities -- leaves `last_pass_reminders_lost` and
-  /// `last_pass_reminders_written` both at 0, which is exactly what this panel
-  /// used to read. It rendered nothing while every refused date was discarded.
+  // A model filing no reminders leaves both reminder counters at 0; only the dated counts show it.
   it("says so when a pass refused dates and the model filed no reminder", () => {
     render(
       <ExtractionBanner status={healthy({ last_pass_dated: 4, last_pass_dates_lost: 4 })} />,
@@ -41,8 +37,6 @@ describe("ExtractionBanner and the dates a pass threw away", () => {
     expect(screen.getByText(/The model filed no reminder for them/)).toBeTruthy();
   });
 
-  /// The same loss with the other cause, which needs a different answer: the
-  /// model did its half and the store would not take the write.
   it("names the store when the write is what failed", () => {
     render(
       <ExtractionBanner
@@ -58,9 +52,7 @@ describe("ExtractionBanner and the dates a pass threw away", () => {
     ).toBeTruthy();
   });
 
-  /// Both counters, because the ratio is what tells a slip from a model that
-  /// never files a reminder at all. `last_pass_dated` was exposed over HTTP and
-  /// drawn by nothing either.
+  // Both counts: the ratio tells a slip from a model that never files a reminder.
   it("shows how many of the refused dates were lost", () => {
     render(
       <ExtractionBanner
@@ -76,8 +68,6 @@ describe("ExtractionBanner and the dates a pass threw away", () => {
     ).toBeTruthy();
   });
 
-  /// A failed reminder write with no dated note behind it still has no other
-  /// symptom anywhere on this panel.
   it("still reports a reminder that could not be saved when no note was dated", () => {
     render(<ExtractionBanner status={healthy({ last_pass_reminders_lost: 1 })} />);
     expect(
@@ -85,7 +75,6 @@ describe("ExtractionBanner and the dates a pass threw away", () => {
     ).toBeTruthy();
   });
 
-  /// The control. A clean pass must not grow a banner out of this change.
   it("says nothing about dates when none were lost", () => {
     render(<ExtractionBanner status={healthy({ last_pass_reminders_written: 3 })} />);
     expect(screen.queryByText(/were not kept anywhere/)).toBeNull();

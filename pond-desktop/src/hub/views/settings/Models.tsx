@@ -85,12 +85,10 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
   const [activating, setActivating] = useState<string | null>(null);
   const [flash, setFlash] = useState<{ text: string; ok: boolean } | null>(null);
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Picture support for the active chat row only — every other row's fact is
-  // the static "pictures" tag, derived from `reads_images` on the list.
+  // Live picture-support state, for the active chat row only; others show the static tag.
   const { status: visionStatus } = useVisionStatus();
 
-  // Speculative decoding was taken out of the llama.cpp engine on 2026-09-24 (goose 743649d98),
-  // so the Speed card and its setting are commented out rather than deleted; restore them together.
+  // Speed card state, commented out while llama.cpp lacks speculative decoding; restore together.
   // // Settings, loaded SEPARATELY from the model list above (Voice.tsx's
   // // guard): a settings failure must not blank the whole page into the
   // // offline view, and a settings success must not wait on — or block — the
@@ -329,10 +327,7 @@ export function ModelsDetail({ go }: ModelsDetailProps) {
               if (m.recommended_role === "chat" || (!m.recommended_role && isLlmModel(m))) tags.push("chat");
               if (/gemma.?4|qwen3|qwq|deepseek.?r1/.test(m.name.toLowerCase())) tags.push("think");
               if (m.reads_images === true) tags.push("pictures");
-              // Picture support's OWN lifecycle (downloading, verifying, a
-              // device that declines the encoder) only means anything for the
-              // model actually in use — every other row's fact is the static
-              // "pictures" tag above.
+              // The encoder's lifecycle only applies to the model in use.
               const liveVision = active && visionStatus?.message ? visionStatus.message : null;
 
               return (

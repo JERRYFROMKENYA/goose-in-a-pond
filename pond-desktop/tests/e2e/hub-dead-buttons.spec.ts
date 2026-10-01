@@ -8,19 +8,7 @@ interface ButtonInfo {
   effect: string; // 'route-change' | 'dom-change' | 'console' | 'no-op' | 'error'
 }
 
-/**
- * The five views the icon rail used to list, and the drawer row that reaches
- * each one now.
- *
- * Two changed name rather than moving: the rail's "Goose" is the drawer's
- * "Chat" under Pond, and the rail's "Routines" is the "Schedules" chip under
- * Manage, which the hub renders as its routines route.
- *
- * Canvas has no drawer row at all -- it is a hidden section, reached in the hub
- * from a notification's "View on Canvas" -- so it is taken by its persisted
- * route instead. That is done here rather than in helpers/nav.ts because it is
- * not navigation through the drawer and does not belong in a shared helper.
- */
+/** Each hub view and the drawer row reaching it; Canvas has none, so it goes by persisted route. */
 const VIEWS: Array<{ view: string; drawer: string | null }> = [
   { view: "Home",     drawer: "Home" },
   { view: "Goose",    drawer: "Chat" },
@@ -47,9 +35,7 @@ test("Hub dead-button audit", async ({ page }) => {
     if (drawer) {
       await navigateTo(page, drawer);
     } else {
-      // Canvas. A second init script wins over the first, so this re-opens the
-      // app on the canvas route rather than on home. Canvas is last in VIEWS
-      // for that reason: it is the only step that reloads.
+      // A later init script wins, so this reopens on canvas; last in VIEWS as the only reload.
       await page.addInitScript(() => {
         localStorage.setItem("goosehub_route", "canvas");
       });

@@ -2185,3 +2185,264 @@ and do not establish device-key proof of possession or encrypted transport.
   memory reading with E2B, its drafter and its encoder resident during the boot warm-up (the gate for
   putting E2B on `DEVICE_MEASURED_VISION`), `ENCODER_COMPUTE_MB`, and the PAI-3 re-run after the
   budget move.
+
+**2026-09-29 -- an in-app music player, and a service-agnostic bridge to it. Touches PAI-2 and the extension surface.**
+
+- **What was asked.** Apple Music in the `music` extension, then: play the whole catalog, from inside
+  GIAP, with nothing outside the ecosystem, and agnostic to the service so Tidal or others can follow.
+  The first attempt (drive the Music app, add catalog songs to the library through Apple's REST API)
+  was built, committed, and then retired in favour of this once it was measured: opening a catalog
+  song in Music does not start it, so the library-add workaround was the only way and it edited the
+  user's library.
+- **What landed.** A hidden player window in the shell (its own session partition, Widevine-aware,
+  every request judged by `network_mode`); a `PlayerAdapter` interface with a MusicKit adapter, a
+  bridge, and a small UI; a host bridge in pond-api (`player.rs`: SSE commands to the page, replies,
+  state, an extension-facing command route); host-signed Apple developer tokens (`musickit.rs`);
+  `SecretRequirement.host_only`; and `WebPlayerProvider` in the extension, which falls back to the
+  Music app. Architecture, protocol and measurements: `docs/architecture/music-player.md`.
+- **What is proven and what is not.** Proven by tests over real HTTP and real SSE: the bridge round
+  trip, timeouts, page replacement, detach on close, the internal-token boundary, the exact
+  public-route pin, host-only secrets absent from the environment on install and on restart, and
+  developer-token signing verified against the public key. Proven live against Apple: token signing,
+  MusicKit load, sign-in, catalog search and queueing. **Not proven: audio.** A live run was refused
+  at the license (`MEDIA_LICENSE`, -42605) on Widevine 4.10.3050.0, a module another Apple Music
+  client reports as broken on the same stack. That is the likely cause and not a proven one. The
+  player is also untested under real Electron, and `enqueue`, `playlists` and `library` have only
+  met a fake MusicKit.
+- **Invariants.** *Preamble tokens*: the Spotify tool list is byte-identical to main's (4,281
+  chars); Apple gets five tools with the player, six with the Music app; none added overall.
+  *`profile_id`*: untouched, and **not solved**: like Spotify, the signed-in account is the pond's,
+  so the `library` tool shows that account's library to whoever is talking to it. *Egress*: three new
+  paths and one hole, in `02-privacy-and-security-guardrails.md` under the 2026-09-29 note; the hole
+  is that Chromium's Widevine download and updates are outside both gates, so Offline does not stop
+  them. *Secrets*: the Team ID, Key ID and `.p8` are `host_only`, withheld from an extension's
+  environment on every path that builds one (install, restart, token refresh, startup); the Music
+  User Token never reaches the host at all, because MusicKit keeps it in the page's storage.
+  *Guest*: no change. *Blocking a turn*: `play` waits up to 30 s for audio to be confirmed, longer
+  than any tool here waited before; it answers with a reason at the end, never silently.
+  *Side effects without approval*: playing the song asked for is the request; the window shows
+  itself only to sign in; nothing is added to the user's library (that path is gone).
+- **Deferred, with the reason.** Swapping this repo's Electron for castlabs' (it trails upstream, adds
+  a VMP signing step and a credential to packaging, and needs a decision). The Widevine updater
+  switch under Offline. A permission handler on the player session (a wrong deny would read as a
+  license failure). The dashboard now-playing widget reading the player's state (`GET
+  /player/state` exists; the widget still reads Spotify). Routing Spotify's calls through
+  `/extension/egress`. A CI job for `extensions/music`, which has none.
+- **Verification**: Mac only, 2026-09-29. pond-core and pond-api 2,287 passed, 0 failed, 6 ignored;
+  `pond-server` builds; rustfmt clean; clippy clean on every file changed (the failures it reports in
+  `egress_guard.rs` and `routes.rs` are in code this work did not touch). pond-desktop: typecheck
+  clean and 1,079+ tests including the no-emoji scan. Extension: typecheck clean, 120 tests plus 5
+  live ones behind `GIAP_MUSIC_LIVE`. A real run of the extension process against a fake host chose
+  the player, dropped `devices`, gained `when`, and sent `search` then `play`.
+  `scripts/live-test.sh` passed (135 + 18 checks), including 12 new ones on a real server: the
+  extension-only routes refuse without the internal token, the developer-token route reaches the
+  secret store and says what to add, and the shell's policy route follows the live `network_mode`.
+  Not run: Playwright, the Orin, and anything that needs audio.
+
+**2026-09-29 (later) -- managed credentials: a service the pond can call, and the shared crate under it. Touches PAI-2.**
+
+- **What was asked.** Make the Apple Music extension "managed": a Jarida service serves the
+  credentials, so a household never opens the Apple developer portal.
+- **What landed.** `services/pondcredentials`: a shared signing crate (`pond-apple-token`, used by the
+  pond and the service so they cannot drift) and the service, in its own workspace so a Docker image can
+  copy only it. The pond gains a managed token source in `musickit.rs` (local key wins; cached until a
+  fifth of its life is left; a failure stands for a minute; a reply is validated) and
+  `egress::begin_as`, a call attributed to its own name. `deploy/pondcredentials` holds the Dockerfile,
+  compose, Caddy and a runbook. The "Setup required" badge no longer shows for an extension whose
+  secrets are all optional.
+- **Invariants.** *Egress*: a new outbound path to a Jarida host, gated, recorded as `giap-credentials`,
+  and off until `POND_CREDENTIALS_URL` is set; documented in the PAI-2 note. The egress guard's tracker
+  list gained `egress::begin_as(`, and `musickit.rs` joined `EGRESS_TRACKED`. *Secrets*: the service
+  reads its key from a file, never a variable; the pond's stored key still never reaches an extension.
+  *Preamble tokens*, *`profile_id`*, *guest*: untouched. *Blocking a turn*: a token fetch happens when
+  the player starts, not in a turn. *Side effects without approval*: none while the address is unset.
+- **Not built, on purpose.** The droplet, the domain, and turning it on by default. An assistant cannot
+  create the droplet (it needs the owner's DigitalOcean token and spends money) and must never hold the
+  Apple key; the runbook says who does what.
+- **Open question.** Whether Apple's developer terms allow one team's token to serve independent
+  installations of an open-source app. Unchecked; a condition for turning it on.
+- **Verification**: Mac only, 2026-09-29. Service and shared crate: 29 tests, rustfmt clean. Pond side: 28
+  route tests including 7 for managed mode against a loopback mock. The real service binary served a real
+  pond, which fetched a token that verified against the service's public key, cached it, and logged the
+  call. The Dockerfile's exact `cargo build --release --locked` passes; `docker compose config`
+  validates. **Update, later 2026-09-29: deployed to `credentials.jarida.io` and verified**: the Docker
+  build and compose stack run, Caddy has a certificate, Apple's catalog API accepts a token fetched over the
+  public endpoint, and a scratch pond fetched one through its own route, logged as `giap-credentials`.
+  Still not done: monitoring, a reboot test, a live key rotation, Apple's answer on sharing the token.
+
+**2026-09-29 (later still) -- Spotify gets the same treatment: the in-app player as a Connect device, every call gated, and the shell on castlabs' Electron. Touches PAI-2.**
+
+- **What was asked.** "Finish implementation" of the music work, and Spotify "should also get the same
+  treatment". Decided with Jerry: the full treatment on the branch, and the Electron swap on the branch;
+  nothing merges until audio is verified and the terms are settled.
+- **What landed.** Spotify plays inside the window as a Web Playback SDK **Connect device**, not as a
+  second controller: its control plane is REST and `SpotifyProvider` already drives all of it, so the
+  window is the speaker and the extension plays *to* it when no other device is active (never taking over
+  a phone that is playing). Host: `GET /player/user-token` (session only, renews through the egress gate),
+  Spotify in `/player/status`, and the sign-in scopes `streaming`, `user-read-email`, `user-read-private`.
+  Page: `adapters/spotifyWebPlayback.ts` (transport, a one-second position clock, a `device` op), and one
+  window that runs an adapter per service. Extension: every Spotify call asks the host first, the retry
+  after a refresh included. Shell: castlabs' Electron (`44.1.0+wvcus`) with an install guard and
+  `electronDist`. CI: a job for `extensions/music`, which had none.
+- **Invariants.** *Egress*: the hole named in the first player note is closed for the extension; the
+  window's own traffic is judged per host, and Spotify's hosts are sensitive, so only `open` lets the
+  player run. *Secrets*: the person's Spotify token now reaches the page, and Spotify's script runs
+  with it (documented as new in the PAI-2 note); an extension's internal token is refused on the route
+  that hands it out. *Preamble tokens*: the Spotify tool list and wording are unchanged, by design (the
+  speaker style adds no tool). *Side effects without approval*: playback moves to the in-app device only
+  when Spotify itself says no device is active. *Users*: everyone signs in to Spotify once more.
+- **Not built, on purpose.** Search, queue, library and playlists in the window for Spotify (the
+  extension does them over REST); the Spotify Widevine / castlabs updater hole; a permission handler.
+- **Open questions.** (1) Whether Spotify's terms allow this at all: they restrict ingesting Spotify
+  Content into an AI model and license "private personal use"; this predates the change and covers the
+  tools that already shipped. (2) Whether Spotify accepts this Widevine module: never tried.
+  (3) Packaging with the castlabs binary (`pack:dir`, `bundle:app`), VMP signing, and the Linux smoke job
+  are untried.
+- **Verification**: Mac only, 2026-09-29. pond-core and pond-api 2,302 passed, 0 failed, 6 ignored (5
+  new route tests: the token route for the page only, sign-in errors, one service only, a renewal that
+  cannot happen, Spotify in status); clippy has no warnings in the files touched (the workspace-wide
+  `-D warnings` run stops in `pond-voice`, which this does not touch). Desktop 80 files, 1,124 tests,
+  typecheck clean (25 for the Spotify adapter against a fake SDK, 3 for the multi-service page). Music
+  extension 139 tests, 134 passed, 5 live skipped, and the new CI job's exact steps pass in a clean copy.
+  `scripts/live-test.sh --no-build` passed (135 + 18 checks). **Not verified: Spotify itself, and
+  therefore audio.** A harness that drives the real extension against a signed-in scratch app exists, and
+  needs a Premium account signing in.
+
+**2026-09-29 (later still) -- one sign-in button for Apple Music; the advanced fields move under Developer settings. Touches the settings UI and the extension registry only.**
+
+- **What was asked.** "A single button for signing in to Apple Music, then all the advanced things move
+  them to developer settings."
+- **What landed.** A `PlayerSignIn` row in the Music extension's settings whose button starts Apple's
+  sign-in inside the player window (`player_authorize` in the shell contract, run with a user gesture)
+  and follows it to "Signed in"; a closed **Developer settings** disclosure holding the service picker and
+  the three own-key fields; an `advanced` flag on `SecretRequirement` and on those four registry entries,
+  so the split is data and not a hard-coded list; the host's "not set up" message now says shared
+  credentials are unavailable and points at Developer settings.
+- **Invariants.** *Secrets*: unchanged: the four fields are still stored the same way, and the three key
+  fields are still `host_only` and withheld from the extension. *Egress*: nothing new; the sign-in is
+  Apple's own popup. *Preamble tokens*: untouched. *Settings persistence*: no settings field added.
+  *Both UIs*: the hub UI has no extension-credentials screen, so there is one place to change.
+- **Not built, on purpose.** Sign-out; a global "developer mode" (the Settings page's Developer view is
+  per page and does not persist, so nothing was tied to it).
+- **Open.** The button has never started Apple's real popup: it needs a working key or shared credentials
+  and a person to sign in. Whether Apple accepts this build's Widevine module is still unknown.
+- **Verification**: Mac only, 2026-09-29. pond-core and pond-api 2,304 passed, 0 failed, 6 ignored; clippy
+  has no warnings in the files touched; `scripts/live-test.sh --no-build` passed (135 + 18 checks).
+  Desktop 84 files, 1,161 tests, typecheck clean (9 for the sign-in row, 10 for the view logic and the
+  field split, 6 for the page hook, 5 for the shell script and reply, 6 for the dialog's layout). The dialog was also rendered
+  in the browser pane in its three states (ready, signed in, unavailable) and opened and closed by hand.
+
+**2026-09-29 (later still) -- the credentials service is ON BY DEFAULT. Touches PAI-2. A decision of Jerry's, recorded with what it costs.**
+
+- **What was asked.** "Set the managed url." The address had been left unset on purpose, so that turning
+  it on was a decision and not a drift; this is that decision.
+- **What landed.** `DEFAULT_MANAGED_URL` is `https://credentials.jarida.io` (a test pins it and its
+  https). `POND_CREDENTIALS_URL=off` turns it off; any other value replaces it. The route tests and
+  `scripts/live-test.sh` now say `off` themselves, because unset means the real service and no test may
+  call it. The registry's Apple field text no longer says "where this pond is set up for them".
+- **Invariants.** *Egress*: it still goes through `egress::begin_as(.., "giap-credentials")`, is refused
+  under Offline before anything is sent, and shows in the egress log. *Secrets*: a stored local key still
+  wins and means the service is never asked; the signing key is still never on a pond. *Privacy stance*:
+  this is now an outbound call to a Jarida host from every desktop pond, by default; PAI-2 says so and
+  says how to stop it. *Side effects without approval*: none beyond that call and Apple's own script.
+- **Corrections to what I wrote earlier.** The pond's token cache is **in memory**, so it fetches once
+  **per start of the pond**, not "about monthly". And the player window asks for the token as soon as it
+  starts **whether or not Apple Music is used**, then loads Apple's MusicKit script; nothing waits for a
+  sign-in click. Both corrected in `pondcredentials.md` and the PAI-2 note.
+- **Not built, and recommended.** Asking only once someone presses Sign in or has signed in before, and
+  persisting the token across restarts; a household switch for it (offered, declined for now).
+- **Open.** Apple's terms on sharing one team's token (section 2.8) are still unanswered, and it is on
+  regardless.
+- **Verification**: Mac only, 2026-09-29. pond-core and pond-api 2,305 passed, 0 failed, 6 ignored;
+  clippy clean in the files touched; `scripts/live-test.sh --no-build` passed (135 + 18 checks) with managed
+  mode off. A fresh scratch pond with `POND_CREDENTIALS_URL` unset and no key stored fetched a token from
+  the live service through the built-in default (status 200, the service's Key ID and Team ID in the token)
+  and logged `network / egress.http`, tool `giap-credentials`, 736 ms. **Not verified: the whole desktop app
+  with the default on** (the player window asking at start, then loading Apple's script).
+
+**2026-09-29 (last) -- asleep until wanted, and the token kept across restarts. Touches PAI-2.**
+
+- **What was asked.** "Ask only after someone presses Sign in, or has signed in before... Save the token
+  across restarts": the two fixes offered after the managed URL went on by default.
+- **What landed.** *Host:* the managed token is stored under `APPLE_MUSIC_MANAGED_TOKEN` (with its
+  address, so another service's token is never served), read once per start, renewed at a fifth of its
+  life or when damaged, lapsed or foreign, and served if a renewal fails while it still has days; and
+  `GET /musickit/developer-token?probe=true`, which says whether a token could be had and never signs or
+  reaches the network. *Page:* Apple's adapter sleeps (`dormant`) until Sign in is pressed or a sign-in
+  is remembered (`giap.player.apple.signedIn` in the window's storage); waking is a `prepare()` that
+  fetches the token and loads the script and reports failure at once; a sleeping adapter does not raise
+  the window; commands to it answer "sign in first", which lets the extension fall back to the Music app.
+- **Invariants.** *Egress*: fewer calls, same gate and attribution. *Secrets*: the kept token is not a
+  secret (public by design) and shows as a key name only. *Settings persistence*: no settings field added.
+  *Side effects without approval*: none now for a household that never presses Sign in.
+- **Not built.** A sign-out that forgets the remembered flag; migrating a sign-in made before this change
+  (it counts once it is done again).
+- **Verification**: Mac only, 2026-09-29. **In the real app** on castlabs' Electron with an isolated
+  scratch pond, default URL, no key: launch made no calls; the same hook the shell uses, run with a user
+  gesture, opened Apple's real sign-in popup in 1.6 s with one call to the credentials service before it;
+  a restart of pond and app with no finished sign-in made no calls; a restart with a sign-in remembered
+  made none to Jarida (the kept token) and loaded Apple's script. Rust and desktop counts below.
+
+**2026-09-30 -- the player moves to the browser; Spotify is played by hand only; stock Electron again. Touches PAI-2.**
+
+- **What was asked.** "Build the player from both Spotify and MusicKit's official SDKs and guides, no
+  exceptions, follow those to a tee", then "go with B, and revert to stock Electron and just use GIAP as
+  a controller".
+- **Why.** Songs skipped because Spotify's licence server answered HTTP 500 to castlabs' development-signed
+  Electron (18 of 18 licence requests, measured). Both SDKs document an ordinary page in a mainstream
+  browser. Spotify's Developer Policy III.3 forbids voice control of Spotify and Terms IV.2.a.i forbid
+  feeding Spotify content into an AI model.
+- **What landed.** The player is the pond's `/player.html` in the person's browser; Apple Music built to
+  MusicKit on the Web v3 step by step (commit 9366e56b). Spotify: the Music extension offers no Spotify
+  tool and tells the model why; the Spotify token is `host_only`; six OAuth scopes instead of twelve; the
+  Spotify page follows the Web Playback SDK (click to `activateElement()`, Transfer Playback, every
+  documented event, no pause-on-error); the page and the hub's music controls follow Spotify's design
+  guidelines (artwork as an image, uncropped; link back; play or pause only; `disallows` honoured).
+  castlabs' Electron and its Widevine tooling are removed.
+- **Invariants.** *Egress*: the page asks `/player/egress-policy` before loading a script; requests the
+  service's script makes afterwards are the browser's and are not seen. *Secrets*: one more `host_only`
+  secret (Spotify's token), never in an extension's environment, and a token refresh no longer restarts
+  an extension that does not hold the token. *Settings persistence*: no settings field added; the
+  `MUSIC_SERVICE` registry field is removed.
+- **Not built.** Pausing Spotify while GIAP speaks (Policy III.7); removing the bundled Spotify client ID
+  (Terms VI.1, a decision for Jerry); Spotify's official logo files (waiting on permission to download).
+- **Verification**: Mac only, 2026-09-30. Desktop 1166 passed, Music extension 99 passed (5 live skipped),
+  pond-core and pond-api tests for the registry, scopes and now-playing snapshot passed. The Apple page ran
+  in a browser tab against a scratch pond up to Apple's sign-in window. Not run: Apple sign-in and full
+  playback, and the Spotify page against Spotify, both of which need Jerry signed in.
+
+**2026-09-30 (later) -- a service and player choice, no bundled Spotify client ID, and Spotify's own logo. Touches PAI-2.**
+
+- **What was asked.** "Download the logos and remove the bundled client ID and then finally allow the user
+  to choose what player and service they want to use on the extensions page."
+- **What landed.** A `choice` kind of extension requirement (fixed answers, validated on save, read back
+  since it is not a secret) and two of them on the Music extension, `MUSIC_SERVICE` and `MUSIC_PLAYER`,
+  shown first in its settings; the settings show only the chosen service's setup; the extension, the
+  now-playing route and the hub's music card follow the choice. No Spotify client ID ships: signing in and
+  every refresh need the household's own `SPOTIFY_CLIENT_ID` (host-only) and say so without one. Spotify's
+  official full logo, black and white, byte for byte from its design page.
+- **Invariants.** *Egress*: with Apple Music chosen the now-playing route never calls Spotify.
+  *Secrets*: a new host-only secret (`SPOTIFY_CLIENT_ID`); choice values are readable, and only their
+  values. *Settings persistence*: no settings field; the choices live with the extension's other values.
+  *Side effects without approval*: at startup, one write of `MUSIC_SERVICE=spotify` for an install already
+  signed in to Spotify with no choice stored, so an upgrade does not switch its service.
+- **Not built.** Pausing Spotify while GIAP speaks (Policy III.7).
+
+**2026-09-30 (later still) -- Spotify pauses while GIAP speaks (Policy III.7). Touches PAI-2.**
+
+- **What was asked.** "Fix III.7 too, pause Spotify while GIAP speaks."
+- **What landed.** A `Quiet` controller in `pond-core` (an `AudioFocus` port; holds, lingers, a 2 s
+  grace) and a `QuietVoiceOutput` around the TTS in both processes that speak: a voice turn is quiet from
+  `begin_utterance` to `end_utterance`, and a new `TurnEnds` guard ends every turn, a failed one too. The
+  wake ping, the thinking tone and `/tts` audio a browser plays ask for quiet as well. `SpotifyFocus`
+  (`pond-api`) pauses what the Web API says is playing and resumes it only if nobody changed it since.
+  The desktop's voice child reads the secret store through a new `ReadOnlySecretStore` (`pond-infra`).
+- **Invariants.** *Egress*: every Spotify call, from either process, goes through the `network_mode`
+  gate. *Secrets*: the Spotify token is read by the voice child now, a pond process, still never an
+  extension. The child cannot write the store and never refreshes: the server's `FileSecretRepository`
+  rewrites the whole file from its cache, and a refresh can replace the refresh token. *Settings
+  persistence*: none. *Side effects without approval*: GIAP pauses and resumes the household's Spotify
+  on whatever device is playing, including one away from home. That is the literal reading of III.7's
+  "any device or system", asked for by Jarida.
+- **Not built.** Resuming Spotify when a voice session is killed mid-speech; asking where the playing
+  device is before pausing it.

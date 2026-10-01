@@ -3,7 +3,6 @@
 
 import { useSyncExternalStore } from "react";
 
-/** Every card Home can show. */
 export type CardId = "weather" | "devices" | "nowPlaying";
 
 /** How much room a card takes. The only width input there is. */
@@ -20,26 +19,14 @@ export interface CardSpec {
   title: string;
   /** One line, shown while arranging, saying what the card is for. */
   hint: string;
-  /**
-   * The size a card arrives at when the household has never placed it.
-   *
-   * This replaces the old `span: 1 | 2`, which was dead data — nothing read it,
-   * so the store's idea of a card's width and the component's idea were two
-   * unconnected facts that happened to agree. This one is load-bearing: it is
-   * the only answer to what size a card nobody has sized should be.
-   */
+  /** The size a card gets when the household has never sized it. */
   defaultSize: CardSize;
 }
 
 /** More pages than this is a filing cabinet, not a glance. */
 export const MAX_PAGES = 3;
 
-/**
- * The catalogue, in the order the arrange sheet's Available list offers them.
- *
- * Every entry is backed by a real slice of `HomeData` that the pond populates
- * — nothing here is a placeholder for data we do not have (DESIGN.md §3).
- */
+/** In arrange-sheet order. Each entry must be backed by a real `HomeData` slice (DESIGN.md §3). */
 export const CARDS: readonly CardSpec[] = [
   { id: "devices", title: "Devices", hint: "Lights, locks, plugs and thermostats", defaultSize: "l" },
   { id: "weather", title: "Weather", hint: "Now, and the days ahead", defaultSize: "m" },
@@ -50,8 +37,7 @@ const CARD_IDS = new Set<string>(CARDS.map((c) => c.id));
 const SIZES = new Set<string>(["s", "m", "l"]);
 
 function specOf(id: CardId): CardSpec {
-  // Non-null by construction: every CardId has a row, and the set above is
-  // derived from the same array.
+  // Non-null: every CardId has a row in CARDS.
   return CARDS.find((c) => c.id === id) as CardSpec;
 }
 
@@ -76,8 +62,7 @@ export const DEFAULT_LAYOUT: DashboardLayout = {
   hidden: [],
 };
 
-// Unchanged from v1, because rule 2 below migrates rather than resets. A new
-// key would be a silent reset with extra steps.
+// Same key as v1, whose payload is migrated; a new key would silently reset every Home.
 const KEY = "giap-dashboard-layout";
 
 let current: DashboardLayout = DEFAULT_LAYOUT;
@@ -94,23 +79,8 @@ function clonePages(pages: PlacedCard[][]): PlacedCard[][] {
 }
 
 /**
- * Repair a set of pages into something renderable.
- *
- * The failure modes multiply with the second axis, so they are enumerated
- * rather than left to fall out of the code:
- *
- *   unknown id on any page      dropped
- *   the same id on two pages    first occurrence wins — a per-list dedupe would
- *                               not have caught this, and two live copies of one
- *                               card is a store that disagrees with itself
- *   unknown or absent size      the card's defaultSize; a card with no size
- *                               renders with no size class at all
- *   an empty page               dropped, unless dropping it would leave none
- *   zero pages                  the default, since there is nothing to render
- *                               and no route back to the sheet from a blank one
- *   more than MAX_PAGES         the trailing pages are MERGED into the last kept
- *                               page rather than discarded — losing a card the
- *                               household placed is worse than a crowded page
+ * Repairs stored pages: unknown ids and empty pages drop (none left: the default), a duplicate
+ * keeps its first copy, a bad size gets the default, pages past MAX_PAGES merge into the last.
  */
 function reconcile(rawPages: unknown[]): DashboardLayout {
   const seen = new Set<CardId>();
@@ -141,9 +111,7 @@ function reconcile(rawPages: unknown[]): DashboardLayout {
     for (const page of overflow) pages[MAX_PAGES - 1].push(...page);
   }
 
-  // Recomputed from the union of every page rather than filtered against one
-  // list, because with pages there is no single list to filter against. A card
-  // claimed as both placed and hidden is placed.
+  // Recomputed from every page's cards, so a card both placed and hidden counts as placed.
   const hidden = CARDS.map((c) => c.id).filter((id) => !seen.has(id));
 
   return { version: 2, pages, hidden };
@@ -154,14 +122,7 @@ function isV1(raw: Record<string, unknown>): boolean {
   return Array.isArray(raw.order) && !Array.isArray(raw.pages);
 }
 
-/**
- * Carry a v1 `{order, hidden}` across, keeping the arrangement.
- *
- * Everything that was on Home stays on Home, in the same order, on one page, at
- * each card's default size — v1 had no size to preserve. The result then goes
- * through the v2 reconcile like any other, so cards this release dropped fall
- * out here rather than needing a second rule.
- */
+/** A v1 `{order}` becomes one page, same order, default sizes, then goes through reconcile. */
 function migrateV1(order: unknown[]): DashboardLayout {
   const placed = order
     .filter((id): id is CardId => typeof id === "string" && CARD_IDS.has(id))
@@ -255,12 +216,8 @@ export function showCard(id: CardId, page = 0): void {
 }
 
 /**
- * Take a card off Home. It goes back to the sheet rather than being forgotten.
- *
- * The guard is on the LAST CARD ANYWHERE, not on each page. An empty page is
- * still arrangeable, because the strip's Arrange control sits above the track
- * rather than inside it; a Home with nothing on it at all is the circular
- * failure — no cards, and so no visible route to the sheet that would fix it.
+ * Takes a card off Home, back to the sheet. The last card on Home stays (an emptied page is
+ * fine): a Home with no cards has no visible route back to the sheet.
  */
 export function hideCard(id: CardId): void {
   const l = ensureLoaded();
@@ -286,17 +243,8 @@ export function moveCard(id: CardId, delta: -1 | 1): void {
 }
 
 /**
- * Move a card to another page, at the end of it.
- *
- * Creates one page beyond the last, up to MAX_PAGES, so a household can spread
- * out without a separate "add a page" control to find.
- *
- * RETURNS THE PAGE THE CARD LANDED ON, which is not always the page that was
- * asked for. Taking the last card off a page empties it, `compact` drops it,
- * and every page after it shifts down one — so "move Weather to page 2" can
- * leave Weather on page 1. The caller follows the card with this value; a
- * caller that follows its own argument instead scrolls the track to a page the
- * card is not on. Null when nothing moved.
+ * Moves a card to the end of a page (one past the last makes a new page, up to MAX_PAGES).
+ * Returns the page it landed on (an emptied page shifts later ones down), or null if unmoved.
  */
 export function moveCardToPage(id: CardId, page: number): number | null {
   const l = ensureLoaded();
@@ -310,9 +258,7 @@ export function moveCardToPage(id: CardId, page: number): number | null {
   if (appending) pages.push([]);
   const [card] = pages[from.page].splice(from.at, 1);
   pages[page].push(card);
-  // Counted before the compaction rather than searched for after it: the target
-  // holds the card, so its index once the empties go is however many pages
-  // ahead of it still have something on them.
+  // Index after compaction = non-empty pages before the target (which holds the card).
   const landedOn = pages.slice(0, page).filter((p) => p.length > 0).length;
   write({ version: 2, pages: compact(pages), hidden: l.hidden });
   return landedOn;

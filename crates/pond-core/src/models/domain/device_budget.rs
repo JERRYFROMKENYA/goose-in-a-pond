@@ -1,22 +1,9 @@
-//! What the budgeted device (the 8 GB Orin Nano) can hold beside the LLM's KV cache, and so
-//! which window a model gets there and whether it may carry a vision encoder.
+//! What the budgeted device (8 GB Orin Nano) can hold beside the KV cache: each model's window
+//! and whether it may carry a vision encoder.
 //!
-//! # Why this lives in the domain, once
-//!
-//! Two crates need the same answer and neither can call the other the right way round:
-//! `pond-adapters-local-inference` sizes the window (`apply_jetson_settings`), and the goose
-//! adapter decides whether to declare, stamp and load an encoder. When the arithmetic lived only
-//! in the first, the second would have used the 56 KiB/token fallback where the first used the
-//! header's 18 for E2B, and the two would disagree about whether E2B fits: the window sized
-//! without the encoder while the encoder was stamped anyway. That is an OOM on the board. Both
-//! now call [`vision_fit_on_device`] / [`device_window`] with the RESOLVED GGUF path, so their
-//! inputs cannot diverge.
-//!
-//! # What only the Orin may move
-//!
-//! Every constant here is a measurement or is marked as not one. A single hardcoded window
-//! OOM-killed a board once, and a Mac-measured KV cost understated the device's by three times,
-//! so none of these moves on anything but a reading from the Orin.
+//! The window sizer and the encoder decision must both call [`device_window`] /
+//! [`vision_fit_on_device`] with the RESOLVED GGUF path, or they disagree and the board OOMs.
+//! Every constant is an Orin measurement or says it is not; only an Orin reading may move one.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -32,10 +19,8 @@ const MIB: u64 = 1024 * 1024;
 
 // ── Jetson memory constants ─────────────────────────────────────────────────
 
-/// Total device RAM on a Jetson Orin Nano 8 GB (MB), as the KERNEL reports it: `free -m` on the
-/// Orin says 7620, not the marketed 8192, because carveouts are taken before Linux sees the
-/// memory. Any phantom MB here is spent silently, since an over-large context does not fail to
-/// allocate, it swaps: the symptom is slowness, not an out-of-memory error.
+/// Orin Nano RAM (MB) as `free -m` reports it after carveouts, not the marketed 8192.
+/// Overstating it never errors: an over-large context just swaps.
 pub const JETSON_TOTAL_RAM_MB: u64 = 7620;
 /// Approximate headroom used by OS + GIAP server + UI at idle (MB).
 pub const SYSTEM_OVERHEAD_MB: u64 = 1500;
@@ -43,80 +28,45 @@ pub const SYSTEM_OVERHEAD_MB: u64 = 1500;
 pub const STT_RESERVED_MB: u64 = 200;
 /// Reserved TTS resident size (MB).
 pub const TTS_RESERVED_MB: u64 = 100;
-/// Everything the LLM slot does not get: OS, GIAP server, UI, STT, TTS.
-///
-/// Named separately from [`LLM_BUDGET_MB`] because the budget is derived twice, once as a
-/// constant and once at runtime from the device profile; both subtract the same reservation.
+/// Everything the LLM slot does not get; shared by [`LLM_BUDGET_MB`] and `llm_budget_mb()`.
 pub const RESERVED_MB: u64 = SYSTEM_OVERHEAD_MB + STT_RESERVED_MB + TTS_RESERVED_MB;
 /// Approximate MB available for a single LLM slot.
 pub const LLM_BUDGET_MB: u64 = JETSON_TOTAL_RAM_MB - RESERVED_MB;
 
-/// Total RAM of the device this process should believe it is.
-///
-/// [`JETSON_TOTAL_RAM_MB`] unless a device profile overrides it, deliberately not a host probe:
-/// reading a developer Mac's real 64 GB makes every derivation downstream trivially satisfiable.
+/// Total RAM of the device this process believes it is: [`JETSON_TOTAL_RAM_MB`] unless a
+/// device profile overrides it. Never probed, or a dev Mac's 64 GB would make everything fit.
 pub fn total_ram_mb() -> u64 {
     super::device_profile::active()
         .map(|p| p.total_ram_mb)
         .unwrap_or(JETSON_TOTAL_RAM_MB)
 }
 
-/// MB available for a single LLM slot on the device we believe we are.
-///
-/// The runtime twin of [`LLM_BUDGET_MB`]; identical to it when no profile is
-/// active, which is the case in production, in `deploy.sh` and in CI.
+/// Runtime twin of [`LLM_BUDGET_MB`]; equal to it unless a device profile is active.
 pub fn llm_budget_mb() -> u64 {
     total_ram_mb().saturating_sub(RESERVED_MB)
 }
 
 // ── Window arithmetic ───────────────────────────────────────────────────────
 
-/// Per-token KV cost for the widest geometry we ship, MEASURED on the Orin (the Mac said
-/// 16): E4B is 56 KiB/token across both caches, E2B 18. No padding here (it lives in the
-/// budget) and no constant term, since both caches carry `n_ctx` cells on this llama.cpp.
-/// Padding to 64 floored E4B to 4096, under its own 4,678-token turn-1 prompt.
+/// KV KiB/token of the widest shipped geometry (E4B; E2B is 18), measured on the Orin. Unpadded
+/// (margin is in the budget), no constant term: llama.cpp gives both caches `n_ctx` cells.
 pub const KV_KIB_PER_TOKEN: u64 = 56;
-/// llama.cpp's compute buffers. Nearly flat in `n_ctx` -- measured
-/// 522 MiB at both 4096 and 16384, rising to 582 MiB at 32768 -- so 600
-/// covers the range this function can return.
+/// llama.cpp's compute buffers: measured 522 MiB at 4096-16384 and 582 at 32768, nearly flat.
 pub const COMPUTE_BUFFER_MB: u64 = 600;
-/// The drafter's compute buffers and graph, on top of its weights.
-///
-/// Its KV is NOT here, and that is the point: with `ctx_other` the
-/// drafter shares the target's cache, which is visible in the phase
-/// timings as `process` costing 0.0 ms/step -- llama.cpp skips the
-/// catch-up decode only when the memory is shared. So the drafter's
-/// cost is flat in `n_ctx` and belongs in the budget, not in the slope.
-///
-/// 64 rather than a measured figure: the honest measurement (MemAvailable
-/// either side of building a drafter context) read 38-47 MB at 8192 and
-/// 16384 against a 57 MB file, and it is an UNDER-estimate -- mmap'd
-/// weights come out of reclaimable page cache, which MemAvailable counts
-/// as available. Rounding up past the file size costs a few hundred
-/// tokens of window and buys the margin that measurement could not
-/// establish.
+/// Drafter compute beyond its weights; no KV, as `ctx_other` shares the target's cache.
+/// 64 pads a measured 38-47 MB, which undercounts: MemAvailable counts mmap'd weights as free.
 pub const DRAFTER_COMPUTE_MB: u64 = 64;
-/// The vision encoder's compute buffers and warm-up, on top of its weights.
-///
-/// UNMEASURED. Only a reading from the Orin may move it: MemAvailable either side of the
-/// encoder's init during the boot prewarm, with the model and drafter resident. The encoder's
-/// weights are read into one GPU buffer (not mmapped), so unlike the drafter's they are
-/// counted in full by [`vision_fit`] already; this is the graph on top. Nothing depends on the
-/// exact value today, because [`DEVICE_MEASURED_VISION`] is empty, and the tests pin that the
-/// declare/refuse split for every shipped model holds anywhere in 0..=900.
+/// Vision encoder compute beyond its weights (read whole, not mmapped). UNMEASURED; tests pin
+/// that no shipped model's declaration flips anywhere in 0..=900.
 pub const ENCODER_COMPUTE_MB: u64 = 256;
 /// The narrowest window handed out, whatever the budget.
 pub const MIN_CTX: u32 = 2048;
-/// The widest window handed out: a latency decision (prefill is 19.97 s cold at 16384), not a
-/// memory one.
+/// Widest window handed out; a latency cap (cold prefill at 16384 is ~20 s), not a memory one.
 pub const MAX_CTX: u32 = 16384;
-/// Round the answer DOWN to a multiple of this. Not a power of two: those are 2x apart,
-/// so flooring to one discards up to HALF of a window the budget already proved
-/// affordable (E4B IQ4_XS: 13,220 allowed, 8,192 handed out). `n_ctx` needs no power of
-/// two in llama.cpp; safety comes from the slope, the compute buffer and the budget.
+/// Windows floor to a multiple of this. Not a power of two (llama.cpp needs none): flooring to
+/// one discards up to half an affordable window.
 pub const CTX_GRANULARITY: u32 = 1024;
-/// The weights assumed when the model file cannot be read: the largest model we ship, so the
-/// first load is conservative rather than fatal. Never used to prove a vision fit.
+/// Weights assumed for an unreadable model file (the largest we ship); never proves a vision fit.
 pub const ASSUMED_LARGEST_MODEL_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// MB left for the KV cache once everything resident is paid for.
@@ -128,9 +78,7 @@ fn kv_allowance_mb(
     encoder_compute_mb: u64,
 ) -> u64 {
     let model_mb = model_bytes / MIB;
-    // A drafter is a second set of weights resident for the whole session.
-    // Leaving it out of the budget is what let the window be sized as though
-    // only one model were loaded.
+    // A drafter is a second set of weights, resident for the whole session.
     let drafter_mb = if drafter_bytes > 0 {
         drafter_bytes / MIB + DRAFTER_COMPUTE_MB
     } else {
@@ -149,9 +97,7 @@ fn kv_allowance_mb(
         .saturating_sub(encoder_mb)
 }
 
-/// The model's own header slope when it could answer, else the conservative fallback.
-/// `kv_cost_from_header` returns None rather than guessing, so an unreadable or unfamiliar
-/// model gets exactly the fallback behaviour and this is never a new risk.
+/// The model's header slope if known, else the conservative fallback `KV_KIB_PER_TOKEN`.
 fn slope(kv_kib_per_token: Option<u64>) -> u64 {
     kv_kib_per_token
         .filter(|k| *k > 0)
@@ -164,21 +110,14 @@ fn tokens_for(kv_mb: u64, slope: u64) -> u64 {
 }
 
 /// Largest multiple of [`CTX_GRANULARITY`] that fits, clamped to [MIN_CTX, MAX_CTX].
-/// Saturating at MAX_CTX before the cast keeps a huge allowance (E2B's is ~41k) from
-/// wrapping u32.
 fn window_for_tokens(tokens: u64) -> u32 {
     let granularity = u64::from(CTX_GRANULARITY);
     let floored = (tokens / granularity) * granularity;
     floored.min(u64::from(MAX_CTX)).max(u64::from(MIN_CTX)) as u32
 }
 
-/// Context size that fits a model in `budget_mb`: the budget less the weights, the compute
-/// buffers and the drafter, divided by the per-token KV cost, floored to [`CTX_GRANULARITY`].
-///
-/// Moved unchanged from `LocalInferenceLlmAdapter::context_size_for_budget`, and the tests
-/// below are that function's, so the move is proved behaviour-identical. Takes the budget
-/// explicitly so another board's can be asked for without touching the process environment, a
-/// data race in a threaded test binary.
+/// Window that fits a model in `budget_mb`, floored to [`CTX_GRANULARITY`]. The budget is an
+/// argument because reading it from the environment races in threaded tests.
 pub fn context_size_for_budget(
     budget_mb: u64,
     model_bytes: u64,
@@ -188,8 +127,7 @@ pub fn context_size_for_budget(
     context_size_with_encoder(budget_mb, model_bytes, drafter_bytes, 0, kv_kib_per_token)
 }
 
-/// [`context_size_for_budget`] with a resident vision encoder of `encoder_bytes` (0 for none),
-/// charged its weights plus [`ENCODER_COMPUTE_MB`].
+/// [`context_size_for_budget`] plus a resident encoder: its weights and [`ENCODER_COMPUTE_MB`].
 pub fn context_size_with_encoder(
     budget_mb: u64,
     model_bytes: u64,
@@ -207,41 +145,29 @@ pub fn context_size_with_encoder(
     window_for_tokens(tokens_for(kv_mb, slope(kv_kib_per_token)))
 }
 
-/// What the window charges for `chat_model`'s drafter: its catalogue size whenever it HAS one.
-///
-/// Always the catalogue figure, never the file on disk and never the speculation switch: the
-/// real file is 56 MiB against a catalogue 57, and a window that moved when the drafter landed
-/// or the switch flipped would change `n_ctx`, which busts the KV snapshot and, on a runtime
-/// ON, would load 121 MB into a window sized without it.
+/// Drafter charge for `chat_model`: its catalogue size whenever it has one, never the file or the
+/// speculation switch, so `n_ctx` (and with it the KV snapshot) stays put when either changes.
 pub fn drafter_budget_bytes(chat_model: &str) -> u64 {
     drafter_for(chat_model).map_or(0, |d| d.approx_mb * MIB)
 }
 
 // ── The header slope ────────────────────────────────────────────────────────
 
-/// Architectures whose global:SWA layer ratio has been confirmed against
-/// llama.cpp's own `llama_kv_cache ... size = N MiB (C cells, L layers)`
-/// lines on the Orin. Gemma 4: 1 global per 5 sliding, verified at both
-/// sizes (E4B 4+20 of 24 owning layers, E2B 3+12 of 15).
+/// Architectures whose global:SWA layer ratio was confirmed against llama.cpp's KV-cache log
+/// lines on the Orin (Gemma 4: 1 global per 5 sliding).
 pub const CONFIRMED_SWA_PATTERNS: &[(&str, u32)] = &[("gemma4", 5)];
 
-/// Geometry sits in the first ~2 KB of every file measured -- offsets
-/// 924-1,829 on gemma-4-E2B, well before `tokenizer.ggml.tokens` at
-/// 2,061. 64 KiB is generous cover for that without reading the token
-/// array, let alone the 15 MB it takes to reach the chat template.
+/// Generous cover for the GGUF geometry, which sits in the first ~2 KB of every file measured.
 pub const HEAD_BYTES: usize = 64 * 1024;
 
-/// The model's KV cost per token (KiB) from its own GGUF head, or `None` when the header cannot
-/// settle it and the caller must keep the measured constant. Exact for a dense model; where
-/// `key_length_swa` is present the global-to-SWA layer ratio the header omits is worth a
-/// factor of two in the direction that OOMs a board, so trust only confirmed architectures.
+/// KV KiB/token from a GGUF head, or `None` to keep the measured constant. Exact for dense
+/// models; SWA ratios are absent from the header (a 2x OOM risk), so only confirmed ones count.
 pub fn kv_cost_from_head(head: &[u8]) -> Option<u64> {
     let info = parse_gguf_header(head)?;
     let arch = info.architecture.as_deref().unwrap_or_default();
 
     if info.key_length_swa.is_none() {
-        // Dense: exact whatever the architecture. The ratio argument is
-        // unused on this path.
+        // Dense: exact for any architecture; the ratio argument is unused.
         return info.kv_kib_per_token(0);
     }
 
@@ -286,13 +212,8 @@ impl VisionFit {
     }
 }
 
-/// The fit decision over plain numbers.
-///
-/// The predicate is on the UNCLAMPED allowance: it fits iff the tokens the KV budget buys with
-/// the encoder resident reach the window the model gets without it. Comparing the two clamped
-/// windows instead fails open at the floor: a model already at [`MIN_CTX`] gets `MIN_CTX` with
-/// the encoder too, the encoder looks free, and a gigabyte lands on a board that was already
-/// over budget. `model_bytes` of `None` (unreadable weights) is never a fit.
+/// Fits iff the UNCLAMPED token allowance with the encoder reaches the window without it
+/// (clamped windows fail open at [`MIN_CTX`]). `model_bytes` of `None` never fits.
 pub fn vision_fit(
     budget_mb: u64,
     model_bytes: Option<u64>,
@@ -333,9 +254,7 @@ pub fn vision_fit(
     }
 }
 
-/// [`vision_fit`] for the GGUF at `gguf_path` (resolved: `metadata` follows symlinks) on the
-/// device this process believes it is. Reads the file's length and its 64 KiB head, nothing
-/// more; a model with no encoder returns before either.
+/// [`vision_fit`] for the GGUF at `gguf_path` on this device; reads only its length and head.
 pub fn vision_fit_on_device(gguf_path: &Path, chat_model: &str) -> VisionFit {
     if encoder_for(chat_model).is_none() {
         return VisionFit::NotDeclared;
@@ -359,25 +278,16 @@ pub fn vision_fit_on_device(gguf_path: &Path, chat_model: &str) -> VisionFit {
 /// Set once by pond-server from the CUDA build flag. Only ever raised: see [`budgeted_device`].
 static BUDGETED_OVERRIDE: AtomicBool = AtomicBool::new(false);
 
-/// Record that this binary is a CUDA build, which only the Orin runs.
-///
-/// Called once in pond-server's `async_main` from `pond_adapters_local_inference::CUDA_ENABLED`,
-/// because a `cfg!` of that crate's feature cannot be read from anywhere else. `false` is a
-/// no-op, never a reset: the getter must fail closed to the Orin policy, and a later caller
-/// with less information must not talk it out of it.
+/// Record a CUDA build (only the Orin runs one); the feature's `cfg!` is not visible here.
+/// `false` is a no-op, never a reset: the getter must fail closed to the Orin policy.
 pub fn set_budgeted_device(cuda_build: bool) {
     if cuda_build {
         BUDGETED_OVERRIDE.store(true, Ordering::SeqCst);
     }
 }
 
-/// Whether this process must live within the Orin's memory budget.
-///
-/// Any of three signals is enough, so a forgotten setter, an emulation run or a CPU build on
-/// the board all land on the NARROW policy: the CUDA override; a device profile that stamps
-/// device settings (`scripts/jetson-emu.sh`); or the host's own tegra evidence
-/// (`/proc/device-tree/model`, `/etc/nv_tegra_release`), which catches the CPU-only binary
-/// `build-docker.sh` produces.
+/// Whether this process must live within the Orin's memory budget. Any one signal suffices, so
+/// a missed setter, an emulator run or a CPU build on the board all get the narrow policy.
 pub fn budgeted_device() -> bool {
     budgeted_from(
         BUDGETED_OVERRIDE.load(Ordering::SeqCst),
@@ -402,17 +312,9 @@ fn host_is_tegra() -> bool {
     })
 }
 
-/// Encoder dirs whose resident cost has been MEASURED on the Orin: the release gate for
-/// picture support on a budgeted device.
-///
-/// On a budgeted device a model declares vision only if it fits AND its dir is here. It ships
-/// EMPTY because nothing has been measured: the arithmetic says E2B and E2B-qat fit, but goose
-/// re-subtracts a resident encoder from MemAvailable on every cold text turn, and whether the
-/// board clears that during the boot prewarm with E2B, its drafter and its encoder all resident
-/// is a question only the board answers. Until it has, the Orin says honestly that it has no
-/// picture support and never loads an encoder, which is also better than today, where its
-/// truncated E2B stamp loads and fails at every E2B load. Candidates: `gemma-4-e2b-it`,
-/// `gemma-4-e2b-it-qat`.
+/// Encoder dirs whose resident cost was MEASURED on the Orin; a budgeted device declares vision
+/// only for a model that fits AND is listed. Ships empty: goose re-subtracts a resident encoder
+/// from MemAvailable each cold text turn, which only a board reading can clear.
 pub const DEVICE_MEASURED_VISION: &[&str] = &[];
 
 /// Whether, and with which encoder, a model reads pictures on this device.
@@ -449,8 +351,7 @@ impl VisionDeclaration {
     }
 }
 
-/// The declaration over its inputs. `fit` is called only on a budgeted device and only for a
-/// listed encoder, so an unlisted one costs no file I/O.
+/// The declaration over its inputs; `fit` runs only for a listed encoder on a budgeted device.
 pub fn declare(
     chat_model: &str,
     budgeted: bool,
@@ -473,12 +374,8 @@ pub fn declare(
     }
 }
 
-/// Whether `chat_model` (whose weights are at `gguf_path`, resolved) reads pictures here.
-///
-/// Off a budgeted device this is the name alone, with no file I/O. On one it is the fit AND
-/// the measured list, cached per (path, length, mtime, model): the `<vision>` section sits in
-/// the KV-cached static prefix, so the answer must be stable for a model across a process and
-/// may change only when the file itself does. `gguf_path` of `None` cannot prove a fit.
+/// Whether `chat_model` reads pictures here: by name off a budgeted device, else fit AND listed.
+/// Cached per file: `<vision>` sits in the KV-cached prefix, so it may change only with the file.
 pub fn vision_declaration(gguf_path: Option<&Path>, chat_model: &str) -> VisionDeclaration {
     budgeted_declaration(gguf_path, chat_model, budgeted_device())
 }
@@ -531,8 +428,7 @@ fn cached_fit(path: &Path, chat_model: &str) -> VisionFit {
 
 // ── The window apply_jetson_settings stamps ─────────────────────────────────
 
-/// The window for a model on the budgeted device, with the inputs that produced it (for the
-/// log line that has to accompany every stamp).
+/// A model's window on the budgeted device, with the inputs behind it for the stamp's log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceWindow {
     pub window: u32,
@@ -548,12 +444,8 @@ pub struct DeviceWindow {
     pub encoder_bytes: u64,
 }
 
-/// The window to stamp for `chat_model` at `gguf_path` (resolved), on the budgeted device.
-///
-/// Always the budgeted policy, whatever [`budgeted_device`] says, since only the device branch
-/// stamps a window. Charges the drafter whenever the model has one ([`drafter_budget_bytes`])
-/// and the encoder whenever the model declares vision here, which is the same
-/// [`vision_fit_on_device`] the goose adapter's stamp decision reads.
+/// The window to stamp for `chat_model`, always under the budgeted policy. Charges the encoder
+/// only if declared, by the same [`vision_fit_on_device`] the goose adapter's stamp reads.
 pub fn device_window(gguf_path: Option<&Path>, chat_model: &str) -> DeviceWindow {
     let file_len = gguf_path
         .and_then(|p| std::fs::metadata(p).ok())
@@ -590,7 +482,7 @@ mod tests {
     /// The Orin's LLM budget, fixed, so these tests do not read the environment.
     const BUDGET: u64 = LLM_BUDGET_MB;
 
-    /// `jetson_context_size` as local-inference computed it: the constant budget.
+    /// The window at the Orin's constant budget.
     fn jetson(model_bytes: u64, drafter_bytes: u64, kv: Option<u64>) -> u32 {
         context_size_for_budget(BUDGET, model_bytes, drafter_bytes, kv)
     }
@@ -621,12 +513,9 @@ mod tests {
         }
     }
 
-    // ── Moved from pond-adapters-local-inference, unchanged in substance ────
+    // ── Window arithmetic ──────────────────────────────────────────────────
 
-    /// Both shipped models, against the DEVICE-measured cost. The EXACT sizes of the two GGUFs
-    /// on the device (`stat -Lc %s`, 2026-08-16): the answer is a step function of weight size,
-    /// so approximations can land on a different step than the board does (a 336 MB gap once
-    /// hid over half of E4B's free KV budget).
+    /// Uses the exact on-device sizes: the window is a step function of weight size.
     #[test]
     fn jetson_context_fits_each_model_in_the_budget() {
         let e2b = jetson(ORIN_E2B_Q4_K_M, 0, None);
@@ -641,9 +530,7 @@ mod tests {
         assert!(e4b <= e2b);
     }
 
-    /// The emulator's whole claim, as arithmetic: a different device budget produces a different
-    /// window for the same weights. If the budget stopped reaching the derivation,
-    /// `scripts/jetson-emu.sh` would still announce it was emulating while testing the Mac.
+    /// `scripts/jetson-emu.sh` relies on this; otherwise it would silently test the Mac.
     #[test]
     fn a_different_device_budget_produces_a_different_window() {
         let nano = 7620 - RESERVED_MB;
@@ -670,9 +557,7 @@ mod tests {
         assert_eq!(context_size_for_budget(512, E4B_Q4_K_M, 0, None), 2048);
     }
 
-    /// E4B at its window fits the MEASURED budget with real headroom, and doubling again does not
-    /// fit at all. The arithmetic is redone here rather than copied from the function, so a test
-    /// cannot agree with the same mistake.
+    /// Redoes the arithmetic by hand, so the test cannot share the function's mistake.
     #[test]
     fn e4b_fits_its_window_and_could_not_take_another_doubling() {
         let weights_mb = 4_640_000_000u64 / MIB;
@@ -718,7 +603,6 @@ mod tests {
         assert!((8_192..16_384).contains(&((e4b_free * 1024) / E4B_KV)));
     }
 
-    /// Wiring the header-derived cost in did not move either shipped model.
     #[test]
     fn header_derived_cost_is_a_no_op_for_the_shipped_models() {
         for (bytes, kv, want) in [
@@ -776,10 +660,9 @@ mod tests {
         assert!(without.saturating_sub(with) <= expected_loss + 1024);
     }
 
-    // ── The move is behaviour-identical ────────────────────────────────────
+    // ── Drafter and encoder charges ────────────────────────────────────────
 
-    /// The Orin's live model with its drafter keeps 16384 through the move, charged either the
-    /// real drafter file (the old input) or the catalogue size (the new one).
+    /// Keeps 16384 whether charged the real drafter file or its catalogue size.
     #[test]
     fn e4b_qat_with_its_drafter_still_gets_16384() {
         assert_eq!(
@@ -798,7 +681,7 @@ mod tests {
         );
     }
 
-    /// No encoder means the old function exactly, across a sweep of sizes and slopes.
+    /// A zero encoder matches `context_size_for_budget` across a sweep of sizes and slopes.
     #[test]
     fn a_zero_encoder_is_the_old_arithmetic() {
         for bytes in (0..9_000_000_000u64).step_by(97_000_000) {
@@ -813,8 +696,6 @@ mod tests {
         }
     }
 
-    /// Charging the catalogue figure rather than the file lands every shipped model on the same
-    /// window, so the switch to it moves nothing on the board.
     #[test]
     fn the_catalogue_drafter_size_lands_on_the_same_windows_as_the_file() {
         for (model, bytes, file, kv) in [
@@ -881,8 +762,7 @@ mod tests {
         assert_eq!(kv_cost_from_head(&gemma4_head(42, 2, 18)), Some(E4B_KV));
     }
 
-    /// An unconfirmed sliding-window architecture keeps the fallback rather than a guess; a
-    /// dense one is exact whatever it is called.
+    /// Unconfirmed SWA keeps the fallback; a dense model is exact whatever its architecture.
     #[test]
     fn only_confirmed_swa_patterns_are_trusted() {
         let unconfirmed = GgufWriter::new()
@@ -909,10 +789,7 @@ mod tests {
 
     // ── Vision fit ─────────────────────────────────────────────────────────
 
-    /// The Orin's real files, at every plausible encoder compute cost: E2B fits (it is
-    /// ceiling-bound with ~900 MiB to spare), E4B does not (the encoder floors E4B-qat to 2048,
-    /// under its own 4,678-token turn-1 prompt). Because the split holds across 0..=900, the
-    /// unmeasured constant cannot flip a declaration.
+    /// E2B fits and E4B doesn't for any encoder compute in 0..=900, so the guess can't flip either.
     #[test]
     fn the_orin_files_fit_or_not_whatever_the_encoder_compute_costs() {
         let cases = [
@@ -959,8 +836,6 @@ mod tests {
         ));
     }
 
-    /// The fail-open the unclamped predicate exists to close: a model already at the floor gets
-    /// the floor with the encoder too, and must still not be declared.
     #[test]
     fn a_model_already_at_the_floor_is_not_declared() {
         for bytes in [ASSUMED_LARGEST_MODEL_BYTES, 5_300_000_000, 9_000_000_000] {
@@ -997,8 +872,7 @@ mod tests {
         );
     }
 
-    /// With the encoder charged, E4B-qat's window drops to the floor: the reason the Orin must not
-    /// declare it.
+    /// With the encoder charged, E4B-qat drops to the floor, so the Orin must not declare it.
     #[test]
     fn the_encoder_is_charged_its_weights_and_compute() {
         let enc = crate::models::domain::vision_encoder::encoder_by_dir("gemma-4-e4b-it-qat")
@@ -1017,8 +891,7 @@ mod tests {
         );
     }
 
-    /// A GGUF with the real file's length and header, as a sparse file: the end-to-end path the
-    /// adapters take, reading the length through `metadata` and the slope from the head.
+    /// A sparse GGUF with the real file's length and header, read the way the adapters read it.
     #[cfg(unix)]
     fn sparse_model(dir: &Path, name: &str, len: u64, head: &[u8]) -> PathBuf {
         use std::io::Write as _;
@@ -1059,8 +932,7 @@ mod tests {
         std::os::unix::fs::symlink(&e2b, &link).unwrap();
         assert!(vision_fit_on_device(&link, "gemma-4-E2B-it").fits());
 
-        // The window apply_jetson_settings stamps: the drafter charged, no encoder (nothing is
-        // measured, so nothing is declared), and the same 16384 E4B-qat has on the board.
+        // Drafter charged, no encoder (nothing measured, nothing declared): the board's 16384.
         let w = device_window(Some(&e4b), "gemma-4-E4B-it-qat-UD-Q4_K_XL");
         assert_eq!(w.window, 16384);
         assert_eq!(w.kv_kib_per_token, Some(E4B_KV));
@@ -1076,8 +948,7 @@ mod tests {
 
     // ── Declaration and the release gate ───────────────────────────────────
 
-    /// Nothing has been measured on the Orin, so nothing is declared there. Adding an entry is a
-    /// release decision backed by an Orin reading, and must name a real row.
+    /// Adding an entry is a release decision backed by an Orin reading.
     #[test]
     fn the_measured_list_ships_empty_and_names_only_real_rows() {
         assert!(
@@ -1152,8 +1023,6 @@ mod tests {
         assert_eq!(VisionDeclaration::Declared(spec).spec(), Some(&spec));
     }
 
-    /// Today, with nothing measured, the budgeted policy declares nothing for any model and never
-    /// needs the file, which is what keeps the Orin from loading an encoder.
     #[test]
     fn the_budgeted_policy_today_declares_nothing() {
         for model in [

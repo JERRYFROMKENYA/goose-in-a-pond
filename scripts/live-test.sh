@@ -145,6 +145,11 @@ export RUSTFLAGS=""
 # directory that is about to be deleted. The same trap as ORT above.
 export POND_DISABLE_MODEL_PROVISIONING=1
 
+# A scratch pond must not phone home either: with no key stored, the music route now asks Jarida's
+# credentials service for a token unless told `off`. The check below that expects "not set up" is
+# about the route reaching the secret store, and needs the service out of the picture.
+export POND_CREDENTIALS_URL=off
+
 if [ "$DO_BUILD" -eq 1 ]; then
   say "building pond-server (RUSTFLAGS empty, per ci.yml)"
   if ! cargo build -p pond-server; then

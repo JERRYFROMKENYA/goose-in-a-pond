@@ -12,9 +12,22 @@ use std::sync::Arc;
 mod in_process;
 pub use in_process::WhisperRsInput;
 
-/// Play a short two-tone wake-word confirmation ping (C6→E6, ~220ms).
-fn play_wake_ping() {
-    std::thread::spawn(|| {
+/// How long other audio stays paused while the words after a wake word are captured, renewed as
+/// capture goes on, and how long after capture for the reply's turn to take over.
+const QUIET_WHILE_LISTENING: std::time::Duration = std::time::Duration::from_secs(2);
+const QUIET_UNTIL_THE_TURN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The longest the ping waits for other audio to pause before it plays anyway.
+const PING_WAITS_AT_MOST: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Play a short two-tone wake-word confirmation ping (C6→E6, ~220ms), once other audio is paused.
+fn play_wake_ping(quiet: Option<Arc<pond_core::models::services::voice::quiet::Quiet>>) {
+    std::thread::spawn(move || {
+        let _quiet = quiet.as_ref().map(|quiet| {
+            let hold = quiet.hold();
+            quiet.until_quiet_blocking(PING_WAITS_AT_MOST);
+            hold
+        });
         use rodio::{OutputStream, Sink};
         let Ok((_stream, handle)) = OutputStream::try_default() else {
             return;
@@ -570,7 +583,16 @@ fn detection_loop(
                 transcript,
                 triggers
             );
-            play_wake_ping();
+            // Spotify's Developer Policy III.7: from the ping on, other audio stays paused, through
+            // the words said after it and until the reply's turn holds it (see `quiet`).
+            let quiet = pond_core::models::services::voice::quiet::installed();
+            let keep_quiet = |span: std::time::Duration| {
+                if let Some(quiet) = &quiet {
+                    quiet.linger(span);
+                }
+            };
+            keep_quiet(QUIET_WHILE_LISTENING);
+            play_wake_ping(quiet.clone());
 
             // Capture until `post_trigger_silence_ms` of silence or the `post_trigger_ms` ceiling.
             let poll_ms = 50u64;
@@ -583,6 +605,9 @@ fn detection_loop(
                     return Err(anyhow!("wake-word detection cancelled"));
                 }
                 elapsed_ms += poll_ms;
+                if elapsed_ms.is_multiple_of(500) {
+                    keep_quiet(QUIET_WHILE_LISTENING);
+                }
 
                 // Computed even with the silence gate off, so the level sink reports throughout.
                 let recent_samples = (sample_rate as u64 * poll_ms / 1000) as usize;
@@ -619,6 +644,8 @@ fn detection_loop(
             );
 
             mic.close();
+            // Transcribing comes next, then the turn; a false wake has no turn, and this runs out.
+            keep_quiet(QUIET_UNTIL_THE_TURN);
 
             let cmd_wav = encode_wav_mono_16k(&command_audio);
 

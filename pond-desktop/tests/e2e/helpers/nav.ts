@@ -1,28 +1,12 @@
-// ────────────────────────────────────────────────────────────
-// Reaching a destination, now that the sidebar is a drawer.
-//
-// The classic sidebar and the hub's icon rail both put every destination on
-// screen at all times, so a spec could click one with a single locator. The
-// drawer does not: a destination takes an open, sometimes a group expand, then
-// the click. That is three steps in every spec that navigates, which is what
-// this file exists to stop.
-// ────────────────────────────────────────────────────────────
-
 import { expect, type Page, type Locator } from "@playwright/test";
 
-/** The twelve that live behind "Manage" rather than in the top list. */
+/** Destinations behind "Manage" rather than in the top list. */
 const MANAGE_ITEMS = new Set([
   "Devices", "Mesh", "Pairing", "Schedules", "Context", "Skills",
   "Recipes", "Logs", "Models", "Prompts", "Extensions", "Faces",
 ]);
 
-/**
- * Open the drawer and return its "Go to" nav.
- *
- * Scoped rather than global on purpose: "Home" is both a destination and a
- * room name, so an unscoped getByRole matches two buttons and trips strict
- * mode.
- */
+/** Opens the drawer and returns its "Go to" nav: scoped, as "Home" is also a room and trips strict mode. */
 export async function openDrawer(page: Page): Promise<Locator> {
   await page.locator('[aria-label="Open menu"]').click();
   await expect(page.locator('[role="dialog"][aria-label="Menu"]')).toBeVisible({

@@ -413,8 +413,10 @@ pub(crate) mod tests {
     /// nothing plugged in. The USB card is tried first, and the default is never opened.
     #[test]
     fn on_a_board_the_usb_card_is_tried_before_a_default_that_also_works() {
-        let mut fake = FakeProber::default();
-        fake.plugged_in_first = true;
+        let mut fake = FakeProber {
+            plugged_in_first: true,
+            ..Default::default()
+        };
         fake.outputs
             .push(AudioDevice::new("default", true, DeviceKind::SoundServer));
         fake.outputs.push(

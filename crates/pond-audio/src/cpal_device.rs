@@ -20,6 +20,9 @@ pub struct CpalCapture {
     preferred: Option<String>,
     /// What the open stream is on, which is the default when `preferred` was not found.
     opened: Option<String>,
+    /// `preferred`, found once: on ALSA finding a named device opens every node to list them
+    /// (and wakes the jack plugin), which would otherwise happen on every reopen of the mic.
+    resolved: Option<(String, cpal::Device)>,
 }
 
 impl CpalCapture {
@@ -35,13 +38,26 @@ impl CpalCapture {
         }
     }
 
-    fn pick(&self) -> Result<cpal::Device, String> {
+    fn pick(&mut self) -> Result<cpal::Device, String> {
         let host = cpal::default_host();
-        if let Some(want) = &self.preferred {
-            let mut found = host
-                .input_devices()
-                .map_err(|e| format!("cannot enumerate input devices: {e}"))?;
-            if let Some(d) = found.find(|d| d.name().map(|n| &n == want).unwrap_or(false)) {
+        if let Some(want) = self.preferred.clone() {
+            if let Some((name, device)) = &self.resolved {
+                if *name == want {
+                    return Ok(device.clone());
+                }
+            }
+            let default = host
+                .default_input_device()
+                .filter(|d| d.name().ok().as_deref() == Some(want.as_str()));
+            let found = match default {
+                Some(d) => Some(d),
+                None => host
+                    .input_devices()
+                    .map_err(|e| format!("cannot enumerate input devices: {e}"))?
+                    .find(|d| d.name().ok().as_deref() == Some(want.as_str())),
+            };
+            if let Some(d) = found {
+                self.resolved = Some((want, d.clone()));
                 return Ok(d);
             }
             tracing::warn!(
@@ -67,6 +83,36 @@ impl CaptureDevice for CpalCapture {
         self.stop();
 
         let device = self.pick()?;
+        let opened = self.open(&device, shared);
+        if opened.is_err() {
+            // The device may have gone; find it afresh next time instead of reusing the handle.
+            self.resolved = None;
+        }
+        opened
+    }
+
+    fn stop(&mut self) {
+        // Dropping the stream closes the device, which turns the OS mic indicator off.
+        self.stream = None;
+        self.opened = None;
+    }
+
+    fn retarget(&mut self, device: Option<String>) -> bool {
+        let changed = self.preferred != device;
+        if changed {
+            self.resolved = None;
+        }
+        self.preferred = device;
+        changed
+    }
+
+    fn opened(&self) -> Option<String> {
+        self.opened.clone()
+    }
+}
+
+impl CpalCapture {
+    fn open(&mut self, device: &cpal::Device, shared: Arc<MicShared>) -> Result<(), String> {
         let name = device.name().ok();
         let supported = device
             .default_input_config()
@@ -132,22 +178,6 @@ impl CaptureDevice for CpalCapture {
         self.opened = name;
         Ok(())
     }
-
-    fn stop(&mut self) {
-        // Dropping the stream closes the device, which turns the OS mic indicator off.
-        self.stream = None;
-        self.opened = None;
-    }
-
-    fn retarget(&mut self, device: Option<String>) -> bool {
-        let changed = self.preferred != device;
-        self.preferred = device;
-        changed
-    }
-
-    fn opened(&self) -> Option<String> {
-        self.opened.clone()
-    }
 }
 
 #[cfg(test)]
@@ -162,7 +192,7 @@ mod tests {
     /// A stale device setting must not make the assistant deaf.
     #[test]
     fn an_unknown_preferred_device_falls_back_to_the_default() {
-        let cap = CpalCapture::with_device("no-such-device-8f3a2b");
+        let mut cap = CpalCapture::with_device("no-such-device-8f3a2b");
         match cap.pick() {
             Ok(_) => {}
             Err(e) => assert!(e.contains("no audio input device"), "{e}"),

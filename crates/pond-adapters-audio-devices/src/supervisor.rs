@@ -445,6 +445,7 @@ impl Inner {
                 let now = prober.fingerprint();
                 if now != fingerprint {
                     fingerprint = now;
+                    pond_audio_out::route::forget_devices();
                     self.exclude
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())

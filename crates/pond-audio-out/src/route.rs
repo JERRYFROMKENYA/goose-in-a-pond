@@ -15,6 +15,9 @@ static STALLED: Mutex<Option<String>> = Mutex::new(None);
 /// Devices a [`crate::Speaker`] or [`crate::AudioKeeper`] holds open, so a probe can read one
 /// as working instead of opening it a second time (ALSA `hw` refuses that).
 static HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The routed device, found once: on ALSA finding a named device opens every node to list them,
+/// which would otherwise happen each time the thinking tone or the wake ping starts.
+static RESOLVED: Mutex<Option<(String, rodio::cpal::Device)>> = Mutex::new(None);
 
 /// Play on `device` from now on; `None` follows the system default.
 pub fn set_output_device(device: Option<String>) {
@@ -22,6 +25,7 @@ pub fn set_output_device(device: Option<String>) {
     if *route != device {
         tracing::info!(device = ?device, "speaker route");
         *route = device;
+        forget_devices();
         GENERATION.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -81,15 +85,27 @@ pub fn default_output_name() -> Option<String> {
 
 /// Find an output device by name. ALSA's `default` is not worth listing every node for.
 pub fn find_output(name: &str) -> Option<rodio::cpal::Device> {
-    let host = rodio::cpal::default_host();
-    if let Some(d) = host.default_output_device() {
-        if d.name().ok().as_deref() == Some(name) {
-            return Some(d);
+    if let Some((cached, device)) = &*RESOLVED.lock().unwrap_or_else(|e| e.into_inner()) {
+        if cached == name {
+            return Some(device.clone());
         }
     }
-    host.output_devices()
-        .ok()?
-        .find(|d| d.name().ok().as_deref() == Some(name))
+    let host = rodio::cpal::default_host();
+    let found = host
+        .default_output_device()
+        .filter(|d| d.name().ok().as_deref() == Some(name))
+        .or_else(|| {
+            host.output_devices()
+                .ok()?
+                .find(|d| d.name().ok().as_deref() == Some(name))
+        })?;
+    *RESOLVED.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.to_string(), found.clone()));
+    Some(found)
+}
+
+/// Find the routed device afresh next time: one replugged under the same name is a new device.
+pub fn forget_devices() {
+    *RESOLVED.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// An open stream on `device` (`None`: the system default), and the name of what opened. A
@@ -101,6 +117,7 @@ pub fn open_output(
         match find_output(want).map(|d| rodio::OutputStream::try_from_device(&d)) {
             Some(Ok((stream, handle))) => return Ok((stream, handle, want.to_string())),
             Some(Err(e)) => {
+                forget_devices();
                 tracing::warn!(device = %want, error = %e, "speaker failed to open; using the default")
             }
             None => tracing::warn!(device = %want, "speaker not found; using the default"),

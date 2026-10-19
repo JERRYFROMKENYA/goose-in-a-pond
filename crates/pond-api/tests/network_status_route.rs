@@ -64,15 +64,19 @@ async fn a_paired_device_reads_the_radios_and_why_each_is_off() {
     let state = Arc::new(state);
     let lan = SocketAddr::from(([192, 168, 1, 50], 40_000));
     let bare = pond_api::build_companion_router(state.clone()).layer(MockConnectInfo(lan));
-    let wired = pond_api::build_companion_router(state)
+    let wired = pond_api::build_companion_router(state.clone())
         .layer(Extension(Arc::new(Radios) as Arc<dyn SetupRadios>))
         .layer(MockConnectInfo(lan));
+    // Pairing needs a peer on one of the host's own subnets, which a fixed address is only on
+    // some machines; the route itself takes the token from any peer.
+    let host = pond_api::build_companion_router(state)
+        .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40_000))));
 
     let (status, _) = get(&wired, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "never tokenless");
 
     let code = handshake.issue_pairing_code().await.unwrap().code;
-    let (status, paired) = pair_phone(&wired, &code, "status-phone", TEST_SPKI_PIN).await;
+    let (status, paired) = pair_phone(&host, &code, "status-phone", TEST_SPKI_PIN).await;
     assert_eq!(status, StatusCode::OK, "{paired}");
     let token = paired["session_token"].as_str().unwrap();
 

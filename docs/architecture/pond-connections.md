@@ -4,7 +4,7 @@ How a household sees and changes the pond's network links (Wi-Fi, Ethernet, Blue
 pairing settings, from goose-on-the-go and from both desktop settings views. The setup channel
 (`pond-setup-channel.md`) covers a pond with no network; this covers a pond that is already reachable.
 
-Status: **contract v1, 2026-10-19**. Server side in `pond-core::network` (ports) and `pond-connect`
+Status: **contract v1.1, 2026-10-19** (v1 plus five clarifications agreed with goose-on-the-go). Server side in `pond-core::network` (ports) and `pond-connect`
 (adapters); the phone and desktop build against the shapes below.
 
 ## Decisions
@@ -17,6 +17,7 @@ Status: **contract v1, 2026-10-19**. Server side in `pond-core::network` (ports)
 | 2026-10-19 | **Forgetting the network the pond is using now needs `"confirm": true`.** | Without another usable link it takes the pond off the LAN, and the household then needs the setup channel to bring it back. |
 | 2026-10-19 | **Ethernet is read-only.** | There is nothing to choose on a cable; the household needs to see the link and the address. |
 | 2026-10-19 | **Bluetooth's switch is the existing `ble_setup_enabled` setting.** | One switch, already in both desktop views; this adds what the radio is doing to the same screen. |
+| 2026-10-19 | **v1.1: `can_change` carries its reason, `signal` is a percentage, nulls are explicit, a scan answers within 15 s, and enterprise networks are listed but refused with `unsupported_security`.** Asked by goose-on-the-go. | Each lets a screen say what is wrong and what fixes it, instead of greying a button out with no explanation. A pond can only send a passphrase, and an enterprise network needs a username and certificate. |
 | 2026-10-19 | **A phone asking for a pairing code for another device is not in v1.** | It needs a decision on what proves the asker is that member (see "Open"). Codes stay host-issued: the desktop, the dashboard, or `pond-server pairing`. |
 
 ## Routes
@@ -53,29 +54,36 @@ Any paired token, in every state. Never tokenless.
     "advertising_as": "Pond 4e81",
     "session_open": false
   },
-  "can_change": true
+  "can_change": {"allowed": true, "reason": null}
 }
 ```
 
 - `wifi.state`: `connected` | `disconnected` | `unavailable` (no Wi-Fi hardware or no station on this
   OS; `reason` says which). `ssid`, `address`, `signal` are `null` when not connected.
+- `signal`, here and in the networks list, is a percentage, 0 to 100.
 - `ethernet`: one entry per wired interface, `[]` when there is none. `link`: `up` | `down`.
-  `address` is the first IPv4, or `null`. `speed_mbps` is `null` when the OS does not say.
+  `address` is the first IPv4, or `null` when there is none. `speed_mbps` is `null` when the OS does
+  not say.
 - `bluetooth.state`: `off` | `serving` | `advertising` | `unavailable`, with `reason` for the last.
   `advertising_as` is the label phones see (`Pond <id>`), `null` when not advertising.
-- `can_change`: whether this caller may use the write routes below, so a screen can disable them
-  instead of failing.
+- `can_change`: `{"allowed": bool, "reason": string | null}`, whether this caller may use the write
+  routes below, so a screen can disable them and say why. It covers only who the caller is
+  (`reason` like "Only the phone that set up this pond, or a household member's device, can change
+  its network"). What the OS allows is in `wifi.capabilities.*`.
 
 ### `GET /connections/wifi/networks`
 
 Any paired token. Scans now and answers the ranked list: strongest first, one entry per SSID, at most
-50, hidden networks left out.
+50, hidden networks left out. It answers within 15 s (Linux waits at most 10 s for a fresh scan);
+a client timeout of 20 s is enough.
 
 ```json
 {"networks": [{"ssid": "Home", "security": "wpa2", "signal": 70, "known": true, "current": true}]}
 ```
 
 - `security`: `open` | `wep` | `wpa` | `wpa2` | `wpa3` | `enterprise` (the setup channel's set).
+  Enterprise networks are listed so the household recognises theirs, but joining one is refused
+  (`unsupported_security`): a pond can only send a passphrase.
 - `known`: the pond has this network saved. `current`: the pond is on it now.
 - Refusals: `503 unsupported` (no station), `403 not_permitted` (the OS refuses the scan; macOS
   without Location permission), `409 busy` (a join is in progress).
@@ -88,6 +96,7 @@ Changers only (see Decisions). Body: `{"ssid": "Home", "passphrase": "…", "hid
 - `200 {"ssid": "Home", "address": "192.168.1.11", "https_port": 4443, "hostname": "nano"}`
 - `400 invalid_request` (empty or over-long SSID, a passphrase of the wrong length),
   `401 wrong_password`, `404 not_found`, `504 timeout`, `502 no_address`,
+  `400 unsupported_security` (an enterprise network; the setup channel's `wifi_join` answers the same),
   `403 not_permitted` (the polkit grant is missing on Linux), `403 not_allowed` (this caller may not
   change the pond's network), `503 unsupported`, `409 busy`.
 - A join that moves the pond to another LAN ends this HTTPS connection's reach. The phone then finds
@@ -136,6 +145,7 @@ Re-arming the card stays on the host (`pond-server setup-code --rearm`).
 | `in_use` | 409 | forgetting the current network without `confirm` |
 | `wrong_password`, `not_found`, `timeout`, `no_address` | 401, 404, 504, 502 | join |
 | `invalid_request` | 400 | malformed body or SSID |
+| `unsupported_security` | 400 | joining an enterprise network |
 
 ## Open
 

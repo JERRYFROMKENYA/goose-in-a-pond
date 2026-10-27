@@ -8,8 +8,12 @@ use anyhow::{bail, Result};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-/// Separates the JPEG, luma and analysis parts on the pipeline's stdout.
+/// Separates the parts of both of the pipeline's streams.
 pub const BOUNDARY: &str = "giapframe";
+
+/// Where the detector's pictures leave the pipeline: fd 0, which the pond makes a pipe. In the
+/// frames' mux their slower rate held every frame back, since multipartmux waits on all its pads.
+pub const PICTURE_FD: u32 = 0;
 
 /// Twice the motion grid's width, so VIC's filtered scale leaves a sample per grid cell and more.
 pub const LUMA_WIDTH: u32 = 128;
@@ -26,6 +30,9 @@ const RTSP_LATENCY_MS: u32 = 200;
 
 /// Bounds each tee branch so a slow reader drops frames at the source instead of queueing them.
 const QUEUE: [&str; 2] = ["queue", "max-size-buffers=4"];
+
+/// The detector's branch drops what its reader has not taken, so it can never stall the decoder.
+const LEAKY_QUEUE: [&str; 3] = ["queue", "max-size-buffers=1", "leaky=downstream"];
 
 /// Every element a pipeline below can use; each is looked up once per process.
 pub(crate) const ELEMENTS: &[&str] = &[
@@ -240,8 +247,8 @@ impl HardwareHead {
 }
 
 /// The gst-launch-1.0 argv for `head` at `fps`: a multipart stream on stdout of the live JPEG
-/// (`live` size when re-encoded) and an 8-bit luma picture of `luma` size on every frame, and an
-/// RGBA picture of `analysis` size for the detector [`ANALYSIS_FPS`] times a second.
+/// (`live` size when re-encoded) and an 8-bit luma picture of `luma` size on every frame, and one
+/// on [`PICTURE_FD`] of an RGBA picture of `analysis` size [`ANALYSIS_FPS`] times a second.
 pub fn pipeline_args(
     head: &HardwareHead,
     fps: u32,
@@ -338,6 +345,9 @@ pub fn pipeline_args(
             match transport {
                 JpegTransport::Http => {
                     let location = format!("location={}", quoted(url)?);
+                    // multipartdemux carries no frame rate, and jpegparse then claims 1/1, which
+                    // videorate held the stream to.
+                    let caps = format!("image/jpeg,framerate={}/1", fps.max(1));
                     // A server that stamps no times would leave videorate nothing to drop by.
                     push(
                         &mut a,
@@ -349,7 +359,7 @@ pub fn pipeline_args(
                             "!",
                             "multipartdemux",
                             "!",
-                            "image/jpeg",
+                            &caps,
                         ],
                     );
                 }
@@ -427,8 +437,12 @@ pub fn pipeline_args(
     push(&mut a, &[decoded, "!"]);
     push(&mut a, &QUEUE);
     push(&mut a, &["!", "nvvidconv", "!", &luma_caps, "!", "mux."]);
+    // A file has no live clock, so the sinks pace it; a camera paces itself.
+    let sync = format!("sync={}", matches!(head, HardwareHead::File { .. }));
+    let boundary = format!("boundary={BOUNDARY}");
+    let picture_fd = format!("fd={PICTURE_FD}");
     push(&mut a, &[decoded, "!"]);
-    push(&mut a, &QUEUE);
+    push(&mut a, &LEAKY_QUEUE);
     push(
         &mut a,
         &[
@@ -441,7 +455,12 @@ pub fn pipeline_args(
             "!",
             &analysis_caps,
             "!",
-            "mux.",
+            "multipartmux",
+            &boundary,
+            "!",
+            "fdsink",
+            &picture_fd,
+            &sync,
         ],
     );
 
@@ -459,9 +478,6 @@ pub fn pipeline_args(
     }
     push(&mut a, &["!", "mux."]);
 
-    // A file has no live clock, so the sink paces it; a camera paces itself.
-    let sync = format!("sync={}", matches!(head, HardwareHead::File { .. }));
-    let boundary = format!("boundary={BOUNDARY}");
     push(
         &mut a,
         &[
@@ -590,8 +606,9 @@ mod tests {
              t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! tee name=d \
              d. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=72 ! mux. \
-             d. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
-             ! video/x-raw,format=RGBA,width=416,height=234 ! mux. \
+             d. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=234 \
+             ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
         );
@@ -625,8 +642,9 @@ mod tests {
              ! videorate drop-only=true max-rate=30 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=72 ! mux. \
-             t. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
-             ! video/x-raw,format=RGBA,width=416,height=234 ! mux. \
+             t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=234 \
+             ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw(memory:NVMM),format=I420,width=640,height=360 ! nvjpegenc ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
@@ -643,6 +661,7 @@ mod tests {
             joined.starts_with("-q filesrc location=\"/tmp/clip.mp4\" ! parsebin ! nvv4l2decoder")
         );
         assert!(joined.ends_with("fdsink fd=1 sync=true"));
+        assert!(joined.contains("fdsink fd=0 sync=true"), "{joined}");
     }
 
     #[test]
@@ -684,8 +703,9 @@ mod tests {
              ! videorate drop-only=true max-rate=15 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=96 ! mux. \
-             t. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
-             ! video/x-raw,format=RGBA,width=416,height=312 ! mux. \
+             t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=312 \
+             ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw(memory:NVMM),format=I420,width=640,height=480 ! nvjpegenc ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
@@ -737,13 +757,14 @@ mod tests {
         assert_eq!(
             text(&pipeline_args(&http, 5, (640, 480), (128, 96), (416, 312)).unwrap()),
             "-q souphttpsrc location=\"http://cam.local/video.mjpg\" is-live=true do-timestamp=true \
-             ! multipartdemux ! image/jpeg ! jpegparse \
+             ! multipartdemux ! image/jpeg,framerate=5/1 ! jpegparse \
              ! videorate drop-only=true max-rate=5 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! tee name=d \
              d. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=96 ! mux. \
-             d. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
-             ! video/x-raw,format=RGBA,width=416,height=312 ! mux. \
+             d. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=312 \
+             ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
         );

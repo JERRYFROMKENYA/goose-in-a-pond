@@ -21,8 +21,8 @@ pub const LUMA_WIDTH: u32 = 128;
 /// YOLOX-Nano's input size, so the detector's letterbox never has to resize.
 pub const ANALYSIS_WIDTH: u32 = 416;
 
-/// How often the detector's picture comes, whatever the capture rate; the pipeline checks at most
-/// this often, and only while something moves or a person is being followed.
+/// How many detector pictures a second the pond keeps, whatever the capture rate; the pipeline
+/// checks at most this often, and only while something moves or a person is being followed.
 pub const ANALYSIS_FPS: u32 = 5;
 
 /// RTSP jitter buffer; gst's 2 s default would delay every event by that much.
@@ -32,6 +32,7 @@ const RTSP_LATENCY_MS: u32 = 200;
 const QUEUE: [&str; 2] = ["queue", "max-size-buffers=4"];
 
 /// The detector's branch drops what its reader has not taken, so it can never stall the decoder.
+/// It has no videorate: one there held the C920's every branch to the picture rate.
 const LEAKY_QUEUE: [&str; 3] = ["queue", "max-size-buffers=1", "leaky=downstream"];
 
 /// Every element a pipeline below can use; each is looked up once per process.
@@ -248,7 +249,7 @@ impl HardwareHead {
 
 /// The gst-launch-1.0 argv for `head` at `fps`: a multipart stream on stdout of the live JPEG
 /// (`live` size when re-encoded) and an 8-bit luma picture of `luma` size on every frame, and one
-/// on [`PICTURE_FD`] of an RGBA picture of `analysis` size [`ANALYSIS_FPS`] times a second.
+/// on [`PICTURE_FD`] of an RGBA picture of `analysis` size on every frame.
 pub fn pipeline_args(
     head: &HardwareHead,
     fps: u32,
@@ -421,7 +422,6 @@ pub fn pipeline_args(
         "video/x-raw,format=RGBA,width={},height={}",
         analysis.0, analysis.1
     );
-    let analysis_rate = format!("max-rate={}", ANALYSIS_FPS.min(fps.max(1)));
     // The luma and the detector's picture share one decode of a camera's JPEG.
     let decoded = if head.passes_jpeg_through() {
         push(&mut a, &["t.", "!"]);
@@ -446,10 +446,6 @@ pub fn pipeline_args(
     push(
         &mut a,
         &[
-            "!",
-            "videorate",
-            "drop-only=true",
-            &analysis_rate,
             "!",
             "nvvidconv",
             "!",
@@ -606,25 +602,11 @@ mod tests {
              t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! tee name=d \
              d. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=72 ! mux. \
-             d. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             d. ! queue max-size-buffers=1 leaky=downstream ! nvvidconv \
              ! video/x-raw,format=RGBA,width=416,height=234 \
              ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
-        );
-    }
-
-    #[test]
-    fn the_detectors_picture_never_comes_faster_than_the_capture() {
-        let head = HardwareHead::MjpegCamera {
-            device: "/dev/video0".into(),
-            width: 640,
-            height: 360,
-        };
-        let joined = text(&pipeline_args(&head, 2, (640, 360), (128, 72), (416, 234)).unwrap());
-        assert!(
-            joined.contains("videorate drop-only=true max-rate=2 ! nvvidconv"),
-            "{joined}"
         );
     }
 
@@ -642,7 +624,7 @@ mod tests {
              ! videorate drop-only=true max-rate=30 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=72 ! mux. \
-             t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             t. ! queue max-size-buffers=1 leaky=downstream ! nvvidconv \
              ! video/x-raw,format=RGBA,width=416,height=234 \
              ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! nvvidconv \
@@ -703,7 +685,7 @@ mod tests {
              ! videorate drop-only=true max-rate=15 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=96 ! mux. \
-             t. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             t. ! queue max-size-buffers=1 leaky=downstream ! nvvidconv \
              ! video/x-raw,format=RGBA,width=416,height=312 \
              ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! nvvidconv \
@@ -762,7 +744,7 @@ mod tests {
              t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! tee name=d \
              d. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=96 ! mux. \
-             d. ! queue max-size-buffers=1 leaky=downstream ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             d. ! queue max-size-buffers=1 leaky=downstream ! nvvidconv \
              ! video/x-raw,format=RGBA,width=416,height=312 \
              ! multipartmux boundary=giapframe ! fdsink fd=0 sync=false \
              t. ! queue max-size-buffers=4 ! mux. \

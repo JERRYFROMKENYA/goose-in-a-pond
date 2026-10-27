@@ -52,6 +52,10 @@ const CHECK_EVERY: Duration = Duration::from_millis(1000 / crate::gst::ANALYSIS_
 /// How long the detector keeps looking after the last motion while nobody is in view.
 const LOOK_AFTER_MOTION: Duration = Duration::from_secs(5);
 
+/// Change that sets the detector looking, below the motion events' threshold: a person across
+/// the room changes a few percent of the grid, and a look costs the GPU about 8 ms.
+const LOOK_ON_CHANGE: f64 = 0.02;
+
 /// Face matches tried per person before giving up on them: a back turned stays unknown.
 const FACE_TRIES: u32 = 5;
 
@@ -201,6 +205,7 @@ struct FaceTries {
 }
 
 impl PeopleWatch {
+    /// A change worth a motion event, which the next look names.
     fn moved(&mut self, changed_fraction: f64, now: Instant) {
         self.moved_at = Some(now);
         self.pending_motion = Some(
@@ -488,6 +493,11 @@ pub async fn run_vision_pipeline(
                 let now = Instant::now();
                 if let Some(fraction) = observed {
                     people.moved(fraction, now);
+                } else if detector
+                    .last_change()
+                    .is_some_and(|f| f >= LOOK_ON_CHANGE.min(cfg.motion.changed_fraction))
+                {
+                    people.moved_at = Some(now);
                 }
                 people.paced_by_capture |= analysis.is_some();
                 if !people.due(now, analysis.is_some()) {
@@ -1775,6 +1785,27 @@ mod tests {
         .await;
         let tracks: Vec<_> = events.iter().map(|(_, m)| m["track_id"].clone()).collect();
         assert_eq!(tracks, vec![serde_json::json!(1), serde_json::json!(2)]);
+    }
+
+    #[tokio::test]
+    async fn a_person_too_small_for_a_motion_event_still_sets_the_detector_looking() {
+        let storage = Arc::new(MockCameraStorage::new());
+        let mut cfg = no_cooldown();
+        cfg.motion.changed_fraction = 0.9;
+        run_vision_pipeline(
+            &mut HardwareFrames::someone_arrives(3),
+            Some(Locator::seeing(&[("person", 0.1)])),
+            None,
+            storage.clone(),
+            Arc::new(InProcessEventBus::new()),
+            &LiveCameraRegistry::new(),
+            cfg,
+        )
+        .await
+        .unwrap();
+        let events = storage.list_events("backyard-cam", 10).await.unwrap();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].event_type, "person");
     }
 
     #[tokio::test]

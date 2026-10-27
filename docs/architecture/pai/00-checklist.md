@@ -3840,3 +3840,31 @@ not a PAI milestone).**
   conversation's first turn still prefills all of its prompt. The engine's unit tests on the Orin
   (`cargo test --release -p goose-local-inference --features cuda --lib`): 197 passed, 0 failed,
   9 ignored.
+
+**2026-10-27 — The camera follows people (touches PAI-7 and PAI-8 through camera events and
+presence; not a PAI milestone).**
+
+- **What landed.** With YOLOX loaded, `pond-adapters-vision` looks five times a second while anyone
+  is in view or for 5 s after a 2% change of the picture, below the motion events' threshold (the
+  nano's is 0.5). Person boxes become tracks by overlap (`tracker.rs`): one `person` event when a
+  track starts, one more when its face is first recognised, faces tried once a second up to five
+  times. A face counts for the person whose box holds it. Events carry `track_id`. Motion with
+  nobody in view is named by the same look. On a Jetson the capture sends a 416-wide RGBA picture
+  of every frame on fd 0, a stream of its own, and the pond keeps five a second.
+- **Two capture bugs found on the way.** An HTTP MJPEG camera ran at 1 fps since the any-camera
+  capture: jpegparse claims 1/1 on a stream with no frame rate and videorate held it there. A
+  videorate in the detector's branch held every branch of the C920 to the picture rate. Both are
+  fixed, and the device test now checks the frame rate.
+- **What it changes for rules and context.** A person standing in view is one event, not one per
+  cooldown; presence `Arrived` is published once a track's face is known. While anyone is
+  followed no motion events are raised. The rules engine and the context ingest read events as
+  before.
+- **Invariants.** No migration, no setting, no prompt change, no egress; frames stay on the
+  device.
+- **Verified on the Orin** (E4B QAT at 16,384, YOLOX, SCRFD and AdaFace on TensorRT, 19:45–19:55Z).
+  A looping 14 s pedestrian clip served as a network MJPEG camera: 54 tracks in 60 s, an event per
+  track at a median 146 ms from the frame (163 ms at most), YOLOX 7–10 ms a look, one face match a
+  look at 123–141 ms; the pond 25% of a core, gst-launch 15%, GPU 8.6%. The quiet room on the
+  C920 at its own 14 fps: the pond 5%, gst-launch 7%, GPU 2.5%. LLM decode with the clip playing
+  33.2, 33.6 and 40.1 tok/s against 36.0, 35.7 and 40.7 in the quiet room. A walk past the real
+  camera by an enrolled member is owed.

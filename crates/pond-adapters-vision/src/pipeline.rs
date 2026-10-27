@@ -282,7 +282,7 @@ async fn record(
             identified_name: identified_name.clone(),
             face_confidence: face.confidence,
             face_bbox: face.bbox,
-            face_landmarks: face.landmarks.clone(),
+            face_landmarks: face.landmarks,
             measured_fps: registry.measured_fps(&cfg.camera_id),
             updated_at: Some(draft.captured_at),
         },

@@ -26,8 +26,9 @@
 #   --no-verify      Skip post-install health check
 #
 # Model options:
-#   --ollama         Use Ollama as LLM provider (auto-install on Linux)
-#   --llamafile      Use llamafile as LLM provider
+#   (default)        Offer GIAP's own conversation models, run in process; pick one or none
+#   --ollama         Use Ollama as LLM provider instead (auto-install on Linux)
+#   --llamafile      Use llamafile as LLM provider instead
 #   --no-models      Skip all model downloads
 #   --whisper-model MODEL  Whisper size: tiny|base|small (default: base)
 #
@@ -54,6 +55,7 @@ source "${SCRIPT_DIR}/lib/install-common.sh"
 source "${SCRIPT_DIR}/lib/install-deps.sh"
 source "${SCRIPT_DIR}/lib/install-build.sh"
 source "${SCRIPT_DIR}/lib/install-models.sh"
+source "${SCRIPT_DIR}/lib/pond-health.sh"
 source "${SCRIPT_DIR}/lib/install-systemd.sh"
 source "${SCRIPT_DIR}/lib/install-desktop.sh"
 source "${SCRIPT_DIR}/lib/setup-code.sh"

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use chrono::Utc;
-use pond_core::user_data::domain::vision::{CapturedFrame, JpegFrame, LumaPlane, FPS_RANGE};
+use pond_core::user_data::domain::vision::{CapturedFrame, Frame, JpegFrame, LumaPlane, FPS_RANGE};
 use pond_core::user_data::ports::vision::FrameSource;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -161,6 +161,8 @@ enum Candidate {
         head: HardwareHead,
         live: (u32, u32),
         luma: (u32, u32),
+        /// The detector's picture, [`gst::ANALYSIS_WIDTH`] wide at the live picture's shape.
+        analysis: (u32, u32),
     },
     CameraJpeg {
         args: Vec<String>,
@@ -199,7 +201,12 @@ fn plan(
     let hardware =
         |out: &mut Vec<Candidate>, head: HardwareHead, live: (u32, u32), luma: (u32, u32)| {
             if engines.runs(&head) {
-                out.push(Candidate::Hardware { head, live, luma });
+                out.push(Candidate::Hardware {
+                    head,
+                    live,
+                    luma,
+                    analysis: scaled(live, gst::ANALYSIS_WIDTH),
+                });
             }
         };
     match probe {
@@ -313,14 +320,19 @@ fn start(
     engines: &JetsonEngines,
 ) -> Result<Box<dyn FrameSource>> {
     Ok(match candidate {
-        Candidate::Hardware { head, live, luma } => {
+        Candidate::Hardware {
+            head,
+            live,
+            luma,
+            analysis,
+        } => {
             let Some(launch) = engines.gst_launch.as_deref() else {
                 bail!("gst-launch-1.0 is not installed");
             };
-            let args = gst::pipeline_args(head, cfg.fps, *live, *luma)?;
+            let args = gst::pipeline_args(head, cfg.fps, *live, *luma, *analysis)?;
             let process =
                 CaptureProcess::spawn(launch.as_os_str(), &args, "gst-launch-1.0", &cfg.input)?;
-            Box::new(HardwareSource::new(process, *luma, cfg.fps))
+            Box::new(HardwareSource::new(process, *luma, *analysis, cfg.fps))
         }
         Candidate::CameraJpeg { args } => {
             let process = CaptureProcess::spawn(ffmpeg, args, "ffmpeg", &cfg.input)?;
@@ -551,6 +563,7 @@ impl FrameSource for CameraJpegSource {
                     return Ok(Some(CapturedFrame::Jpeg(JpegFrame {
                         jpeg: Arc::new(jpeg),
                         luma: None,
+                        analysis: None,
                         captured_at: Utc::now(),
                     })));
                 }
@@ -566,27 +579,51 @@ impl FrameSource for CameraJpegSource {
     }
 }
 
-/// gst-launch's multipart stream: each live JPEG paired with the luma VIC scaled from it.
+/// gst-launch's multipart stream: each live JPEG paired with the luma VIC scaled from it, and
+/// now and then the detector's RGBA picture, which rides on the next pair.
 struct HardwareSource {
     process: CaptureProcess,
     parser: MultipartParser,
     luma_size: (u32, u32),
+    analysis_size: (u32, u32),
     // videorate let 20+ fps through at max-rate=5 on a live H.264 RTSP stream.
     gate: RateGate,
     jpeg: Option<Vec<u8>>,
     luma: Option<Vec<u8>>,
+    analysis: Option<Vec<u8>>,
 }
 
 impl HardwareSource {
-    fn new(process: CaptureProcess, luma_size: (u32, u32), fps: u32) -> Self {
+    fn new(
+        process: CaptureProcess,
+        luma_size: (u32, u32),
+        analysis_size: (u32, u32),
+        fps: u32,
+    ) -> Self {
         Self {
             process,
             parser: MultipartParser::new(gst::BOUNDARY),
             luma_size,
+            analysis_size,
             gate: RateGate::new(fps),
             jpeg: None,
             luma: None,
+            analysis: None,
         }
+    }
+}
+
+/// RGBA from VIC as the packed RGB the detector reads.
+fn rgba_to_frame(rgba: &[u8], (width, height): (u32, u32)) -> Frame {
+    let rgb = rgba
+        .chunks_exact(4)
+        .flat_map(|px| [px[0], px[1], px[2]])
+        .collect();
+    Frame {
+        width,
+        height,
+        rgb,
+        captured_at: Utc::now(),
     }
 }
 
@@ -594,22 +631,33 @@ impl HardwareSource {
 impl FrameSource for HardwareSource {
     async fn next_frame(&mut self) -> Result<Option<CapturedFrame>> {
         let (w, h) = self.luma_size;
+        let (aw, ah) = self.analysis_size;
         loop {
             while let Some(part) = self.parser.next_part()? {
-                // A part whose partner never came is replaced by the next of its kind.
+                // A part whose partner never came is replaced by the next of its kind; both raw
+                // parts are video/x-raw, so their length tells them apart.
                 match part {
                     Part::Jpeg(bytes) => self.jpeg = Some(bytes),
                     Part::Raw(bytes) if bytes.len() == (w * h) as usize => self.luma = Some(bytes),
+                    Part::Raw(bytes) if bytes.len() == (aw * ah * 4) as usize => {
+                        self.analysis = Some(bytes)
+                    }
                     Part::Raw(bytes) => bail!(
-                        "the hardware pipeline sent {} luma bytes, expected {}x{}",
+                        "the hardware pipeline sent {} raw bytes, expected luma {}x{} or RGBA {}x{}",
                         bytes.len(),
                         w,
-                        h
+                        h,
+                        aw,
+                        ah
                     ),
                 }
                 match (self.jpeg.take(), self.luma.take()) {
                     (Some(_), Some(_)) if !self.gate.admit(Instant::now()) => {}
                     (Some(jpeg), Some(pixels)) => {
+                        let analysis = self
+                            .analysis
+                            .take()
+                            .map(|rgba| rgba_to_frame(&rgba, self.analysis_size));
                         return Ok(Some(CapturedFrame::Jpeg(JpegFrame {
                             jpeg: Arc::new(jpeg),
                             luma: Some(LumaPlane {
@@ -617,6 +665,7 @@ impl FrameSource for HardwareSource {
                                 height: h,
                                 pixels,
                             }),
+                            analysis,
                             captured_at: Utc::now(),
                         })));
                     }
@@ -767,6 +816,7 @@ mod tests {
                 },
                 live: (640, 360),
                 luma: (128, 72),
+                analysis: (416, 234),
             }
         );
         assert_eq!(
@@ -780,6 +830,7 @@ mod tests {
                 },
                 live: (640, 480),
                 luma: (128, 96),
+                analysis: (416, 312),
             },
             "the raw sizes lack 640x360, so the smallest that covers it"
         );
@@ -849,6 +900,7 @@ mod tests {
                 },
                 live: (640, 360),
                 luma: (128, 72),
+                analysis: (416, 234),
             }
         );
         assert!(matches!(
@@ -891,6 +943,7 @@ mod tests {
                 },
                 live: (1280, 720),
                 luma: (128, 72),
+                analysis: (416, 234),
             }
         );
         let mut no_argus = jetson();
@@ -911,6 +964,7 @@ mod tests {
         let started = Instant::now();
         let mut source = start(candidate, cfg, &resolve_ffmpeg_bin(), engines)?;
         let mut first = None;
+        let mut analysed = 0;
         for _ in 0..n {
             let frame = tokio::time::timeout(FIRST_FRAME_TIMEOUT, source.next_frame()).await??;
             let Some(CapturedFrame::Jpeg(frame)) = frame else {
@@ -918,13 +972,27 @@ mod tests {
             };
             first.get_or_insert(started.elapsed());
             let picture = crate::jpeg_decode::decode_rgb(&frame.jpeg, frame.captured_at)?;
-            if let Candidate::Hardware { live, luma, .. } = candidate {
+            if let Candidate::Hardware {
+                live,
+                luma,
+                analysis,
+                ..
+            } = candidate
+            {
                 assert_eq!((picture.width, picture.height), *live, "live picture size");
                 let plane = frame.luma.expect("the hardware path pairs a luma plane");
                 assert_eq!((plane.width, plane.height), *luma, "luma size");
+                if let Some(picture) = frame.analysis {
+                    assert_eq!((picture.width, picture.height), *analysis, "detector size");
+                    assert!(picture.is_well_formed());
+                    analysed += 1;
+                }
             }
         }
         source.close().await;
+        if matches!(candidate, Candidate::Hardware { .. }) {
+            assert!(analysed > 0, "no detector picture in {n} frames");
+        }
         Ok(first.expect("n is at least one"))
     }
 
@@ -1100,6 +1168,7 @@ mod tests {
                 },
                 live: (640, 480),
                 luma: (128, 96),
+                analysis: (416, 312),
             }
         );
         assert_eq!(
@@ -1146,6 +1215,7 @@ mod tests {
                 },
                 live: (640, 480),
                 luma: (128, 96),
+                analysis: (416, 312),
             }
         );
         assert_eq!(scaled((1920, 1080), 640), (640, 360));
@@ -1205,7 +1275,7 @@ mod tests {
         ]
         .concat();
         let (_dir, process) = replay(&stream);
-        let mut source = HardwareSource::new(process, (4, 2), NO_RATE_LIMIT);
+        let mut source = HardwareSource::new(process, (4, 2), (3, 3), NO_RATE_LIMIT);
         let mut got = Vec::new();
         let ended = loop {
             match source.next_frame().await {
@@ -1228,12 +1298,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_detectors_picture_rides_on_the_next_pair() {
+        let rgba: Vec<u8> = (0..36).map(|i| i as u8).collect();
+        let stream = [
+            part("image/jpeg", b"j1"),
+            part("video/x-raw", &[1; 8]),
+            part("video/x-raw", &rgba),
+            part("image/jpeg", b"j2"),
+            part("video/x-raw", &[2; 8]),
+            part("image/jpeg", b"j3"),
+            part("video/x-raw", &[3; 8]),
+        ]
+        .concat();
+        let (_dir, process) = replay(&stream);
+        let mut source = HardwareSource::new(process, (4, 2), (3, 3), NO_RATE_LIMIT);
+        let mut seen = Vec::new();
+        while let Ok(Some(CapturedFrame::Jpeg(f))) = source.next_frame().await {
+            let analysis = f.analysis.map(|a| (a.width, a.height, a.rgb[..6].to_vec()));
+            seen.push((f.jpeg.to_vec(), analysis));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (b"j1".to_vec(), None),
+                (b"j2".to_vec(), Some((3, 3, vec![0, 1, 2, 4, 5, 6]))),
+                (b"j3".to_vec(), None),
+            ],
+            "RGBA loses its alpha and rides on the pair after it"
+        );
+    }
+
+    #[tokio::test]
     async fn the_hardware_stream_is_held_to_the_setting_whatever_videorate_does() {
         let stream: Vec<u8> = (0..4u8)
             .flat_map(|i| [part("image/jpeg", &[i]), part("video/x-raw", &[i; 8])].concat())
             .collect();
         let (_dir, process) = replay(&stream);
-        let mut source = HardwareSource::new(process, (4, 2), 1);
+        let mut source = HardwareSource::new(process, (4, 2), (3, 3), 1);
         match source.next_frame().await.unwrap() {
             Some(CapturedFrame::Jpeg(f)) => assert_eq!(*f.jpeg, vec![0]),
             other => panic!("unexpected {other:?}"),
@@ -1248,7 +1349,7 @@ mod tests {
     async fn a_luma_part_of_the_wrong_size_is_an_error() {
         let stream = [part("image/jpeg", b"j1"), part("video/x-raw", &[0; 5])].concat();
         let (_dir, process) = replay(&stream);
-        let mut source = HardwareSource::new(process, (4, 2), NO_RATE_LIMIT);
+        let mut source = HardwareSource::new(process, (4, 2), (3, 3), NO_RATE_LIMIT);
         let err = source.next_frame().await.unwrap_err().to_string();
         assert!(err.contains("expected 4x2"), "{err}");
     }

@@ -8,11 +8,18 @@ use anyhow::{bail, Result};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-/// Separates the JPEG and luma parts on the pipeline's stdout.
+/// Separates the JPEG, luma and analysis parts on the pipeline's stdout.
 pub const BOUNDARY: &str = "giapframe";
 
 /// Twice the motion grid's width, so VIC's filtered scale leaves a sample per grid cell and more.
 pub const LUMA_WIDTH: u32 = 128;
+
+/// YOLOX-Nano's input size, so the detector's letterbox never has to resize.
+pub const ANALYSIS_WIDTH: u32 = 416;
+
+/// How often the detector's picture comes, whatever the capture rate; the pipeline checks at most
+/// this often, and only while something moves or a person is being followed.
+pub const ANALYSIS_FPS: u32 = 5;
 
 /// RTSP jitter buffer; gst's 2 s default would delay every event by that much.
 const RTSP_LATENCY_MS: u32 = 200;
@@ -232,13 +239,15 @@ impl HardwareHead {
     }
 }
 
-/// The gst-launch-1.0 argv for `head` at `fps`: a multipart stream on stdout alternating the
-/// live JPEG (`live` size when re-encoded) and an 8-bit luma picture of `luma` size.
+/// The gst-launch-1.0 argv for `head` at `fps`: a multipart stream on stdout of the live JPEG
+/// (`live` size when re-encoded) and an 8-bit luma picture of `luma` size on every frame, and an
+/// RGBA picture of `analysis` size for the detector [`ANALYSIS_FPS`] times a second.
 pub fn pipeline_args(
     head: &HardwareHead,
     fps: u32,
     live: (u32, u32),
     luma: (u32, u32),
+    analysis: (u32, u32),
 ) -> Result<Vec<String>> {
     let mut a: Vec<String> = vec!["-q".into()];
     // nvjpegdec spent a whole core on the C920's 4:2:2 frames; this reaches NVJPG for 2%.
@@ -398,12 +407,43 @@ pub fn pipeline_args(
         "video/x-raw,format=GRAY8,width={},height={}",
         luma.0, luma.1
     );
-    push(&mut a, &["t.", "!"]);
-    push(&mut a, &QUEUE);
-    push(&mut a, &["!"]);
-    push(&mut a, jpeg_decoder);
+    let analysis_caps = format!(
+        "video/x-raw,format=RGBA,width={},height={}",
+        analysis.0, analysis.1
+    );
+    let analysis_rate = format!("max-rate={}", ANALYSIS_FPS.min(fps.max(1)));
+    // The luma and the detector's picture share one decode of a camera's JPEG.
+    let decoded = if head.passes_jpeg_through() {
+        push(&mut a, &["t.", "!"]);
+        push(&mut a, &QUEUE);
+        push(&mut a, &["!"]);
+        push(&mut a, jpeg_decoder);
+        push(&mut a, &["tee", "name=d"]);
+        "d."
+    } else {
+        "t."
+    };
     // multipartmux names request pads in request order, so a named `mux.sink_1` fails to link.
-    push(&mut a, &["nvvidconv", "!", &luma_caps, "!", "mux."]);
+    push(&mut a, &[decoded, "!"]);
+    push(&mut a, &QUEUE);
+    push(&mut a, &["!", "nvvidconv", "!", &luma_caps, "!", "mux."]);
+    push(&mut a, &[decoded, "!"]);
+    push(&mut a, &QUEUE);
+    push(
+        &mut a,
+        &[
+            "!",
+            "videorate",
+            "drop-only=true",
+            &analysis_rate,
+            "!",
+            "nvvidconv",
+            "!",
+            &analysis_caps,
+            "!",
+            "mux.",
+        ],
+    );
 
     push(&mut a, &["t.", "!"]);
     push(&mut a, &QUEUE);
@@ -542,15 +582,32 @@ mod tests {
             width: 640,
             height: 360,
         };
-        let args = pipeline_args(&head, 15, (640, 360), (128, 72)).unwrap();
+        let args = pipeline_args(&head, 15, (640, 360), (128, 72), (416, 234)).unwrap();
         assert_eq!(
             text(&args),
             "-q v4l2src device=\"/dev/video0\" ! image/jpeg,width=640,height=360 \
              ! videorate drop-only=true max-rate=15 ! tee name=t \
-             t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! nvvidconv \
+             t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! tee name=d \
+             d. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=72 ! mux. \
+             d. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=234 ! mux. \
              t. ! queue max-size-buffers=4 ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
+        );
+    }
+
+    #[test]
+    fn the_detectors_picture_never_comes_faster_than_the_capture() {
+        let head = HardwareHead::MjpegCamera {
+            device: "/dev/video0".into(),
+            width: 640,
+            height: 360,
+        };
+        let joined = text(&pipeline_args(&head, 2, (640, 360), (128, 72), (416, 234)).unwrap());
+        assert!(
+            joined.contains("videorate drop-only=true max-rate=2 ! nvvidconv"),
+            "{joined}"
         );
     }
 
@@ -560,7 +617,7 @@ mod tests {
             url: "rtsp://admin:pw@192.168.1.20:554/live".into(),
             codec: VideoCodec::H265,
         };
-        let args = pipeline_args(&head, 30, (640, 360), (128, 72)).unwrap();
+        let args = pipeline_args(&head, 30, (640, 360), (128, 72), (416, 234)).unwrap();
         assert_eq!(
             text(&args),
             "-q rtspsrc location=\"rtsp://admin:pw@192.168.1.20:554/live\" protocols=tcp latency=200 \
@@ -568,6 +625,8 @@ mod tests {
              ! videorate drop-only=true max-rate=30 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=72 ! mux. \
+             t. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=234 ! mux. \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw(memory:NVMM),format=I420,width=640,height=360 ! nvjpegenc ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
@@ -579,7 +638,7 @@ mod tests {
         let head = HardwareHead::File {
             path: "/tmp/clip.mp4".into(),
         };
-        let joined = text(&pipeline_args(&head, 5, (640, 360), (128, 72)).unwrap());
+        let joined = text(&pipeline_args(&head, 5, (640, 360), (128, 72), (416, 234)).unwrap());
         assert!(
             joined.starts_with("-q filesrc location=\"/tmp/clip.mp4\" ! parsebin ! nvv4l2decoder")
         );
@@ -600,7 +659,7 @@ mod tests {
                 codec: VideoCodec::H264,
             };
             assert!(
-                pipeline_args(&head, 5, (640, 360), (128, 72)).is_err(),
+                pipeline_args(&head, 5, (640, 360), (128, 72), (416, 234)).is_err(),
                 "{url:?}"
             );
         }
@@ -619,12 +678,14 @@ mod tests {
             height: 480,
         };
         assert_eq!(
-            text(&pipeline_args(&head, 15, (640, 480), (128, 96)).unwrap()),
+            text(&pipeline_args(&head, 15, (640, 480), (128, 96), (416, 312)).unwrap()),
             "-q v4l2src device=\"/dev/video0\" ! video/x-raw,format=YUY2,width=640,height=480 \
              ! nvvidconv ! video/x-raw(memory:NVMM),format=NV12 \
              ! videorate drop-only=true max-rate=15 ! tee name=t \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=96 ! mux. \
+             t. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=312 ! mux. \
              t. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw(memory:NVMM),format=I420,width=640,height=480 ! nvjpegenc ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
@@ -639,7 +700,7 @@ mod tests {
             width: 1280,
             height: 720,
         };
-        let joined = text(&pipeline_args(&head, 5, (1280, 720), (128, 72)).unwrap());
+        let joined = text(&pipeline_args(&head, 5, (1280, 720), (128, 72), (416, 234)).unwrap());
         assert!(
             joined.starts_with(
                 "-q v4l2src device=\"/dev/video2\" ! video/x-h264,width=1280,height=720 \
@@ -657,7 +718,7 @@ mod tests {
             width: 1280,
             height: 720,
         };
-        let joined = text(&pipeline_args(&head, 5, (1280, 720), (128, 72)).unwrap());
+        let joined = text(&pipeline_args(&head, 5, (1280, 720), (128, 72), (416, 234)).unwrap());
         assert!(
             joined.starts_with(
                 "-q nvarguscamerasrc sensor-id=1 \
@@ -674,12 +735,15 @@ mod tests {
             transport: JpegTransport::Http,
         };
         assert_eq!(
-            text(&pipeline_args(&http, 5, (640, 480), (128, 96)).unwrap()),
+            text(&pipeline_args(&http, 5, (640, 480), (128, 96), (416, 312)).unwrap()),
             "-q souphttpsrc location=\"http://cam.local/video.mjpg\" is-live=true do-timestamp=true \
              ! multipartdemux ! image/jpeg ! jpegparse \
              ! videorate drop-only=true max-rate=5 ! tee name=t \
-             t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! nvvidconv \
+             t. ! queue max-size-buffers=4 ! nvv4l2decoder mjpeg=1 ! tee name=d \
+             d. ! queue max-size-buffers=4 ! nvvidconv \
              ! video/x-raw,format=GRAY8,width=128,height=96 ! mux. \
+             d. ! queue max-size-buffers=4 ! videorate drop-only=true max-rate=5 ! nvvidconv \
+             ! video/x-raw,format=RGBA,width=416,height=312 ! mux. \
              t. ! queue max-size-buffers=4 ! mux. \
              multipartmux name=mux boundary=giapframe ! fdsink fd=1 sync=false"
         );
@@ -687,7 +751,7 @@ mod tests {
             url: "rtsp://cam.local/mjpeg".into(),
             transport: JpegTransport::Rtsp,
         };
-        let joined = text(&pipeline_args(&rtsp, 5, (640, 480), (128, 96)).unwrap());
+        let joined = text(&pipeline_args(&rtsp, 5, (640, 480), (128, 96), (416, 312)).unwrap());
         assert!(
             joined.starts_with(
                 "-q rtspsrc location=\"rtsp://cam.local/mjpeg\" protocols=tcp latency=200 \

@@ -57,6 +57,12 @@ t_nul_bytes_before_the_load_still_find_it() {
   world; nul; line 'INFO pond_server: starting'; nul; line "$CUDA"; line "$INFERENCE"
   pond_engine_state "$LOG" linux; eq "$POND_ENGINE" CUDA && eq "$POND_ENGINE_FAILED" ""
 }
+t_a_nul_inside_a_matched_line_raises_no_warning() {
+  world; printf '\000\000%s\n' "2026-10-27T17:34:15Z  $CUDA" >> "$LOG"; line "$INFERENCE"
+  turn 31.6 "drafter=true draft_accept_rate=0.8"; printf '\000INFO giap::kv: saved event="saved"\n' >> "$LOG"
+  err="$( { pond_engine_state "$LOG" linux; pond_mtp_state "$LOG"; pond_kv_state "$LOG"; } 2>&1 >/dev/null )"
+  eq "$err" "" && pond_engine_state "$LOG" linux && eq "$POND_ENGINE" CUDA
+}
 t_a_refused_allocation_after_the_load_is_a_failed_load() {
   world; nul; line "$CUDA"; line "$OOM"; line "$GAVE_UP"; line 'INFO giap::trace: static prefix precompiled'
   pond_engine_state "$LOG" linux
@@ -127,7 +133,8 @@ t_kv_counts_the_days_snapshot_events() {
 # module <signed|unsigned>: an nvmap.ko the fake modinfo reports.
 module() {
   printf 'ELF and code' > "$W/nvmap.ko"
-  [ "$1" = signed ] && printf 'signature bytes%s\n' "$NVMAP_SIGNATURE_MARK" >> "$W/nvmap.ko"
+  if [ "$1" = signed ]; then printf 'signature bytes%s\n' "$NVMAP_SIGNATURE_MARK" >> "$W/nvmap.ko"
+  else printf 'symbols\000\000\000\000\000\000\000\000\000\000\000\000\001\000\000\000' >> "$W/nvmap.ko"; fi
   printf '#!/bin/sh\necho "%s"\n' "$W/nvmap.ko" > "$W/bin/modinfo"; chmod +x "$W/bin/modinfo"
 }
 
@@ -138,6 +145,7 @@ t_nvidias_module_on_a_capped_release_is_capped() {
 }
 t_a_module_built_on_the_board_is_local() {
   world; module unsigned
+  err="$(jetson_nvmap_state 36.4.7 2>&1)"; eq "$err" "" || return 1
   jetson_nvmap_state 36.4.7; eq "$NVMAP_STATE" local
 }
 t_an_unreadable_module_is_unknown() {

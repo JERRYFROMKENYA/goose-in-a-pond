@@ -2,8 +2,9 @@
 # scripts/lib/pond-health.sh — what the pond's log and a Jetson's GPU driver say about inference.
 #
 # Sourced by giap.sh (set -u) and install.sh (set -euo pipefail, IFS without a space), so a grep
-# that matches nothing never ends the caller. Written for bash 3.2. Every log read uses `grep -a`:
-# an unclean shutdown leaves NUL bytes in the log, and GNU grep then prints no match past the first.
+# that matches nothing never ends the caller. Written for bash 3.2. Every log read uses `grep -a`
+# and drops NUL bytes: an unclean shutdown leaves them in the log, GNU grep then prints no match
+# past the first, and bash warns about each one a command substitution meets.
 
 # The L4T releases whose stock nvmap caps a single large GPU allocation (CVE-2025-33182/33177).
 NVMAP_CAPPED_RELEASES="36.4.7 35.6.3 38.2.2"
@@ -18,7 +19,7 @@ pond_log_today() { printf '%s/logs/pond.log.%s' "$1" "$(date -u +%F)"; }
 # _pond_last_load <log>: the line number of the last settings line, or 0.
 _pond_last_load() {
   local stamp
-  stamp="$(grep -anE "$POND_SETTINGS_LINES" "$1" 2>/dev/null | tail -1 || true)"
+  stamp="$(grep -anE "$POND_SETTINGS_LINES" "$1" 2>/dev/null | tail -1 | tr -d '\000' || true)"
   printf '%s' "${stamp%%:*}" | grep -E '^[0-9]+$' || printf '0'
 }
 
@@ -32,7 +33,7 @@ pond_engine_state() {
   [ -f "$log" ] || return 0
   n="$(_pond_last_load "$log")"
   [ "$n" -gt 0 ] || return 0
-  stamp="$(sed -n "${n}p" "$log")"
+  stamp="$(sed -n "${n}p" "$log" | tr -d '\000')"
   case "$stamp" in
     *"Jetson Orin Nano CUDA"*) POND_ENGINE=CUDA ;;
     *CPU-ONLY*)                POND_ENGINE=CPU-ONLY ;;
@@ -40,7 +41,7 @@ pond_engine_state() {
     *LiteRT-LM*)               POND_ENGINE="LiteRT-LM $(printf '%s' "$stamp" | sed -n 's/.*execution="\([a-z]*\)".*/\1/p')" ;;
   esac
   after="$(tail -n +"$((n + 1))" "$log" \
-    | grep -anE 'cudaMalloc failed|failed to load model|kind="model_out_of_gpu_memory"|kind="inference"' || true)"
+    | grep -anE 'cudaMalloc failed|failed to load model|kind="model_out_of_gpu_memory"|kind="inference"' | tr -d '\000' || true)"
   [ -n "$after" ] || return 0
   while IFS= read -r line; do
     ln="${line%%:*}"
@@ -74,7 +75,7 @@ pond_mtp_state() {
   POND_MTP_TURNS=0; POND_MTP_RATE=""; POND_MTP_TPS=""; POND_MTP_LOGGED=false; POND_MTP_FAILED=""
   [ -f "$log" ] || return 0
   n="$(_pond_last_load "$log")"
-  turns="$(tail -n +"$((n + 1))" "$log" | grep -aE 'kind="turn_end"|failed to create draft context' || true)"
+  turns="$(tail -n +"$((n + 1))" "$log" | grep -aE 'kind="turn_end"|failed to create draft context' | tr -d '\000' || true)"
   [ -n "$turns" ] || return 0
   case "$turns" in *"drafter="*) POND_MTP_LOGGED=true ;; esac
   case "$turns" in *"failed to create draft context"*) POND_MTP_FAILED="the drafter's context did not fit in GPU memory" ;; esac
@@ -99,7 +100,7 @@ pond_kv_state() {
   local log="$1" events
   POND_KV_SAVED=0; POND_KV_LOADED=0; POND_KV_NOT_WRITTEN=0; POND_KV_REASON=""; POND_KV_SEEN=false
   [ -f "$log" ] || return 0
-  events="$(grep -a 'giap::kv' "$log" || true)"
+  events="$(grep -a 'giap::kv' "$log" | tr -d '\000' || true)"
   [ -n "$events" ] || return 0
   POND_KV_SEEN=true
   POND_KV_SAVED="$(printf '%s\n' "$events" | grep -c 'event="saved"' || true)"
@@ -114,12 +115,14 @@ pond_kv_state() {
 # fix is) or unknown.
 # shellcheck disable=SC2034  # read by giap.sh, which sources this file
 jetson_nvmap_state() {
-  local f
+  local f mi=modinfo
   NVMAP_STATE=unknown
-  f="$(modinfo -F filename nvmap 2>/dev/null || /sbin/modinfo -F filename nvmap 2>/dev/null || true)"
+  # A login shell over ssh may lack /sbin on PATH.
+  command -v modinfo >/dev/null 2>&1 || mi=/sbin/modinfo
+  f="$("$mi" -F filename nvmap 2>/dev/null || true)"
   case "$f" in *.ko) ;; *) return 0 ;; esac
   [ -r "$f" ] || return 0
-  if [ "$(tail -c 28 "$f" | tr -d '\n')" != "$NVMAP_SIGNATURE_MARK" ]; then
+  if [ "$(tail -c 28 "$f" | tr -d '\n\000')" != "$NVMAP_SIGNATURE_MARK" ]; then
     NVMAP_STATE=local
     return 0
   fi

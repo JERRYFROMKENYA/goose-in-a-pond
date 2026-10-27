@@ -2473,6 +2473,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
         "inference_count": s.inference_count,
         // Runs caused by thinking without answering, which `inference_count` lumps with tool runs.
         "reengagements": s.reengagements,
+        // Null when no MTP drafter ran: the only per-turn sign that speculative decoding did.
+        "draft_accept_rate": s.draft_accept_rate,
     })
     .to_string()
 }

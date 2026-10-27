@@ -1346,12 +1346,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_luma_part_of_the_wrong_size_is_an_error() {
+    async fn a_raw_part_of_neither_size_is_an_error() {
         let stream = [part("image/jpeg", b"j1"), part("video/x-raw", &[0; 5])].concat();
         let (_dir, process) = replay(&stream);
         let mut source = HardwareSource::new(process, (4, 2), (3, 3), NO_RATE_LIMIT);
         let err = source.next_frame().await.unwrap_err().to_string();
-        assert!(err.contains("expected 4x2"), "{err}");
+        assert!(err.contains("expected luma 4x2 or RGBA 3x3"), "{err}");
     }
 
     #[tokio::test]

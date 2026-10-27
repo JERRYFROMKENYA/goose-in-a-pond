@@ -371,6 +371,8 @@ pub enum RunStatus {
     Running,
     Completed,
     Failed,
+    /// A missed fire time that did not run; `started_at` is when it was due, `result` says why.
+    Skipped,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,6 +404,14 @@ pub struct ScheduleResultEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skipped_run_is_spelled_skipped_on_the_wire() {
+        assert_eq!(
+            serde_json::to_string(&RunStatus::Skipped).unwrap(),
+            "\"skipped\""
+        );
+    }
 
     #[test]
     fn task_kind_serde_round_trip_agent() {

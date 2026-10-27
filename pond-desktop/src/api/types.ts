@@ -427,7 +427,7 @@ export interface Schedule {
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result?: string;
   error?: string;
   started_at: string;
@@ -440,7 +440,7 @@ export interface ScheduleRunNotification {
   id: string;
   scheduleId: string;
   scheduleName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result: string | null;
   error: string | null;
   startedAt: string;

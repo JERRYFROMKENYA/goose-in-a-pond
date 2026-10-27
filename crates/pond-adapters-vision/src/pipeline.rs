@@ -373,7 +373,7 @@ async fn record(
             tracing::info!(
                 camera = %cfg.camera_id,
                 event_type = %event.event_type,
-                changed_fraction = draft.changed_fraction.unwrap_or(0.0),
+                changed_fraction = ?draft.changed_fraction,
                 face_detected = face.detected,
                 track = ?draft.track,
                 latency_ms,
@@ -550,6 +550,9 @@ pub async fn run_vision_pipeline(
                     })
                     .flatten();
                 let in_view = people.tracker.confirmed().count();
+                // Recognition finds the frame's one best face, so it runs once a look and the
+                // face goes to the person whose box holds it.
+                let mut face_this_look: Option<FaceOutcome> = None;
                 for id in due {
                     let Some(track) = people.tracker.get(id).cloned() else {
                         continue;
@@ -557,7 +560,14 @@ pub async fn run_vision_pipeline(
                     let face_started = Instant::now();
                     let face = match (&face_rec, jpeg_bytes) {
                         (Some(rec), Some(bytes)) => {
-                            let found = identify_face(rec.as_ref(), bytes, &cfg.camera_id).await;
+                            let found = match &face_this_look {
+                                Some(found) => found.clone(),
+                                None => {
+                                    let found =
+                                        identify_face(rec.as_ref(), bytes, &cfg.camera_id).await;
+                                    face_this_look.insert(found).clone()
+                                }
+                            };
                             if face_belongs(&found, &track, in_view, bytes) {
                                 found
                             } else {
@@ -1806,6 +1816,22 @@ mod tests {
         let events = storage.list_events("backyard-cam", 10).await.unwrap();
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].event_type, "person");
+    }
+
+    #[tokio::test]
+    async fn two_people_seen_at_once_cost_one_face_match() {
+        let face = Arc::new(FaceAfter {
+            known_from: 99,
+            calls: Default::default(),
+        });
+        let events = follow(
+            HardwareFrames::someone_arrives(3),
+            Locator::seeing(&[("person", 0.05), ("person", 0.7)]),
+            Some(face.clone()),
+        )
+        .await;
+        assert_eq!(events.len(), 2, "{events:?}");
+        assert_eq!(face.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -1119,7 +1119,8 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
 start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
-`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}` or `sensor_trigger`.
+`kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}`, `sensor_trigger` or
+`routine {actions}`, where each action is a rule action (`device_power`, `notify`).
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
@@ -1127,7 +1128,7 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 | `GET /schedules` | | `[Schedule]` |
 | `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?, ask_if_missed?}` | `201` with the task |
 | `GET /schedules/upcoming` | `?limit=` | active tasks by next fire |
-| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, fire_at?, once?, ask_if_missed?}` | the task |
+| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, kind?, fire_at?, once?, ask_if_missed?}`; `kind` wins over `prompt` | the task |
 | `DELETE /schedules/{id}` | | `{deleted}` |
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
@@ -1140,7 +1141,8 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A
 one-off is `fire_at` (an RFC 3339 instant, stored with cron `@once`), or `once: true` with a `cron`
 whose next occurrence is the instant; `fire_at` already past is `400 code: "fire_at_in_past"`. A
-`sensor_trigger` kind is validated as `/rules` validates it.
+`sensor_trigger` kind is validated as `/rules` validates it. A `routine` with no actions, or with an
+`agent_prompt` action, is `400`, on create and on update.
 
 ## Memory, reminders, suggestions and proposals
 

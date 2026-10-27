@@ -387,8 +387,8 @@ detect_engine() {
   esac
 }
 
-# The recorded LiteRT-LM packages, and on Linux the one deployed under the data dir. Reads each
-# manifest's first line and hashes nothing: doctor and `litert status` do the verifying.
+# The recorded LiteRT-LM packages, and on Linux the one the server loads from the data dir. Reads
+# each manifest's first line and hashes nothing: doctor and `litert status` do the verifying.
 detect_litert() {
   litert_state macos-arm64
   D_LITERT_MAC="$LITERT_STATE"; D_LITERT_MAC_TAG="$LITERT_STATE_TAG"; D_LITERT_MAC_DIR="$LITERT_STATE_DIR"
@@ -396,7 +396,8 @@ detect_litert() {
   D_LITERT_LNX="$LITERT_STATE"; D_LITERT_LNX_TAG="$LITERT_STATE_TAG"; D_LITERT_LNX_DIR="$LITERT_STATE_DIR"
   D_LITERT_DEV=""; D_LITERT_DEV_TAG=""; D_LITERT_DEV_DIR=""
   if [ "$D_OS" = "linux" ]; then
-    D_LITERT_DEV_DIR="$D_DATA_DIR/$(litert_device_subdir)"
+    D_LITERT_DEV_DIR="$(litert_device_in_use "$D_DATA_DIR")"
+    [ -n "$D_LITERT_DEV_DIR" ] || D_LITERT_DEV_DIR="$D_DATA_DIR/$(litert_device_subdir)"
     _litert_dir_state "$D_LITERT_DEV_DIR"
     D_LITERT_DEV="$LITERT_STATE"; D_LITERT_DEV_TAG="$LITERT_STATE_TAG"
   fi
@@ -849,7 +850,9 @@ doctor_litert() {
           DOC_FAIL=$((DOC_FAIL+1))
         fi
         if [ "$D_LITERT_DEV" = "other-pin" ]; then
-          warn "the installed LiteRT-LM is $D_LITERT_DEV_TAG; this checkout pins $(litert_tag)"
+          warn "the pond loads LiteRT-LM $D_LITERT_DEV_TAG; this checkout pins $(litert_tag)"
+          note "a package off the pin lacks GIAP's fixes, among them fp32 GPU activations: without them tool calls come out garbled"
+          note "fix: bash scripts/giap.sh litert build linux-arm64 on the Mac, then scripts/jetson.sh deploy; or bash scripts/giap.sh litert import DIR here"
           DOC_WARN=$((DOC_WARN+1))
         fi ;;
     esac

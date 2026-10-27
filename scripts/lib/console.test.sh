@@ -61,6 +61,14 @@ t_utf8_terminals_get_blocks() {
   eq "$(cs_spark 2 0 "0 8")" "▁█" && eq "$(cs_hbar 50 2)" "▓░"
 }
 
+t_lines_are_clipped_by_what_shows_not_by_bytes() {
+  world
+  eq "$(printf 'abcdef\n' | cs_clip 4)" "abcd"$'\033[0m' || return 1
+  eq "$(printf '\033[7mab\033[0mcd\n' | cs_clip 3)" $'\033[7mab\033[0mc\033[0m' || return 1
+  eq "$(printf '▁▂▃▄\n' | cs_clip 2)" "▁▂"$'\033[0m' || return 1
+  eq "$(printf 'short\n' | cs_clip 10)" "short"
+}
+
 # ── storing samples ──────────────────────────────────────────────────────────
 
 sample() { # <cpu total> <cpu idle> <log line>

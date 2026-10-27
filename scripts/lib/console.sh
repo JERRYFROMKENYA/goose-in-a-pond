@@ -193,6 +193,22 @@ cs_gib() { awk -v k="${1:-0}" 'BEGIN { printf "%.1f", k / 1048576 }'; }
 cs_uptime() { awk -v s="${1:-0}" 'BEGIN { d = int(s / 86400); h = int((s % 86400) / 3600); m = int((s % 3600) / 60)
   if (d > 0) printf "%dd %dh", d, h; else printf "%dh %dm", h, m }'; }
 cs_rule() { awk -v r="$CS_RULE" -v w="$1" 'BEGIN { for (i = 0; i < w; i++) printf "%s", r }'; }
+# cs_clip <width>: each line on stdin cut to <width> visible columns. Escape sequences and the
+# continuation bytes of a UTF-8 glyph take no column; a cut line ends with a reset.
+cs_clip() {
+  LC_ALL=C awk -v w="$1" 'BEGIN { for (i = 128; i < 192; i++) cont = cont sprintf("%c", i); esc = sprintf("%c", 27) }
+  { out = ""; n = 0; i = 1; len = length($0); cut = 0
+    while (i <= len) {
+      c = substr($0, i, 1)
+      if (c == esc) { j = i + 1; while (j <= len && substr($0, j, 1) !~ /[A-Za-z]/) j++
+        out = out substr($0, i, j - i + 1); i = j + 1; continue }
+      if (index(cont, c) == 0) { if (n >= w) { cut = 1; break }; n++ }
+      out = out c; i++
+    }
+    print out (cut ? esc "[0m" : "")
+  }'
+}
+
 # cs_pad <text> <width>: cut or pad plain text to exactly <width> columns.
 cs_pad() { awk -v s="$1" -v w="$2" 'BEGIN { if (length(s) > w) s = substr(s, 1, w); printf "%-" w "s", s }'; }
 
@@ -313,7 +329,8 @@ cs_dash_top() {
 
   # The machine: bars for now, sparklines for the last minutes.
   hist="$CS_DIR/h$CS_SEL/hist"
-  n=$(( cols - 52 )); [ "$n" -gt 8 ] || n=8
+  # Wide enough to read a trend, narrow enough that the figures after it still fit.
+  n=$(( cols - 74 )); [ "$n" -gt 8 ] || n=8
   cpu="$(cs_get cpu_pct)"; gpu="$(cs_get gpu_pct)"
   memt="$(cs_get mem_total_kb)"; memu="$(cs_get mem_used_kb)"
   mem="$(awk -v t="${memt:-0}" -v u="${memu:-0}" 'BEGIN { print (t > 0 ? int(100 * u / t + 0.5) : 0) }')"
@@ -418,7 +435,7 @@ cs_frame() {
       *)    body="$(cs_dashboard "$cols" "$rows")" ;;
     esac
   fi
-  printf '\033[H%s' "$(printf '%s\n' "$body" | head -n $((rows - 1)) | sed $'s/$/\033[K/')"
+  printf '\033[H%s' "$(printf '%s\n' "$body" | head -n $((rows - 1)) | cs_clip "$cols" | sed $'s/$/\033[K/')"
   printf '\033[J\033[%s;1H%s' "$rows" "$(cs_footer "$cols")"
 }
 
@@ -557,6 +574,8 @@ console_main() {
   fi
   trap 'cs_cleanup' EXIT
   trap 'cs_cleanup; exit 130' INT TERM
+  # A closed terminal window sends HUP, which would skip the EXIT trap.
+  trap 'cs_cleanup; exit 129' HUP
   cs_start_samplers
   cs_screen_on
   cs_say "first samples arrive within a few seconds; ? lists the keys" 5
@@ -568,7 +587,7 @@ console_main() {
   done
   # From the menu, the console returns there: its samplers and screen must not outlive it.
   cs_cleanup
-  trap - EXIT INT TERM
+  trap - EXIT INT TERM HUP
 }
 
 cs_cleanup() {

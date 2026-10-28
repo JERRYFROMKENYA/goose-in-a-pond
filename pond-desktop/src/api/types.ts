@@ -227,6 +227,8 @@ export interface Settings {
 
   // API keys are not here: see listSecretKeys / setSecret / deleteSecret (values are write-only).
   searxng_url?: string | null;
+  /** Off by default. On, each web search sends the town from `weather_location_name` to Brave. */
+  web_search_local_results?: boolean;
 
   // Data retention
   retention_event_log_days?: number;
@@ -1428,6 +1430,8 @@ export interface WebSearchState {
   provider: "brave";
   configured: boolean;
   status: WebSearchStatus;
+  /** Absent from a pond older than local places. `town` is what a search would send. */
+  local_results?: { enabled: boolean; town: string | null };
 }
 
 /** `PUT /api/v1/web-search/key` when the key was stored. A key Brave refused is a 422 instead. */
@@ -1446,6 +1450,14 @@ export interface WebSearchHit {
   title: string;
   url: string;
   domain: string;
+  snippet: string;
+}
+
+/** One place of a `search` card's optional `places`, present only when local places answered. */
+export interface WebSearchPlace {
+  name: string;
+  /** May be empty. */
+  url: string;
   snippet: string;
 }
 

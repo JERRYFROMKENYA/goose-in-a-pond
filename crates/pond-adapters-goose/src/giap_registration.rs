@@ -87,7 +87,7 @@ pub fn register_giap_extensions(
     }
 
     if settings.ext_knowledge_enabled {
-        pond_mcp_server::init_knowledge_deps(pond_net::client());
+        pond_mcp_server::init_knowledge_deps(pond_net::client(), Some(settings_repo.clone()));
         register_builtin_extension("giap-knowledge", pond_mcp_server::spawn_knowledge_server);
         registered.push("giap-knowledge".into());
     }

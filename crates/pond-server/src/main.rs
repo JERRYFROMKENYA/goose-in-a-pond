@@ -10179,6 +10179,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 tool_group_allowlist: None,
                 warmup: false,
                 suggestion_context: None,
+                deep_research_task: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10251,6 +10252,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     tool_group_allowlist: None,
                     warmup: false,
                     suggestion_context: None,
+                    deep_research_task: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");

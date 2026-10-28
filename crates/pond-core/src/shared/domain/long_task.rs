@@ -117,6 +117,32 @@ impl fmt::Display for LongTaskState {
     }
 }
 
+/// What a task is for, which decides how its planner and workers are briefed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTaskKind {
+    #[default]
+    General,
+    /// A member asked for deep research: search, keep sources, end in a cited report.
+    Research,
+}
+
+impl LongTaskKind {
+    pub const ALL: [LongTaskKind; 2] = [LongTaskKind::General, LongTaskKind::Research];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LongTaskKind::General => "general",
+            LongTaskKind::Research => "research",
+        }
+    }
+
+    /// Exact stored spelling only; an unknown value is `None`, never a default kind.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == raw)
+    }
+}
+
 /// Where one step of a plan is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +276,7 @@ pub struct LongTask {
     origin_session_id: Option<String>,
     state: LongTaskState,
     budget: LongTaskBudget,
+    kind: LongTaskKind,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
@@ -266,6 +293,7 @@ pub struct LongTaskParts {
     pub state: LongTaskState,
     pub max_steps: u32,
     pub deadline: Option<DateTime<Utc>>,
+    pub kind: LongTaskKind,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -299,10 +327,16 @@ impl LongTask {
             origin_session_id,
             state: LongTaskState::Planning,
             budget,
+            kind: LongTaskKind::General,
             created_at: at,
             updated_at: at,
             finished_at: None,
         })
+    }
+
+    pub fn with_kind(mut self, kind: LongTaskKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Rebuild a stored task through the same checks; a row that fails them is an error.
@@ -316,6 +350,7 @@ impl LongTask {
             state,
             max_steps,
             deadline,
+            kind,
             created_at,
             updated_at,
             finished_at,
@@ -347,6 +382,7 @@ impl LongTask {
                 max_steps: max_steps.min(MAX_LONG_TASK_STEPS),
                 deadline,
             },
+            kind,
             created_at,
             updated_at,
             finished_at,
@@ -371,6 +407,10 @@ impl LongTask {
 
     pub fn origin_session_id(&self) -> Option<&str> {
         self.origin_session_id.as_deref()
+    }
+
+    pub fn kind(&self) -> LongTaskKind {
+        self.kind
     }
 
     pub fn state(&self) -> LongTaskState {
@@ -2209,6 +2249,32 @@ mod task_tests {
     }
 
     #[test]
+    fn a_task_is_general_until_asked_and_its_kind_reads_back_exactly() {
+        let task = LongTask::start(
+            ProfileScope::Owner("liz".into()),
+            None,
+            "compare heat pumps",
+            None,
+            LongTaskBudget::new(3, None).unwrap(),
+            t(0),
+        )
+        .unwrap();
+        assert_eq!(task.kind(), LongTaskKind::General);
+        assert_eq!(
+            task.with_kind(LongTaskKind::Research).kind(),
+            LongTaskKind::Research
+        );
+        for kind in LongTaskKind::ALL {
+            assert_eq!(LongTaskKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(
+            LongTaskKind::parse("Research"),
+            None,
+            "only the stored spelling"
+        );
+    }
+
+    #[test]
     fn the_deadline_passes_at_its_instant() {
         let budget = LongTaskBudget::new(3, Some(t(100))).unwrap();
         assert!(!budget.deadline_passed(t(99)));
@@ -2228,6 +2294,7 @@ mod task_tests {
             state: LongTaskState::Paused,
             max_steps,
             deadline: None,
+            kind: LongTaskKind::Research,
             created_at: t(0),
             updated_at: t(5),
             finished_at: None,
@@ -2241,6 +2308,11 @@ mod task_tests {
         assert_eq!(task.state(), LongTaskState::Paused);
         assert_eq!(task.updated_at(), t(5));
         assert_eq!(task.budget().max_steps(), 4);
+        assert_eq!(
+            task.kind(),
+            LongTaskKind::Research,
+            "a stored kind survives the rebuild"
+        );
 
         assert_eq!(
             LongTask::from_parts(parts(MAX_LONG_TASK_STEPS + 10))

@@ -17,6 +17,7 @@ pub mod network;
 pub mod oauth_callback;
 pub mod player;
 pub mod quiet_pass;
+mod report_export;
 pub mod rides;
 pub mod routes;
 pub mod runs;
@@ -788,6 +789,8 @@ pub fn cors_layer() -> CorsLayer {
             header::CONTENT_TYPE,
             header::HeaderName::from_static(host_guard::CREDENTIAL_HEADER),
         ])
+        // A desktop on `app://giap` saves an export under the pond's own file name only if it can read it.
+        .expose_headers([header::CONTENT_DISPOSITION])
 }
 
 /// True for pairing endpoints (own rate budget); segment-matched so `/handshakes` is not one.

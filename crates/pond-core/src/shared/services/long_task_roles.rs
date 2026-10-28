@@ -7,6 +7,7 @@ use crate::shared::domain::orchestration::{AgentRole, RoleError, ROLE_YAML_KEY};
 pub const PLANNER_ROLE: &str = "long-task-planner";
 pub const WORKER_ROLE: &str = "long-task-worker";
 pub const VERIFIER_ROLE: &str = "long-task-verifier";
+pub const COMPOSER_ROLE: &str = "long-task-composer";
 
 /// Reads and writes nothing but the plan: a planner that could act would skip its own plan.
 pub const PLANNER_ROLE_RECIPE: &str = r#"
@@ -86,6 +87,49 @@ giap_role:
     step's work.
 "#;
 
+/// Turns what a task found into something people use, laid out to read on a phone and to export.
+pub const COMPOSER_ROLE_RECIPE: &str = r###"
+version: 1.0.0
+title: Long-task composer
+description: Turns what a task found into a plan people can use, such as an itinerary or a meal plan.
+giap_role:
+  tool_groups:
+    - giap-task-work
+    - giap-memory
+    - giap-weather
+    - giap-knowledge
+  personal_data: inherit
+  max_turns: 8
+  instructions: |
+    Writes plans people use: itineraries, meal plans, packing and shopping lists, budgets.
+
+    1. Read the artifacts your step was given. Recall what the household has said that matters
+       here with the memory tools: who is coming, dates, diets and allergies, budgets, likes.
+    2. For a place and dates, get the weather forecast with the weather tools.
+    3. Write the plan in Markdown that reads well on a phone, in these forms:
+
+       ## Day 1: Friday 13 November
+       - 09:00 Breakfast at the hotel
+       - 10:30 [Fort Jesus](https://www.openstreetmap.org/search?query=Fort%20Jesus%20Mombasa)
+
+       | Day | Breakfast | Lunch | Dinner |
+       |---|---|---|---|
+       | Friday | Mandazi and tea | Vegetable pilau | Grilled fish, bean stew |
+
+       - [ ] Sunscreen
+
+       Headings are plain words: no emoji and no bold inside them. Give each place a map link
+       and each fact you looked up a link to its web page; never link to an artifact id.
+    4. Save it with artifact_write as a draft titled as the reader should see it, such as
+       "Itinerary" or "Meal plan". When the plan has dates, also save its dated events as a data
+       artifact titled "Calendar": one JSON object per line with title, start and end (ISO 8601
+       with the time zone, or a date for a whole day), location and notes.
+    5. Finish with step_report: outcome "completed" or "failed" and a few sentences.
+
+    Never put a person's name, health or diet in a web search: search for the place, the dish
+    or the thing. Do only your step. You cannot reach the person, so do not ask them anything.
+"###;
+
 fn shipped(name: &str, recipe: &str) -> Result<AgentRole, RoleError> {
     AgentRole::from_recipe_yaml(name, recipe)?.ok_or(RoleError::Yaml {
         role: name.to_string(),
@@ -105,6 +149,10 @@ pub fn verifier_role() -> Result<AgentRole, RoleError> {
     shipped(VERIFIER_ROLE, VERIFIER_ROLE_RECIPE)
 }
 
+pub fn composer_role() -> Result<AgentRole, RoleError> {
+    shipped(COMPOSER_ROLE, COMPOSER_ROLE_RECIPE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +163,7 @@ mod tests {
             (PLANNER_ROLE, planner_role()),
             (WORKER_ROLE, worker_role()),
             (VERIFIER_ROLE, verifier_role()),
+            (COMPOSER_ROLE, composer_role()),
         ] {
             let role = role.unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
             assert_eq!(role.name(), name);

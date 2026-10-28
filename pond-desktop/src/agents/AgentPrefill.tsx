@@ -1,7 +1,7 @@
 import { AlertTriangle, Check, CircleSlash, Clock, Loader2, Moon, RotateCcw } from "lucide-react";
 import "./agents.css";
 import type { PrefillAgent, PrefillStatus } from "../api/types";
-import { agentLabel, buildLine, isWorking, prefillTimes, prefillWords } from "./agentPrefill";
+import { agentLabel, buildLine, isWorking, prefillTimes, prefillWords } from "./prefillWords";
 import { useAgentPrefills, type PrefillsState } from "./useAgentPrefills";
 
 function StatusIcon({ status }: { status: PrefillStatus }) {

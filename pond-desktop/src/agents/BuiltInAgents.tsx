@@ -3,7 +3,7 @@ import { AlertTriangle, RotateCcw } from "lucide-react";
 import "./agents.css";
 import { useConfirm } from "../components/shared";
 import { PrefillStatusLine, RebuildAgent } from "./AgentPrefill";
-import { agentLabel, buildLine, isWorking, prefillSummary } from "./agentPrefill";
+import { agentLabel, buildLine, isWorking, prefillSummary } from "./prefillWords";
 import { ALL_AGENTS, type PrefillsState } from "./useAgentPrefills";
 
 interface GroupProps {

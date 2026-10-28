@@ -9,7 +9,7 @@ import {
   prefillSummary,
   prefillTimes,
   prefillWords,
-} from "./agentPrefill";
+} from "./prefillWords";
 
 const NOW = new Date("2026-10-28T12:00:00Z");
 const MIN = 60_000;

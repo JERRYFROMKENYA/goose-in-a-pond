@@ -18,6 +18,9 @@ pub enum LaneJob {
     Consolidation,
     /// Give conversations readable names.
     Titling,
+    /// Run the next step of a long task a member started. Before the pond's own proposals: a
+    /// member asked for this work.
+    LongTaskStep,
     /// Look at recent household events and propose something.
     ProactiveReview,
     /// Keep each active conversation's rolling summary current.
@@ -39,6 +42,7 @@ impl LaneJob {
         LaneJob::Compaction,
         LaneJob::Consolidation,
         LaneJob::Titling,
+        LaneJob::LongTaskStep,
         LaneJob::ProactiveReview,
         LaneJob::SummaryRefresh,
         LaneJob::IndexMaintenance,
@@ -52,6 +56,7 @@ impl LaneJob {
             LaneJob::Compaction => "compaction",
             LaneJob::Consolidation => "consolidation",
             LaneJob::Titling => "titling",
+            LaneJob::LongTaskStep => "long_task_step",
             LaneJob::ProactiveReview => "proactive_review",
             LaneJob::SummaryRefresh => "summary_refresh",
             LaneJob::IndexMaintenance => "index_maintenance",
@@ -66,6 +71,7 @@ impl LaneJob {
             LaneJob::Compaction => "Make room in long conversations",
             LaneJob::Consolidation => "Tidy the memory store",
             LaneJob::Titling => "Name conversations",
+            LaneJob::LongTaskStep => "Work on long tasks",
             LaneJob::ProactiveReview => "Look for something to suggest",
             LaneJob::SummaryRefresh => "Refresh conversation summaries",
             LaneJob::IndexMaintenance => "Maintain the search index",
@@ -334,6 +340,7 @@ mod tests {
             LaneJob::Compaction,
             LaneJob::Consolidation,
             LaneJob::Titling,
+            LaneJob::LongTaskStep,
             LaneJob::ProactiveReview,
             LaneJob::SummaryRefresh,
             LaneJob::IndexMaintenance,

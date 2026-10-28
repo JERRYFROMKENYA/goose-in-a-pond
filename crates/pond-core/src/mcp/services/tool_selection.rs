@@ -208,6 +208,22 @@ where
         .collect()
 }
 
+/// Remove the tools only a long task's helpers may hold. A top-level turn has no step to work
+/// on, so offering them only spends its window and invites calls that refuse.
+pub fn subtract_helper_only_tools<'a, I>(tools: I) -> Vec<String>
+where
+    I: IntoIterator<Item = &'a String>,
+{
+    tools
+        .into_iter()
+        .filter(|name| {
+            group_of_tool(name)
+                != Some(crate::shared::services::long_task_roles::TASK_WORK_EXTENSION)
+        })
+        .cloned()
+        .collect()
+}
+
 /// Prefixes of goose's own injected tools: not personal data, and the shim's allow-set already
 /// vetoes them. Listed so the guest filter does not default-deny them.
 const ENGINE_TOOL_PREFIXES: &[&str] = &["platform", "recipe", "dynamic_task"];
@@ -270,6 +286,18 @@ pub fn dormant_groups_note(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_top_level_turn_never_holds_a_helpers_task_tools() {
+        let sep = crate::mcp::domain::tool_group::TOOL_NAME_SEPARATOR;
+        let work = format!(
+            "{}{sep}step_report",
+            crate::shared::services::long_task_roles::TASK_WORK_EXTENSION
+        );
+        let weather = format!("giap-weather{sep}get_weather");
+        let kept = subtract_helper_only_tools([&work, &weather]);
+        assert_eq!(kept, vec![weather], "only the helper-only group may go");
+    }
     use super::*;
 
     fn available() -> Vec<String> {

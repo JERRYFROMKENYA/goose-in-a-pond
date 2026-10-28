@@ -49,6 +49,11 @@ pub fn all_tools() -> Vec<(&'static str, Tool)> {
         "giap-orchestrator",
         crate::orchestrator::OrchestratorMcpServer::tool_defs(),
     );
+    // The prime's task tools only: the work tools are subtracted from every top-level turn.
+    push(
+        pond_core::mcp::domain::tool_group::TASKS_EXTENSION,
+        crate::long_task::TasksMcpServer::tool_defs(),
+    );
     push(
         crate::travel::TRAVEL_EXTENSION,
         crate::travel::TravelMcpServer::tool_defs(),

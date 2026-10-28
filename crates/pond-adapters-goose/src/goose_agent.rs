@@ -3079,6 +3079,19 @@ impl GooseAdapter {
             }
         });
 
+        // A long task's work tools belong to its helpers alone: a turn has no step to work on.
+        let allowed_tools: HashSet<String> =
+            pond_core::mcp::services::tool_selection::subtract_helper_only_tools(
+                allowed_tools.iter(),
+            )
+            .into_iter()
+            .collect();
+        let entitled_tools = entitled_tools.map(|tools| {
+            pond_core::mcp::services::tool_selection::subtract_helper_only_tools(tools.iter())
+                .into_iter()
+                .collect()
+        });
+
         // A recipe's YAML `extensions:` narrow this turn to those groups, in every mode.
         let allowed_tools = if let Some(allowlist) = &request.tool_group_allowlist {
             let before = allowed_tools.len();
@@ -3944,6 +3957,11 @@ impl GooseAdapter {
                     if produced_visible {
                         break 'attempts;
                     }
+                    // A warm-up's reply is never read, and a compile's one token often reads as empty;
+                    // re-engaging would only prefill longer prompts nobody asked for.
+                    if request.warmup {
+                        break 'attempts;
+                    }
                     // The final reply is the last attempt: one that wrote nothing is not re-asked.
                     if final_attempt || attempt >= MAX_EMPTY_TURN_REENGAGEMENTS {
                         tracing::warn!(
@@ -4075,9 +4093,11 @@ impl AgentPort for GooseAdapter {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or_default();
-        let request = AgentRequest {
-            message: "Warm-up ping. Reply with only: ok".to_string(),
-            session_id: format!("prewarm-{stamp}"),
+        // Two compile calls whose messages differ from their first word: the engine learns the
+        // preamble from the pair and keeps its snapshot, or rebuilds one that is missing or bad.
+        let warm_up = |turn: usize, message: &str| AgentRequest {
+            message: message.to_string(),
+            session_id: format!("prewarm-{stamp}-{turn}"),
             model_role: "chat".to_string(),
             images: Vec::new(),
             voice_mode,
@@ -4092,17 +4112,37 @@ impl AgentPort for GooseAdapter {
             suggestion_context: None,
         };
 
+        let shape = if voice_mode {
+            "prime-voice"
+        } else {
+            "prime-typed"
+        };
+        // Home shows that the pond is building caches while this runs, under the name a person
+        // knows rather than the shape's.
+        let building = pond_core::shared::services::prefill_progress::process_prefill_progress();
+        building.begin(1);
+        building.working_on("assistant");
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-            let mut stream = self.chat_stream(request).await?;
             use futures::StreamExt;
-            while let Some(event) = stream.next().await {
-                // Only the prefill matters; the reply is discarded.
-                event?;
+            for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
+                .into_iter()
+                .enumerate()
+            {
+                goose_providers::request_context::compiling_prefill(shape, async {
+                    let mut stream = self.chat_stream(warm_up(turn, message)).await?;
+                    while let Some(event) = stream.next().await {
+                        // Only the prefill matters; the reply is discarded.
+                        event?;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await?;
             }
             Ok::<(), anyhow::Error>(())
         })
         .await;
 
+        building.finished("assistant", matches!(outcome, Ok(Ok(()))));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(Ok(())) => {

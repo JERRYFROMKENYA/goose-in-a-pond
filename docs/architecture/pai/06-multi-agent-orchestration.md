@@ -12,7 +12,9 @@ in this tree; the submodule is uninitialized in a fresh clone, so run
 `git submodule update --init --recursive` before re-checking (CI checks out the pinned submodule the
 same way).
 
-> Status (2026-10-23): P1-P8 are landed. P4's `context_fraction` shrink reaches only
+> Status (2026-10-28): P1-P8 are landed. Long-running tasks (section 8) and agents as recipes
+> (section 9) landed P9-P11, P14-P17 and P19 on 2026-10-28; P12 is partial, P13 is open and P18 is
+> deferred (8.6, 9.4). P4's `context_fraction` shrink reaches only
 > `plan_replay` since 2026-09-11, when goose took back trimming the live conversation; the device hold
 > half is unaffected. Programme summary: [checklist section 0](./00-checklist.md).
 
@@ -1294,3 +1296,282 @@ mutation was run.
   does it.
 - **`list_roles` has no test because it has no code.** It is in section 3.6's tool list and no phase
   built it; see that section.
+
+---
+
+## 8. Long-running tasks (designed 2026-10-28; P9-P13)
+
+### 8.1 Why one window cannot hold them
+
+A window on the Orin is at most `MAX_CTX` = 16,384 tokens (`device_budget.rs`), and that cap is set
+by latency rather than memory: a cold 16K prefill takes about 20 s. A task that needs more context
+than one window holds cannot be one conversation. It runs as many short windows, one after another,
+with everything it learns kept on disk. The task's working memory is its store, not a KV cache, so a
+task resumes after a restart with nothing to re-derive.
+
+### 8.2 Shape
+
+| Part | What it is | Who decides |
+|---|---|---|
+| Task | Goal, owner, budget, status; rows in `pond_system.db` | The member who started it |
+| Plan | Steps: role, instructions, input artifacts, acceptance check, dependencies | The planner role, through `plan_write` |
+| Step runner | Picks the next ready step, runs its helper, records the result | Code, on the inference lane |
+| Helper | A saved role. One step is one helper life in a fresh window; nothing of it is kept | The model |
+| Artifact | A step's output: typed, titled, token-counted, scoped to the task's owner | Written by helpers |
+| Prime | The household's conversation: starts a task, reports on it, asks for decisions | The model |
+
+The runner is code, not a model, so the depth cap (invariant 6) and "only the prime talks to the
+household" both hold without a nested agent.
+
+### 8.3 Rules
+
+1. **The model decomposes.** The planner writes the plan with a tool call; nothing splits a goal by
+   keyword. The runner only follows the plan's dependencies.
+2. **Pull, don't push.** A step is given artifact ids with a one-line summary each, never their
+   bodies. It pages in what it needs with `artifact_read(id, from, to)` and `artifact_search`.
+3. **A fixed hand-back.** Every step returns its outcome, a capped summary, the artifacts it wrote
+   and what failed. The planner and the prime see that shape, not a helper's prose.
+4. **Checked, then replanned.** A step with an acceptance check is verified by a verifier role. A
+   failure retries once with the reason, then goes back to the planner with the results so far,
+   then to the household.
+5. **One at a time, at the household's pace.** Steps are a lane job: none starts while a turn is in
+   flight, and a step is the unit of pre-emption. A step stopped by a household turn reruns from the
+   ledger, so steps record outward effects before they happen and never repeat one.
+6. **Outward effects wait for a person.** A step whose role holds a tool that sends, buys or moves
+   something parks the task as awaiting approval, and the member is asked on their own phone
+   (PAI-2's gate), never in the helper's window.
+7. **Visible and stoppable.** The task, its plan, each step's state and its artifacts are on screen;
+   a member can pause, cancel or edit the plan, and milestones reach their phone.
+8. **Budgets.** Each task has a step cap and a wall-clock cap; quiet hours and the device's thermal
+   state pause it.
+9. **Scope.** A task runs at its owner's scope (PAI-1) and its artifacts inherit it. Memory
+   extraction never reads helper turns (invariant 4).
+
+### 8.4 What it reuses
+
+- PAI-7's reviewer already runs a child from the lane through `Orchestrator::spawn`, under a root
+  authority it registers as the run's parent turn (`review_authority`, `plan_review`). The step
+  runner is that loop, generalised to a plan.
+- Roles are `agent_recipes` rows parsed into `AgentRole`; concurrency 1, child history never
+  reaching a parent, and child sessions deleted on release are invariants 3 and 4.
+- `delegate` with `background: true` stays refused on this device. The lane runner is how background
+  work runs here: it waits for the device instead of holding it.
+- Goose's `todo` stays stripped (section 6): `plan_write` is the plan tool, with its text written
+  for the on-device models.
+
+### 8.5 The engine: one context, handed over
+
+A helper's prompt is short, so `prefill_plan` sends it to `SacrificialContext`: a second context
+beside the prime's, decoded from nothing, with no snapshot. On the Orin a context costs about
+522 MiB of compute buffers before any KV (`device_budget.rs`), against roughly 0.5 GB the serving
+pond has free. The alternative hands the helper the one context, seeded from its role's snapshot,
+and rebuilds the prime afterwards: from its preamble snapshot plus the history, or from a suspend
+file. `what_a_helper_turn_costs_the_prime` (goose `inference_engine.rs`) measures the three.
+
+Measured on the Orin Nano 2026-10-28 (E4B QAT UD-Q4_K_XL with its MTP drafter, `n_ctx` 16384, f16
+KV, flash attention, the pond stopped). The prime is a 3,000-token preamble plus history; the helper
+is a 1,100-token role preamble plus a 300-token task.
+
+| History | Prime cold | Side context | Helper from its snapshot | Prime rebuilt | Suspend file |
+|---|---|---|---|---|---|
+| 2,048 | 8.1 s | 2.2 s | 0.5 s | 3.7 s | 1.7 s write, 0.7 s read, 99 MiB |
+| 4,096 | 11.6 s | 2.0 s | 0.4 s | 7.2 s | 0.8 s write, 0.6 s read, 131 MiB |
+| 8,192 | 19.2 s | 2.0 s | 0.4 s | 14.8 s | 1.0 s write, 0.6 s read, 195 MiB |
+
+A rebuilt and a resumed prime predict the same next token as a cold one at every length. The side
+context's memory read 160-295 MiB from `MemAvailable`, which page cache makes noisy on unified
+memory; it is a bound to re-measure, not a constant.
+
+What it means:
+
+- **Long tasks pay almost nothing.** No prime is waiting between steps, so each step is a helper
+  seeded from its role snapshot (0.4-0.5 s), and the household's next turn rebuilds the prime once,
+  on the cold path that already exists.
+- **A delegation inside a live turn costs the rebuild,** which grows with the history: 15 s at 8K.
+  A suspend file holds that to about 2-3 s at any length, but it writes the conversation's KV to
+  disk for as long as the helper runs.
+
+**Decided 2026-10-28 (Jerry): the suspend file, bounded.** It is written only when a live turn
+waits on the helper (`request_context::as_helper(prime_waiting, ..)`, true when the child inherits
+its parent's device hold), never for a lane step. It is owner-only (0600 in a 0700 directory under
+`<goose data>/prompt-cache/suspended`), never indexed, and deleted on resume, on any call that has
+no waiting turn, when the model unloads and when a process starts. Its window checkpoints stay in
+memory, so a resume rewinds through the same `window_resume` path a resident cache uses.
+
+Role preambles also need their own snapshots. The ladder keeps `MAX_SNAPSHOTS` = 6 per model and
+window, and the Orin's E4B family already holds six (typed chat, voice, extraction, titling, the
+reviewer, the summariser), so roles would evict them. A role's snapshot is written when the role is
+saved, as an idle lane job, not on its first step.
+
+### 8.6 Phases
+
+- **P9 — engine.** Helper turns take the one context and the prime is rebuilt by whichever path the
+  bench picks; role snapshots get their own budget. **LANDED 2026-10-28**, measured on the Orin
+  (8.5).
+- **P10 — the ledger.** Domain types, migration and repository for tasks, steps and artifacts.
+  **LANDED 2026-10-28** (migration 0062).
+- **P11 — plan and run.** The planner, verifier and step runner; `plan_write`, `artifact_read`,
+  `artifact_search`, `artifact_write` for helpers; `task_start`, `task_status`, `task_cancel` for
+  the prime; the lane job. **LANDED 2026-10-28; VERIFIED on the Orin**: a four-step task ran each
+  step once under the verifier, wrote a 620-token result and notified the owner's devices.
+  `artifact_search` was not built: helpers page artifacts with `artifact_list` and `artifact_read`.
+- **P12 — the household's controls.** Approvals, the task panel in both UIs, phone milestones.
+  **PARTIAL.** A task's owner is notified when it ends, and the chat that started it shows a live
+  card with its steps, its result and Stop (desktop; the phone in goose-on-the-go #199). The
+  approval path is not built, so no step can act outward.
+- **P13 — on the Orin.** One task longer than any window, run end to end with the pond serving.
+  **OPEN**: the Orin's task fit in one window.
+
+### 8.7 P11's seams
+
+- **Two extensions.** `giap-tasks` is the prime's (`task_start`, `task_status`, `task_cancel`),
+  withheld from guests and from subagents, so a helper cannot start a task. `giap-task-work` is
+  the helpers' (`plan_write`, `artifact_list`, `artifact_read`, `artifact_write`, `step_report`),
+  withheld from guests and subtracted from every top-level turn's allow set and entitlement. Only
+  the runner's root authority grants it.
+- **Who is calling.** A helper's call carries its own engine session id.
+  `process_child_sessions().parent_of(id)` gives the runner's root session for that step, and
+  `process_step_bindings().binding_for(root)` gives the task, the step and the owner's scope. A
+  call that resolves to nothing is refused in one sentence.
+- **What the tools write.** `artifact_write` and `plan_write` go straight to the ledger
+  (`plan_write` validates first and replaces only open steps). `step_report` is recorded on the
+  binding, and the runner applies it after the run, so state transitions have one author.
+- **The runner.** A lane loop modeled on `run_proactive_reviewer`: it claims `LongTaskStep`, takes
+  the slot only when a task is runnable, runs one helper per slot, and cancels on household
+  activity. Which helper to run next is a pure function in `pond-core`: the planner for a task
+  in `Planning` or with blocked steps, else the next ready step's role, then the verifier when
+  that step has an acceptance check.
+- **Outward effects.** Subagents are already denied device control, notifications, scheduling,
+  rides and cameras (`groups_denied_to_subagents`), so in P11 no step can act outward at all. P12
+  adds the approval path that lets one do so.
+
+---
+
+## 9. Agents are recipes (designed 2026-10-28; P14-P18)
+
+A household's agents are `agent_recipes` rows: Goose recipe YAML with a `giap_role` block, which
+`AgentRole::from_recipe_yaml` already reads, run by the existing routes (`/recipes`,
+`/recipes/{name}/run`), the scheduler and the Recipes screen. The builder grows that block; it adds
+no second store and no second runner.
+
+### 9.1 The block
+
+```yaml
+giap_role:
+  tool_groups: [giap-knowledge, giap-weather, giap-task-work]
+  personal_data: inherit            # or deny: the agent sees no personal data
+  max_turns: 8
+  instructions: |
+    What the agent is for, in plain words.
+  context:                          # what goes into its preamble, and so into its snapshot
+    examples:                       # few-shot pairs: free after the prefill is compiled
+      - brief: ...
+        answer: ...
+  activations:                      # when it runs; none of these reads a user's words
+    - delegated                     # the prime may hand it work (default)
+    - task_step                     # a long task's planner may give it a step (default)
+    - schedule: { cron: "0 0 7 * * MON-FRI", brief: "..." }
+    - event: { on: presence.arrive, member: owner, brief: "...", cooldown: 30m }
+    - event: { on: camera.person, camera: any, between: "22:00-06:00", brief: "..." }
+    - agent: [trip-planner]         # these agents may hand it work
+  hooks:
+    before: [today, weather]        # context gatherers from a fixed catalog, never code
+    after: [notify_owner]           # or save_artifact, start_task, hand_to: <agent>
+  a2a:
+    expose: false                   # offer it to paired peers over the A2A protocol
+```
+
+### 9.2 Rules
+
+1. **Activations are structured, never keyword matches.** `delegated` and `task_step` are model
+   decisions; `schedule` and `event` are explicit triggers on the scheduler and the event bus
+   (sensor, camera, device, presence, time), each with a cooldown. `member: owner` is the recipe's
+   owner, so one member's agent never greets or notifies another; `between` holds an event to part
+   of the day on the household's clock, wrapping past midnight, and an event outside it spends no
+   cooldown. Nothing reads a user's text.
+2. **Every run is a lane run.** A scheduled or event activation queues a single-step run on the
+   inference lane; it never interrupts a household turn and never runs beside it.
+3. **Hooks are a fixed catalog.** `before` hooks add context to the brief (the date, today's
+   schedule, the weather, the latest presence). `after` hooks act on the hand-back. An outward hook
+   (anything that sends, buys or moves something) waits for the member's approval on their phone,
+   as long-task steps do (P12); `notify_owner` reaches only the owner's own devices.
+4. **Agent to agent is mediated.** An agent's hand-back may ask for `hand_to: <agent>` with a
+   brief. The runner (code) runs that agent next with the first one's artifacts, so depth stays 1,
+   only agents named in `activations.agent` accept, a chain is capped at 4 hand-offs, and a cycle
+   is refused. Agents never message each other directly.
+5. **External A2A is off by default.** `a2a.expose` publishes an agent card and accepts A2A tasks
+   from paired devices and mesh peers only, through `auth_middleware`; every A2A task is a lane run
+   at the exposing member's scope, and its result leaves through `pond-net`.
+6. **A saved agent is compiled.** Saving a recipe compiles its prefill (9.3). The builder shows the
+   preamble's token count, whether its snapshot is valid, and what a cold start would cost.
+
+### 9.3 Compiling every agent's prefill
+
+On every start, and when a recipe is saved, the pond checks each agent's snapshot and rebuilds only
+the ones that are missing, unreadable, corrupt or stale. The shapes: the prime's typed and voice
+turns, and every role in the shape a lane run gives it (`LONG_TASK_ROOT_GROUPS`).
+
+The engine is the judge, because it is what a real turn trusts. A compile is two calls of one shape
+whose user messages differ from their first token, under `request_context::compiling_prefill`:
+
+- The first call runs cold and records whatever snapshot it restored.
+- The second call learns the stable preamble from the two prompts. The snapshot is **valid** when
+  it restored exactly that preamble and its checksum matches the one written beside it in the
+  index. Anything else is rebuilt: **missing** (none matched), **unreadable** (llama.cpp refused
+  it), **corrupt** (the checksum differs) or **stale** (it covers less than the preamble).
+- A compile call decodes one token at most and never resumes a chat's cache.
+
+The boot pass is a lane job, exempt from the activity gate, after the existing prewarm. The
+household's turns still come first.
+
+### 9.3.1 Which prefills are kept (Jerry, 2026-10-28)
+
+| Agent | Prefill |
+|---|---|
+| Default agents (the shipped planner, worker and verifier) | Compiled on every start. |
+| Suggested agents (shipped templates) | The recipe exists; no prefill until a member turns one on. |
+| An agent a member builds or turns on | Registered with its definition's hash in `agent_prefills`, compiled when it is created or edited, and rebuilt on any start that finds it missing or bad. |
+| An agent unused for `agent_prefill_retention_days` (14) | Its snapshot is discarded and the start-up pass skips it; its next run compiles it again, cold once. |
+
+Use is recorded whenever the runner gives the agent a step. The engine applies the retention to
+helper snapshots on every compile pass, by their own last use, so a snapshot no registry row
+claims is not kept forever.
+
+### 9.4 Phases
+
+- **P14 — prefill compile.** The engine primitive, checksums in the snapshot index, and the boot and
+  on-save compile passes. **LANDED 2026-10-28.** The Orin found that snapshot files were named by
+  their first 256 tokens, which the prime and every role share, so each compile overwrote the last;
+  files are now named by their whole prefix and replaced only by their own shape.
+- **P15 — the block.** Parsing and validation of `context`, `activations`, `hooks` and `a2a`, plus a
+  validate route that names the field a small model or a person got wrong. **LANDED 2026-10-28.**
+- **P16 — activations and hooks.** Schedule and event activations as lane runs, the hook catalog,
+  and mediated hand-offs. **LANDED 2026-10-28; NOT VERIFIED on hardware**: no schedule or event
+  activation has fired on the Orin.
+- **P17 — the builder.** The Recipes screen in both UIs: a form over the block and a YAML view, a
+  test run, compile status and preamble cost. **LANDED 2026-10-28** on the desktop, with each
+  agent's prefill state and a rebuild; the phone's is goose-on-the-go #198.
+- **P18 — external A2A.** Agent cards and A2A tasks for exposed agents, off by default.
+  **DEFERRED**: `a2a.expose` is parsed and validated, but no agent card or A2A route exists, so an
+  exposed agent is reachable from nowhere outside the pond. It costs nothing until a second pond
+  or client needs one.
+- **P19 — suggested agents.** Shipped templates offered as suggestions, never switched on (9.5).
+  **LANDED 2026-10-28; VERIFIED on the Orin**: the cards listed, and one tap made a member's copy
+  that the next pass compiled.
+
+### 9.5 Suggested agents
+
+The pond ships agent templates and offers them; none runs until a member turns it on.
+
+| Piece | Design |
+|---|---|
+| Templates | Shipped recipes beside the planner, worker and verifier, read-only: a copy may narrow their tools, never widen them. |
+| Where they show | Suggestion cards on Home and the Recipes screen, from `GET /agents/suggestions`; enabling and dismissing are its two `POST` routes. |
+| When a card shows | Only when the pond can run it: welcome back needs presence and an identified member, camera follow-ups a camera, a tank alert that sensor. |
+| Turning one on | One tap copies it into `agent_recipes`, owned by that member, and compiles its prefill then, so its first run is warm. The builder edits the copy. |
+| Nothing automatic | A card never activates itself. Schedules and events start after the tap, and only with `ext_orchestrator_enabled` on; a schedule's first sighting only sets its baseline. Anything outward still waits for approval. |
+| Dismissing | A declined card stays hidden, recorded like the proactive reviewer's ledger. |
+| Cost | A compiled preamble is about 20-30 MB on disk, paid only for templates turned on. |
+
+The first set: morning brief, welcome back, late-night gate alert, low-tank alert, trip planner,
+document reader, study planner.

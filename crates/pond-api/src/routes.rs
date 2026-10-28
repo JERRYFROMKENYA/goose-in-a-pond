@@ -517,6 +517,29 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/skills/{id}", put(update_skill).delete(delete_skill))
         // ── Recipes ───────────────────────────────────────────────────────────
         .route("/recipes", get(list_recipes).post(create_recipe))
+        .route("/recipes/validate", post(validate_recipe))
+        .route("/agents/suggestions", get(agent_suggestions))
+        .route(
+            "/agents/suggestions/{template}/enable",
+            post(enable_agent_suggestion),
+        )
+        .route(
+            "/agents/suggestions/{template}/dismiss",
+            post(dismiss_agent_suggestion),
+        )
+        .route("/long-tasks", get(list_long_tasks))
+        .route("/long-tasks/{id}", get(get_long_task))
+        .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route(
+            "/long-tasks/{id}/artifacts/{artifact_id}",
+            get(get_long_task_artifact),
+        )
+        .route("/agents/prefills", get(agent_prefills))
+        .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
+        .route(
+            "/agents/{name}/prefill/rebuild",
+            post(rebuild_agent_prefill),
+        )
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
         .route("/recipes/{name}/run", post(run_recipe))
         // ── Face biometrics ───────────────────────────────────────────────────
@@ -15114,6 +15137,13 @@ struct CreateRecipeRequest {
 
 async fn create_recipe(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
     body: Result<Json<CreateRecipeRequest>, JsonRejection>,
 ) -> impl axum::response::IntoResponse {
     let repo = match &state.recipe_repo {
@@ -15136,6 +15166,8 @@ async fn create_recipe(
                 .into_response()
         }
     };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let owner_profile_id = acting_member(&state, principal.as_ref(), on_host).await;
     let recipe = AgentRecipe {
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -15143,6 +15175,8 @@ async fn create_recipe(
         yaml: req.yaml,
         active: true,
         created_at: chrono::Utc::now().to_rfc3339(),
+        owner_profile_id,
+        template: None,
     };
     match repo.upsert(&recipe).await {
         Ok(()) => (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response(),
@@ -15152,6 +15186,742 @@ async fn create_recipe(
         )
             .into_response(),
     }
+}
+
+/// Whether a request comes from a process on this machine, the desktop: a loopback peer, not
+/// the plaintext development listener and not the tailnet, whose node also connects from here.
+fn on_this_host(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    insecure_dev: bool,
+    tailnet: bool,
+) -> bool {
+    !insecure_dev
+        && !tailnet
+        && peer.is_some_and(|axum::extract::ConnectInfo(p)| p.ip().is_loopback())
+}
+
+/// The member a request acts for when it saves an agent: its paired device's member, else, from
+/// this host, the household's primary member. Nobody otherwise; an unreadable attribution is
+/// nobody too, never the primary member, who may be someone else.
+async fn acting_member(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    on_host: bool,
+) -> Option<String> {
+    let device = proven_device(principal);
+    if let Some(device_id) = device.id().map(str::to_owned) {
+        match device.rung(device_attribution(state).device_profile(&device_id).await) {
+            DeviceRung::Member(profile_id) => return Some(profile_id),
+            DeviceRung::Unavailable(why) => {
+                tracing::warn!(
+                    device = %device_id,
+                    error = %why,
+                    "could not read the device's member; acting for nobody"
+                );
+                return None;
+            }
+            DeviceRung::NoDevice | DeviceRung::Unattributed => {}
+        }
+    }
+    if !on_host {
+        return None;
+    }
+    match state.settings_repo.get().await {
+        Ok(settings) => settings
+            .primary_profile_id
+            .filter(|id| !id.trim().is_empty()),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the primary member; acting for nobody");
+            None
+        }
+    }
+}
+
+/// Same stand-in as [`proposal_repo`]: the ledger is a plain table beside the recipes.
+fn agent_suggestion_ledger(
+    state: &Arc<AppState>,
+) -> pond_infra::sqlite_agent_suggestion::SqliteAgentSuggestionLedger {
+    pond_infra::sqlite_agent_suggestion::SqliteAgentSuggestionLedger::new(state.db.system.clone())
+}
+
+/// What this pond can run for `member`, read from where each capability lives. A failed read
+/// counts as absent, so a card is hidden rather than offered for something that cannot run.
+async fn pond_capabilities(
+    state: &Arc<AppState>,
+    member: Option<&str>,
+) -> pond_core::shared::services::agent_templates::PondCapabilities {
+    use pond_core::shared::services::agent_templates::{camera_configured, PondCapabilities};
+
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let face_names_people = settings.vision_face_recognition_enabled
+        && camera_configured(&settings)
+        && state
+            .face_recognition
+            .as_ref()
+            .is_some_and(|slot| slot.current().is_ok());
+    let presence = match member {
+        Some(member) => {
+            face_names_people
+                || device_attribution(state)
+                    .devices_for_profile(member)
+                    .await
+                    .is_ok_and(|devices| !devices.is_empty())
+        }
+        None => false,
+    };
+    let sensor_types = state
+        .sensor_storage
+        .list_sensors()
+        .await
+        .map(|sensors| {
+            sensors
+                .into_iter()
+                .map(|(_, kind)| kind.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let web_search = settings.ext_knowledge_enabled
+        && match &state.secret_repo {
+            Some(repo) => repo
+                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|key| !key.trim().is_empty()),
+            None => false,
+        };
+    PondCapabilities {
+        presence,
+        identified_member: member.is_some(),
+        camera: camera_configured(&settings),
+        sensor_types,
+        weather: settings.ext_weather_enabled && state.weather_provider.is_some(),
+        web_search,
+    }
+}
+
+/// The caller of a long-task route, as a member's scope: a paired member's device, or the
+/// desktop on this host acting for the primary member. Nobody identified reaches no task.
+async fn long_task_caller(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: bool,
+    tailnet: bool,
+) -> Option<String> {
+    let on_host = on_this_host(peer.ok(), insecure, tailnet);
+    acting_member(state, principal, on_host).await
+}
+
+/// A member reaches their own tasks and the household's unowned ones, like their other data.
+fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::LongTask) -> bool {
+    task.owner_profile_id().is_none_or(|owner| owner == member)
+}
+
+fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::SqliteLongTaskRepository {
+    pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
+}
+
+/// One task as the chat card shows it: its steps with their agents, and its artifacts without
+/// their bodies.
+async fn long_task_view(
+    repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
+    task: &pond_core::shared::domain::long_task::LongTask,
+) -> anyhow::Result<Value> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let steps = repo.list_steps(task.id()).await?;
+    let artifacts = repo.list_artifacts(task.id()).await?;
+    let result = pond_core::shared::services::long_task_runner::result_artifact(&artifacts)
+        .map(|a| a.id.clone());
+    Ok(json!({
+        "id": task.id(),
+        "goal": task.goal(),
+        "state": task.state(),
+        "origin_session_id": task.origin_session_id(),
+        "created_at": task.created_at(),
+        "updated_at": task.updated_at(),
+        "finished_at": task.finished_at(),
+        "steps": steps.iter().map(|step| json!({
+            "key": step.key().as_str(),
+            "role": step.role(),
+            "state": step.state(),
+            "attempts": step.attempts(),
+            "summary": step.summary(),
+            "failure": step.failure(),
+        })).collect::<Vec<_>>(),
+        "artifacts": artifacts,
+        "result_artifact_id": result,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LongTaskListQuery {
+    session_id: Option<String>,
+}
+
+/// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
+/// conversation started.
+async fn list_long_tasks(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    Query(query): Query<LongTaskListQuery>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return Json(json!([])).into_response();
+    };
+    let repo = long_task_repo(&state);
+    let mut tasks = Vec::new();
+    for filter in [
+        LongTaskOwnerFilter::Member(&member),
+        LongTaskOwnerFilter::Unowned,
+    ] {
+        match repo.list_tasks(filter, true).await {
+            Ok(found) => tasks.extend(found),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    tasks.retain(|task| {
+        query
+            .session_id
+            .as_deref()
+            .is_none_or(|session| task.origin_session_id() == Some(session))
+    });
+    tasks.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
+    let mut views = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        match long_task_view(&repo, task).await {
+            Ok(view) => views.push(view),
+            Err(e) => {
+                tracing::warn!(task = %task.id(), error = %e, "a long task could not be read")
+            }
+        }
+    }
+    Json(json!(views)).into_response()
+}
+
+/// The task with `id` if the caller reaches it; a task they do not reach reads as unknown.
+async fn reachable_long_task(
+    state: &Arc<AppState>,
+    member: &str,
+    id: &str,
+) -> Result<pond_core::shared::domain::long_task::LongTask, Response<axum::body::Body>> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    match long_task_repo(state).get_task(id).await {
+        Ok(Some(task)) if long_task_reaches(member, &task) => Ok(task),
+        Ok(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "there is no such task"})),
+        )
+            .into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+/// `GET /api/v1/long-tasks/{id}` -- one task, its steps and its artifacts.
+async fn get_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    match long_task_view(&long_task_repo(&state), &task).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/long-tasks/{id}/artifacts/{artifact_id}` -- an artifact's whole body, for
+/// "Read the result".
+async fn get_long_task_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((id, artifact_id)): Path<(String, String)>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    if let Err(response) = reachable_long_task(&state, &member, &id).await {
+        return response;
+    }
+    match long_task_repo(&state).get_artifact(&id, &artifact_id).await {
+        Ok(Some(artifact)) => Json(json!({
+            "id": artifact.id(),
+            "title": artifact.title(),
+            "kind": artifact.kind(),
+            "summary": artifact.summary(),
+            "body": artifact.body(),
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "there is no such artifact in this task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/long-tasks/{id}/cancel` -- stops a task; a step under way finishes first.
+async fn cancel_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::LongTaskState;
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    match long_task_repo(&state)
+        .set_task_state(&id, LongTaskState::Cancelled, chrono::Utc::now())
+        .await
+    {
+        Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// Every agent whose prefill the pond keeps: the shipped planner, worker and verifier, then each
+/// household recipe with a role, in the shape the compile pass builds them.
+async fn prefill_agents(
+    state: &Arc<AppState>,
+) -> Vec<pond_core::shared::domain::orchestration::AgentRole> {
+    use pond_core::shared::services::{long_task_roles as roles, long_task_runner};
+    let recipes = match &state.recipe_repo {
+        Some(repo) => repo.list().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut agents: Vec<_> = [roles::planner_role(), roles::verifier_role()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    agents.extend(long_task_runner::step_roles(&recipes));
+    agents
+}
+
+/// `GET /api/v1/agents/prefills` -- whether the pond is building caches now, and where each
+/// agent's prefill stands.
+async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
+    use pond_core::shared::ports::agent_prefill::AgentPrefillRegistry as _;
+    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
+    use pond_core::shared::services::prefill_progress::process_prefill_progress;
+
+    let progress = process_prefill_progress();
+    let build = progress.build();
+    let queued = progress.pending_rebuilds();
+    let failed = progress.failed();
+    let retention = state
+        .settings_repo
+        .get()
+        .await
+        .map(|s| s.agent_prefill_retention_days)
+        .unwrap_or(14);
+    let records =
+        pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(state.db.system.clone())
+            .get_all()
+            .await
+            .unwrap_or_default();
+    let now = chrono::Utc::now();
+    let agents: Vec<Value> = prefill_agents(&state)
+        .await
+        .iter()
+        .map(|role| {
+            let name = role.name();
+            let is_default = is_default_agent(name);
+            let record = records.get(name);
+            let status = prefill_state(
+                role,
+                is_default,
+                record,
+                build.current.as_deref() == Some(name),
+                queued.includes(name),
+                failed.contains(name),
+                now,
+                retention,
+            );
+            json!({
+                "agent": name,
+                "kind": if is_default { "default" } else { "member" },
+                "status": status,
+                "compiled_at": record.and_then(|r| r.compiled_at),
+                "last_used_at": record.and_then(|r| r.last_used_at),
+            })
+        })
+        .collect();
+    Json(json!({ "building": build, "retention_days": retention, "agents": agents }))
+}
+
+/// `POST /api/v1/agents/{name}/prefill/rebuild` -- invalidates one agent's prefill; the pond
+/// rebuilds it at the next quiet moment.
+async fn rebuild_agent_prefill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl axum::response::IntoResponse {
+    if !prefill_agents(&state)
+        .await
+        .iter()
+        .any(|role| role.name() == name)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no agent named {name}")})),
+        )
+            .into_response();
+    }
+    pond_core::shared::services::prefill_progress::process_prefill_progress()
+        .request_rebuild(Some(&name));
+    (StatusCode::ACCEPTED, Json(json!({"queued": [name]}))).into_response()
+}
+
+/// `POST /api/v1/agents/prefills/rebuild` -- invalidates every agent's prefill.
+async fn rebuild_all_prefills() -> impl axum::response::IntoResponse {
+    pond_core::shared::services::prefill_progress::process_prefill_progress().request_rebuild(None);
+    (StatusCode::ACCEPTED, Json(json!({"queued": "all"})))
+}
+
+/// `GET /api/v1/agents/suggestions` -- the shipped agents this pond can run for the caller, less
+/// those they declined or already have. Nobody identified is offered nothing.
+async fn agent_suggestions(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::services::agent_templates::{enabled_templates, suggestions};
+    use pond_core::user_data::ports::agent_suggestion::AgentSuggestionLedger as _;
+
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return Json(json!([])).into_response();
+    };
+    // Unreadable, every card would come back, the declined ones included: show none instead.
+    let dismissed = match agent_suggestion_ledger(&state).dismissed(&member).await {
+        Ok(dismissed) => dismissed,
+        Err(e) => {
+            tracing::warn!(error = %e, "agent suggestions: the declined cards could not be read");
+            return Json(json!([])).into_response();
+        }
+    };
+    let enabled = match &state.recipe_repo {
+        Some(repo) => match repo.list().await {
+            Ok(recipes) => enabled_templates(&recipes, &member),
+            Err(e) => {
+                tracing::warn!(error = %e, "agent suggestions: recipes could not be read");
+                return Json(json!([])).into_response();
+            }
+        },
+        None => Default::default(),
+    };
+    let pond = pond_capabilities(&state, Some(&member)).await;
+    Json(suggestions(&pond, &dismissed, &enabled)).into_response()
+}
+
+/// Serialises turning agents on, so two taps cannot both take the same free name: the recipe
+/// store's upsert would replace the first copy with the second.
+static ENABLING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `POST /api/v1/agents/suggestions/{template}/enable` -- copies a shipped agent into the
+/// caller's recipes. Nothing runs that the template's activations do not declare.
+async fn enable_agent_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(template): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::services::agent_templates::{
+        copy_name, enabled_templates, template as find_template, template_copy,
+    };
+
+    let Some(shipped) = find_template(&template) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no shipped agent named `{template}`")})),
+        )
+            .into_response();
+    };
+    let Some(repo) = &state.recipe_repo else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"error": "Recipe repository not configured"})),
+        )
+            .into_response();
+    };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "only a household member can turn an agent on"})),
+        )
+            .into_response();
+    };
+    let pond = pond_capabilities(&state, Some(&member)).await;
+    let missing = shipped.missing(&pond);
+    if !missing.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "this pond cannot run that agent yet",
+                "missing": missing,
+            })),
+        )
+            .into_response();
+    }
+
+    let _one_at_a_time = ENABLING.lock().await;
+    let recipes = match repo.list().await {
+        Ok(recipes) => recipes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    if enabled_templates(&recipes, &member).contains(shipped.id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "you already have this agent"})),
+        )
+            .into_response();
+    }
+    let taken = recipes.into_iter().map(|r| r.name).collect();
+    let recipe = template_copy(
+        shipped,
+        &member,
+        copy_name(shipped, &taken),
+        chrono::Utc::now(),
+    );
+    match repo.upsert(&recipe).await {
+        Ok(()) => {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "agent_enabled",
+                template = shipped.id,
+                recipe = %recipe.name,
+                member = %member,
+                "a member turned a shipped agent on"
+            );
+            (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/agents/suggestions/{template}/dismiss` -- hides a card from the caller for good.
+async fn dismiss_agent_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(template): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::ports::agent_suggestion::AgentSuggestionLedger as _;
+
+    let Some(shipped) = pond_core::shared::services::agent_templates::template(&template) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no shipped agent named `{template}`")})),
+        )
+            .into_response();
+    };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "only a household member can dismiss a suggestion"})),
+        )
+            .into_response();
+    };
+    match agent_suggestion_ledger(&state)
+        .dismiss(shipped.id, &member, chrono::Utc::now())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ValidateRecipeRequest {
+    yaml: String,
+    /// The recipe's name, which is the agent's; a draft may not have one yet.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Name a draft agent is checked under before it has one.
+const DRAFT_AGENT_NAME: &str = "draft";
+
+/// `POST /api/v1/recipes/validate` -- every problem in an agent's `giap_role` block, each at the
+/// path of its field, so the builder or a small model can fix the right line. Always 200 for a
+/// readable body: a refused block is an answer, not a failed request.
+async fn validate_recipe(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ValidateRecipeRequest>, JsonRejection>,
+) -> impl axum::response::IntoResponse {
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    // Unchecked rather than refused when the store is unreadable: the names are a convenience.
+    let known: Option<std::collections::BTreeSet<String>> = match &state.recipe_repo {
+        Some(repo) => match repo.list().await {
+            Ok(recipes) => Some(recipes.into_iter().map(|r| r.name).collect()),
+            Err(e) => {
+                tracing::debug!(error = %e, "recipes/validate: could not list agents; names go unchecked");
+                None
+            }
+        },
+        None => None,
+    };
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(DRAFT_AGENT_NAME);
+    let checked = pond_core::shared::domain::role_block::validate_role_recipe(
+        name,
+        &req.yaml,
+        known.as_ref(),
+    );
+    Json(checked.report()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -15203,6 +15973,19 @@ async fn update_recipe(
                 .into_response()
         }
     };
+    if let (Some(template), Some(yaml)) = (existing.template.as_deref(), req.yaml.as_deref()) {
+        let widened = pond_core::shared::services::agent_templates::widened_groups(template, yaml);
+        if !widened.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "a copy of a shipped agent may narrow its tools, never widen them",
+                    "widened": widened,
+                })),
+            )
+                .into_response();
+        }
+    }
     let updated = AgentRecipe {
         id: existing.id,
         name: existing.name,
@@ -15210,6 +15993,8 @@ async fn update_recipe(
         yaml: req.yaml.unwrap_or(existing.yaml),
         active: req.active.unwrap_or(existing.active),
         created_at: existing.created_at,
+        owner_profile_id: existing.owner_profile_id,
+        template: existing.template,
     };
     match repo.upsert(&updated).await {
         Ok(()) => Json(recipe_view_json(&updated)).into_response(),

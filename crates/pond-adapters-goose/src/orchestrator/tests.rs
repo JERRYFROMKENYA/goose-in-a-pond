@@ -148,6 +148,11 @@ struct FakeRunnerState {
     session_seq: AtomicUsize,
     /// The parent's reserved fraction, read inside the run: the only moment the claim exists.
     reserved_during_run: Mutex<Vec<f32>>,
+    /// Whether the run's engine calls were helper calls, and whether a turn waited on them, read
+    /// where the engine would read them.
+    helper_during_run: Mutex<Vec<(bool, bool)>>,
+    /// The parent the child's session resolved to during the run, as a tool server sees it.
+    parent_during_run: Mutex<Vec<Option<String>>>,
 }
 
 struct FakeRunner {
@@ -217,6 +222,22 @@ impl ChildRunner for FakeRunner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(process_device_ledger().reserved_fraction(&plan.parent_session_id));
+        self.state
+            .helper_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((
+                goose_providers::request_context::is_helper(),
+                goose_providers::request_context::prime_is_waiting(),
+            ));
+        self.state
+            .parent_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(
+                pond_core::shared::services::child_sessions::process_child_sessions()
+                    .parent_of(&plan.child_session_id),
+            );
         self.state
             .plans
             .lock()
@@ -444,6 +465,87 @@ fn a_provider_somewhere_else_takes_only_one_permit() {
         subagent_permits("local") > subagent_permits("anthropic"),
         "the on-device and remote cases ask for the same number of permits, so the assertion \
          next door is satisfied by everything and proves nothing"
+    );
+}
+
+/// A child's engine calls take the model's one context; outside a run nothing is a helper call.
+#[tokio::test]
+async fn a_childs_engine_calls_are_helper_calls() {
+    let _serial = ONE_RUN_AT_A_TIME.lock().await;
+    let role = role("researcher", &["giap-weather"]);
+    let env = env_with(
+        "ollama",
+        parent_tools(&[("giap-weather", &["get_weather"])]),
+    );
+    let runner = Arc::new(FakeRunner::new(env));
+    let state = runner.state.clone();
+    let (orchestrator, _turn) = live_turn(runner);
+
+    orchestrator
+        .spawn(spec_for(&role, &["giap-weather"]))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *state
+            .helper_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        vec![(true, false)],
+        "a child ran outside the helper scope, so the engine would put it beside the parent's \
+         context instead of in it; and with no turn holding the device, nobody waits on it"
+    );
+    assert!(
+        !goose_providers::request_context::is_helper(),
+        "the scope ends with the run"
+    );
+    let parents = state
+        .parent_during_run
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(parents.len(), 1);
+    let parent = parents[0].clone().expect(
+        "a running child must resolve to its parent, or a tool server cannot find its work",
+    );
+    let child = state.opened.lock().unwrap_or_else(|e| e.into_inner())[0].clone();
+    assert!(
+        pond_core::shared::services::child_sessions::process_child_sessions()
+            .parent_of(&child)
+            .is_none(),
+        "a finished child must stop resolving to {parent}"
+    );
+}
+
+/// A turn holding the device waits on its child, so the engine may set that turn's cache aside.
+#[tokio::test]
+async fn a_child_of_a_live_turn_says_the_turn_is_waiting() {
+    let _serial = ONE_RUN_AT_A_TIME.lock().await;
+    let parent = "waiting-parent";
+    let role = role("researcher", &["giap-weather"]);
+    let env = env_with(
+        "ollama",
+        parent_tools(&[("giap-weather", &["get_weather"])]),
+    );
+    let runner = Arc::new(FakeRunner::new(env));
+    let state = runner.state.clone();
+    let (orchestrator, _turn, token) = live_turn_for(parent, runner);
+    let claim = claim_device_for_turn(parent, "ollama", &token).await;
+    assert!(claim.is_some(), "an on-device turn took no device claim");
+
+    orchestrator
+        .spawn(spec_for_parent(&role, &["giap-weather"], parent))
+        .await
+        .unwrap();
+    drop(claim);
+
+    assert_eq!(
+        *state
+            .helper_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        vec![(true, true)],
+        "a child its turn waits on must say so, or the engine rebuilds the turn afterwards"
     );
 }
 

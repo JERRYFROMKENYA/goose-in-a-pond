@@ -5,6 +5,9 @@ import { Fragment, useState, type ReactElement, type ReactNode } from "react";
 import { InkBudget, InkButton, InkSegmented, InkSheet, InkStack, InkText } from "@jarida/ink/react";
 import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, micEl } from "../primitives/icons";
+import { AgentPrefillLine } from "../../agents/AgentPrefill";
+import { AgentSuggestions } from "../../agents/AgentSuggestions";
+import { requestOpenAgent } from "../../agents/openAgent";
 import { SuggestionChips } from "../primitives/SuggestionChips";
 import { SuggestionQueue } from "../primitives/SuggestionQueue";
 import { WeatherWidget } from "../primitives/WeatherWidget";
@@ -160,6 +163,8 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         subtitle={quietLine}
       />
 
+      <AgentPrefillLine />
+
       {/* A plain stacking wrapper below 1101px (matches the three standing alone before this
           existed); at >=1101px it becomes the row that puts alerts beside the composer
           instead of under it, in the empty top-right the composer alone left behind.
@@ -171,6 +176,16 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         <div className="dash__top-left">
           <HomeComposer onAsk={onAsk} onTalk={onTalk} />
           <SuggestionChips sessionId={sessionId} onAsk={onAsk} />
+          {/* Nothing until the pond has a template it can run; then one card, and the rest on Recipes.
+              Turning one on opens the builder on the new copy, so it hands that copy to Recipes first. */}
+          <AgentSuggestions
+            variant="home"
+            onEnabled={(recipe) => {
+              requestOpenAgent(recipe);
+              onNavigate("recipes");
+            }}
+            onSeeAll={() => onNavigate("recipes")}
+          />
         </div>
         <HomeAlerts onNavigate={onNavigate} />
       </div>

@@ -5,6 +5,7 @@ pub mod device;
 pub mod device_control;
 pub mod dispatcher;
 pub mod knowledge;
+pub mod long_task;
 pub mod memory;
 pub mod orchestrator;
 pub mod schedule;
@@ -177,6 +178,11 @@ pub use audio::init_audio_control;
 pub use device::{init_device_deps, spawn_device_server};
 pub use device_control::{init_device_control_deps, spawn_device_control_server};
 pub use knowledge::{init_knowledge_deps, spawn_knowledge_server};
+// Installed by pond-server once the Goose adapter exists, like the orchestrator's.
+pub use long_task::{
+    init_long_task_deps, installed_long_task_deps, spawn_task_work_server, spawn_tasks_server,
+    task_summary_for_notice, LongTaskDeps, TaskWorkMcpServer, TasksMcpServer,
+};
 pub use memory::{init_memory_deps, spawn_memory_server};
 // Installed by pond-server once the Goose adapter exists, not by `register_giap_extensions`.
 pub use orchestrator::{

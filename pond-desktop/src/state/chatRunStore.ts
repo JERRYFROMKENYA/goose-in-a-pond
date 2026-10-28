@@ -13,6 +13,7 @@ import type {
 import { filterThinking } from "../lib/thinkFilter";
 import { applySubagentProgress, type SubagentRun } from "../components/subagentRuns";
 import { keptResultOf, type KeptResult } from "./keptResults";
+import { startedTaskId, startedTaskIdOfRow } from "../longtasks/longTaskWords";
 import { ApiError } from "../api/types";
 import type {
   ChatEvent,
@@ -52,6 +53,8 @@ export interface Message {
   contextWarning?: ContextWarning;
   /** Folded from `subagent_progress` frames; unlike the other notes, rendered while streaming. */
   delegations?: SubagentRun[];
+  /** Long tasks this turn started (`task_start`), which the chat draws as live cards. */
+  longTaskIds?: string[];
   /** A live send's local preview URLs, or attachment URLs for replayed history. */
   images?: string[];
   /** session_messages.id; unset on a live turn until `done` backfills it, disabling its actions. */
@@ -93,10 +96,13 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
   const pending: HistoryImages[] = [];
   // A turn's tool rows are stored just before its assistant row, so they wait for it.
   let kept: KeptResult[] = [];
+  let started: string[] = [];
   for (const m of raw) {
     if (m.role === "tool") {
       const result = keptResultOf(m);
       if (result) kept.push(result);
+      const task = startedTaskIdOfRow(m);
+      if (task && !started.includes(task)) started.push(task);
       continue;
     }
     const keptResults = kept.length > 0 ? kept : undefined;
@@ -117,11 +123,14 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
         text: m.content,
         historyToolNames,
         keptResults,
+        longTaskIds: started.length > 0 ? started : undefined,
         thinkingBlocks,
         backendId: m.id,
         liked: m.liked ?? null,
       });
+      started = [];
     } else {
+      started = [];
       out.push({
         id: ++_msgId,
         role: "user",
@@ -518,9 +527,14 @@ async function consume(
             ? { ...c, data: cardData, ...(renderHint ? { renderHint } : {}) }
             : c,
         );
+        const text = ev.content ?? (typeof cardData.result === "string" ? cardData.result : undefined);
+        const tool = evTool ?? last.cards.find((c) => c.callId === evId)?.tool;
+        const task = startedTaskId(text, tool);
+        const longTaskIds =
+          task && !last.longTaskIds?.includes(task) ? [...(last.longTaskIds ?? []), task] : last.longTaskIds;
         return [
           ...prev.slice(0, -1),
-          { ...last, cards: newCards, status: undefined },
+          { ...last, cards: newCards, longTaskIds, status: undefined },
         ];
       });
     } else if (ev.type === "review_status" && ev.content) {

@@ -3,6 +3,7 @@ import {
   ApiError,
   type AddExtensionRequest,
   type AgentRecipe,
+  type AgentSuggestion,
   type AgentTool,
   type CalibrateResponse,
   type ChallengeResponse,
@@ -39,13 +40,17 @@ import {
   type MeshPeerCapabilities,
   type MeshSettlementStatus,
   type MeshSelf,
+  type LongTask,
+  type LongTaskArtifactBody,
   type ModelActiveRoles,
   type ModelEntry,
   type ModelEngine,
   type ModelMemoryStatus,
   type OllamaModel,
   type PairingCodeResponse,
+  type PrefillReport,
   type PromptTemplate,
+  type RecipeValidation,
   type RetitleOneResult,
   type RetitleResult,
   type Schedule,
@@ -1661,6 +1666,71 @@ export class PondApiClient {
 
   removeRecipe(id: string): Promise<void> {
     return this.del(`/api/v1/recipes/${encodeURIComponent(id)}`);
+  }
+
+  /** This conversation's long tasks, newest first; without a session, every task the caller reaches. 404 on an older pond. */
+  async listLongTasks(sessionId?: string | null): Promise<LongTask[]> {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    const r = await this.get<LongTask[] | undefined>(`/api/v1/long-tasks${query}`);
+    return Array.isArray(r) ? r : [];
+  }
+
+  /** One task, its steps and its artifacts. 404 for a task the caller does not reach. */
+  getLongTask(id: string): Promise<LongTask> {
+    return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}`);
+  }
+
+  /** An artifact's whole body, for "Read the result". */
+  getLongTaskArtifact(id: string, artifactId: string): Promise<LongTaskArtifactBody> {
+    return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}`);
+  }
+
+  /** Stops a task; a step already under way finishes first. 409 if it has already ended. */
+  async cancelLongTask(id: string): Promise<void> {
+    await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/cancel`);
+  }
+
+  /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */
+  getAgentPrefills(): Promise<PrefillReport> {
+    return this.get("/api/v1/agents/prefills");
+  }
+
+  /** Throws the old copy away; the pond rebuilds it at its next quiet moment. 404 for an unknown agent. */
+  async rebuildAgentPrefill(name: string): Promise<void> {
+    await this.post(`/api/v1/agents/${encodeURIComponent(name)}/prefill/rebuild`);
+  }
+
+  /** The same for every agent. */
+  async rebuildAllPrefills(): Promise<void> {
+    await this.post("/api/v1/agents/prefills/rebuild");
+  }
+
+  /** Agent templates this pond could run, none switched on. A dismissed one is not listed again. */
+  async listAgentSuggestions(): Promise<AgentSuggestion[]> {
+    const r = await this.get<AgentSuggestion[] | { suggestions?: AgentSuggestion[] }>("/api/v1/agents/suggestions");
+    return Array.isArray(r) ? r : (r?.suggestions ?? []);
+  }
+
+  /** Copies the template into the household's recipes, owned by the member who asked. 409 if it already is. */
+  async enableAgentSuggestion(template: string): Promise<{ recipe: AgentRecipe }> {
+    const r = await this.post<AgentRecipe | { recipe: AgentRecipe }>(
+      `/api/v1/agents/suggestions/${encodeURIComponent(template)}/enable`,
+    );
+    // The route answers with the recipe itself; a wrapped one is read the same.
+    return r && typeof r === "object" && "recipe" in r ? { recipe: r.recipe } : { recipe: r as AgentRecipe };
+  }
+
+  /** The card stays hidden for good. */
+  dismissAgentSuggestion(template: string): Promise<void> {
+    return this.post(`/api/v1/agents/suggestions/${encodeURIComponent(template)}/dismiss`);
+  }
+
+  /** Checks an agent's `giap_role` block without saving; a refused block is an answer, not an error. */
+  validateRecipe(yaml: string, name?: string): Promise<RecipeValidation> {
+    return this.post("/api/v1/recipes/validate", {
+      yaml,
+      ...(name ? { name } : {}),
+    });
   }
 
   // ── Chat streaming ────────────────────────────────────────

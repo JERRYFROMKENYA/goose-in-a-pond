@@ -41,6 +41,8 @@ import type { SessionSummary } from "../api/types";
 import { TurnStatsFooter } from "../components/TurnStatsFooter";
 import { ContextPressureNote } from "../components/ContextPressureNote";
 import { SubagentTree } from "../components/SubagentTree";
+import { LongTaskCards, LongTaskStrays } from "../longtasks/LongTaskCards";
+import { useLongTasks } from "../longtasks/useLongTasks";
 import { prepareImage, validateAttachmentSet } from "../lib/imageAttach";
 import type { PreparedImage } from "../lib/imageAttach";
 import { useSuggestedPrompts } from "../hooks/useSuggestedPrompts";
@@ -57,6 +59,10 @@ export function Chat() {
   // Turn state lives in `state/chatRunStore`: any sidebar press unmounts Chat, and the turn must survive it.
   const run = useChatRun();
   const { messages, busy, queued, turnSeed, loadingSession } = run;
+
+  const startedTasks = useMemo(() => messages.flatMap((m) => m.longTaskIds ?? []), [messages]);
+  const startedTaskSet = useMemo(() => new Set(startedTasks), [startedTasks]);
+  const longTasks = useLongTasks(run.sessionId ?? null, startedTasks);
 
   const [input, setInput]                   = useState("");
   const [sessions, setSessions]             = useState<SessionSummary[]>([]);
@@ -662,7 +668,8 @@ export function Chat() {
           const hasText     = msg.text && msg.text.trim().length > 0;
           const hasCards    = (msg.cards?.length ?? 0) > 0;
           const hasThinking = (msg.thinkingBlocks?.length ?? 0) > 0;
-          if (msg.role === "agent" && !hasText && !hasCards && !hasThinking && !msg.streaming) return null;
+          const hasTasks    = (msg.longTaskIds?.length ?? 0) > 0;
+          if (msg.role === "agent" && !hasText && !hasCards && !hasThinking && !hasTasks && !msg.streaming) return null;
           return (
             <div key={msg.id} className={`ch-row ${msg.role === "user" ? "ch-row--user" : "ch-row--goose"}`}>
               <div className="ch-bubble-wrap">
@@ -706,6 +713,10 @@ export function Chat() {
                     `delegate` tool call stops looking like a hung spinner. */}
                 {msg.role === "agent" && msg.delegations && msg.delegations.length > 0 && (
                   <SubagentTree runs={msg.delegations} />
+                )}
+                {/* Long tasks the prime started this turn. Live for the same reason as the tree above. */}
+                {msg.role === "agent" && (
+                  <LongTaskCards ids={msg.longTaskIds} longTasks={longTasks} variant="classic" />
                 )}
                 {/* Bubble */}
                 <div className={`ch-bubble ${msg.role === "user" ? "ch-bubble--user" : `ch-bubble--goose${msg.error ? " ch-bubble--error" : ""}`}`}>
@@ -846,6 +857,8 @@ export function Chat() {
             </div>
           );
         })}
+
+        {!loadingSession && <LongTaskStrays anchored={startedTaskSet} longTasks={longTasks} variant="classic" />}
 
         {/* No conversation model: the pond picks nothing and downloads nothing on its own, so the
             thread offers its suggestions, with sizes, and waits for a press. */}

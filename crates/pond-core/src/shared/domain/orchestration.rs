@@ -10,8 +10,14 @@ use crate::mcp::domain::tool_group::{
     group_of_tool, groups_denied_to_guests, groups_denied_to_subagents,
 };
 #[cfg(test)]
-use crate::mcp::domain::tool_group::{ORCHESTRATOR_EXTENSION, TOOLKIT_EXTENSION, TRAVEL_EXTENSION};
+use crate::mcp::domain::tool_group::{
+    ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TOOLKIT_EXTENSION, TRAVEL_EXTENSION,
+};
 use crate::models::services::context::model_class::{provider_locality, ProviderLocality};
+use crate::shared::domain::role_block::{
+    self, default_activations, render_examples, Activation, ExtrasInput, References, RoleA2a,
+    RoleExample, RoleExtras, RoleHooks,
+};
 use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -240,6 +246,11 @@ pub struct AgentRole {
     context_fraction: f32,
     /// The model this role wants, resolved by [`ChildModel`]; `None` means the conversation's.
     model: Option<String>,
+    /// Already rendered into `instructions`; kept for the builder.
+    examples: Vec<RoleExample>,
+    activations: Vec<Activation>,
+    hooks: RoleHooks,
+    a2a: RoleA2a,
 }
 
 impl AgentRole {
@@ -281,7 +292,26 @@ impl AgentRole {
             max_turns,
             context_fraction,
             model: None,
+            examples: Vec::new(),
+            activations: default_activations(),
+            hooks: RoleHooks::default(),
+            a2a: RoleA2a::default(),
         })
+    }
+
+    /// Attach a block's typed parts; examples join the instructions, so the preamble holds them.
+    fn with_extras(mut self, extras: RoleExtras) -> Self {
+        if !extras.examples.is_empty() {
+            let kept = self.instructions.trim_end().len();
+            self.instructions.truncate(kept);
+            self.instructions
+                .push_str(&render_examples(&extras.examples));
+        }
+        self.examples = extras.examples;
+        self.activations = extras.activations;
+        self.hooks = extras.hooks;
+        self.a2a = extras.a2a;
+        self
     }
 
     /// Attach the model this role asks for; a blank name is refused, not treated as absent.
@@ -316,7 +346,7 @@ impl AgentRole {
             .or(doc.instructions)
             .or(doc.prompt)
             .unwrap_or_default();
-        Self::new(
+        let role = Self::new(
             recipe_name,
             instructions,
             block.tool_groups.into_iter().collect(),
@@ -324,8 +354,26 @@ impl AgentRole {
             block.max_turns,
             block.context_fraction,
         )?
-        .with_model(block.model)
-        .map(Some)
+        .with_model(block.model)?;
+        let mut problems = Vec::new();
+        let extras = role_block::parse_extras(
+            ExtrasInput {
+                context: block.context.as_ref(),
+                activations: block.activations.as_ref(),
+                hooks: block.hooks.as_ref(),
+                a2a: block.a2a.as_ref(),
+            },
+            &References::none(),
+            &mut problems,
+        );
+        if let Some(first) = problems.into_iter().next() {
+            return Err(RoleError::Field {
+                role: recipe_name.to_string(),
+                path: first.path,
+                message: first.message,
+            });
+        }
+        Ok(Some(role.with_extras(extras)))
     }
 
     pub fn name(&self) -> &str {
@@ -356,6 +404,47 @@ impl AgentRole {
     /// The model this role asks for; resolve it with [`ChildModel::resolve`] before use.
     pub fn requested_model(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+
+    pub fn examples(&self) -> &[RoleExample] {
+        &self.examples
+    }
+
+    pub fn activations(&self) -> &[Activation] {
+        &self.activations
+    }
+
+    pub fn hooks(&self) -> &RoleHooks {
+        &self.hooks
+    }
+
+    pub fn a2a(&self) -> RoleA2a {
+        self.a2a
+    }
+
+    /// May the prime hand it work with `delegate`?
+    pub fn accepts_delegation(&self) -> bool {
+        self.activations.contains(&Activation::Delegated)
+    }
+
+    /// May a long task's planner give it a step?
+    pub fn accepts_task_steps(&self) -> bool {
+        self.activations.contains(&Activation::TaskStep)
+    }
+
+    /// Does it take work handed on by the agent named `source`?
+    pub fn accepts_hand_off_from(&self, source: &str) -> bool {
+        self.activations.iter().any(|activation| match activation {
+            Activation::Agent { from } => from.iter().any(|name| name == source),
+            _ => false,
+        })
+    }
+
+    /// Whether anything starts it without a model deciding to: a schedule or an event.
+    pub fn runs_on_its_own(&self) -> bool {
+        self.activations
+            .iter()
+            .any(|a| matches!(a, Activation::Schedule(_) | Activation::Event(_)))
     }
 }
 
@@ -388,6 +477,15 @@ struct RoleBlock {
     /// No `provider` key on purpose: naming one could send a local pond's data off the machine.
     #[serde(default)]
     model: Option<String>,
+    /// The next four are typed by `role_block`, which collects every problem with its path.
+    #[serde(default)]
+    context: Option<serde_yaml::Value>,
+    #[serde(default)]
+    activations: Option<serde_yaml::Value>,
+    #[serde(default)]
+    hooks: Option<serde_yaml::Value>,
+    #[serde(default)]
+    a2a: Option<serde_yaml::Value>,
 }
 
 fn default_role_max_turns() -> u32 {
@@ -419,6 +517,12 @@ pub enum RoleError {
     EmptyModel { role: String },
     #[error("role `{role}` has an unreadable `{ROLE_YAML_KEY}` block: {message}")]
     Yaml { role: String, message: String },
+    #[error("role `{role}`: `{path}` {message}")]
+    Field {
+        role: String,
+        path: String,
+        message: String,
+    },
 }
 
 // ── The request, the authority, and the spec ────────────────────────────────
@@ -539,6 +643,10 @@ impl DelegationAuthority {
             model: role.model.clone(),
             // From the request: it describes this delegation, not the persona.
             background: request.background,
+            compile_shape: None,
+            prefill_retention: None,
+            prefill_rebuild: false,
+            persona: role.instructions.clone(),
         })
     }
 }
@@ -619,6 +727,15 @@ pub struct TaskSpec {
     model: Option<String>,
     /// From the request; the adapter refuses it on an on-device provider.
     background: bool,
+    /// The shape a prefill compile run names, set only by the pond's own compile pass; it widens
+    /// nothing.
+    compile_shape: Option<String>,
+    /// Helper snapshots unused for longer are discarded by that compile.
+    prefill_retention: Option<std::time::Duration>,
+    /// The compile rebuilds the role's snapshot even when it is valid.
+    prefill_rebuild: bool,
+    /// The role's own instructions, examples included: the child's persona in its preamble.
+    persona: String,
 }
 
 impl TaskSpec {
@@ -672,6 +789,42 @@ impl TaskSpec {
     /// Whether the delegation asked to run in the background; see [`BackgroundAvailability`].
     pub fn background(&self) -> bool {
         self.background
+    }
+
+    /// Marks the run as a prefill compile: the engine checks and rebuilds the role's snapshot and
+    /// the child generates one token. Only the pond's compile pass calls this.
+    pub fn compiling_prefill(mut self, shape: impl Into<String>) -> Self {
+        self.compile_shape = Some(shape.into());
+        self
+    }
+
+    pub fn compile_shape(&self) -> Option<&str> {
+        self.compile_shape.as_deref()
+    }
+
+    /// The compile also discards helper snapshots no role has used for `retention`.
+    pub fn retaining_helpers_for(mut self, retention: std::time::Duration) -> Self {
+        self.prefill_retention = Some(retention);
+        self
+    }
+
+    pub fn prefill_retention(&self) -> Option<std::time::Duration> {
+        self.prefill_retention
+    }
+
+    /// The compile rebuilds the snapshot even when it is valid: a member invalidated it.
+    pub fn rebuilding(mut self) -> Self {
+        self.prefill_rebuild = true;
+        self
+    }
+
+    pub fn rebuilds_prefill(&self) -> bool {
+        self.prefill_rebuild
+    }
+
+    /// The role's instructions, for the child's system prompt; the request's are its task.
+    pub fn persona(&self) -> &str {
+        &self.persona
     }
 
     /// May the child call this fully-qualified tool?
@@ -782,7 +935,7 @@ impl TaskRun {
 /// The groups no subagent may hold, each with the control a subagent would bypass.
 /// Kept apart from [`groups_denied_to_subagents`] so a removal from that list fails a test.
 #[cfg(test)]
-const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 7] = [
+const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 8] = [
     (
         TOOLKIT_EXTENSION,
         "enable_tool_group WIDENS an allow-set keyed by the process-global current_session_id(), \
@@ -820,6 +973,11 @@ const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 7] = [
         "it shows live pictures of the inside of the home, and configure_vision_bus and \
          create_vision_automation change settings and add rules with the household's authority, \
          with no approval path",
+    ),
+    (
+        TASKS_EXTENSION,
+        "task_start queues work the step runner later runs as fresh helpers, so a helper holding \
+         it could start helpers of its own that no delegation depth counts",
     ),
 ];
 

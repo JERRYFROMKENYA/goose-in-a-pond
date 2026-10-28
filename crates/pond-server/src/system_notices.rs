@@ -153,6 +153,42 @@ pub fn spawn_schedule_result_notices(
     });
 }
 
+// Long tasks
+
+/// The owner's notice that a long task they started has ended. `info` for an answer, `alert`
+/// when it could not finish; a tap opens chat, where `task_status` gives the detail.
+pub fn long_task_notification(
+    task_id: &str,
+    goal: &str,
+    finished: bool,
+    body: String,
+) -> Notification {
+    let mut fields = serde_json::Map::new();
+    fields.insert("long_task_id".into(), task_id.into());
+    let title = if finished {
+        "Task done"
+    } else {
+        "Task stopped"
+    };
+    Notification {
+        id: format!("long-task-{task_id}"),
+        target: String::new(),
+        category: if finished { "info" } else { "alert" }.to_string(),
+        title: format!("{title}: {}", truncate_goal(goal)),
+        body,
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        data: Some(OpenScreen::Chat.merged_into(fields)),
+    }
+}
+
+fn truncate_goal(goal: &str) -> String {
+    const MAX: usize = 60;
+    match goal.char_indices().nth(MAX) {
+        Some((at, _)) => format!("{}...", goal[..at].trim_end()),
+        None => goal.to_string(),
+    }
+}
+
 // Proposals
 
 /// The member's notification for a proposal awaiting their decision. `action_required`, not

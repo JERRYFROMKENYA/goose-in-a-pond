@@ -895,6 +895,138 @@ export interface AgentRecipe {
   parameters?: RecipeParameter[];
   extensions?: RecipeExtensionSpec[];
   activities?: string[];
+  /** The member whose paired device first saved it; `null` when saved from no attributed device. */
+  owner_profile_id?: string | null;
+}
+
+/** One problem `POST /recipes/validate` found, at the path of its field (`giap_role.activations[2].event.on`). */
+export interface RecipeFieldError {
+  path: string;
+  message: string;
+}
+
+/** An activation as the validator reports it, tagged on `kind`. */
+export type ValidatedActivation =
+  | { kind: "delegated" }
+  | { kind: "task_step" }
+  | { kind: "schedule"; cron: string; brief: string; cooldown_secs: number }
+  | { kind: "event"; on: string; brief: string; cooldown_secs: number }
+  | { kind: "agent"; from: string[] };
+
+export interface ValidatedRole {
+  name: string;
+  tool_groups: string[];
+  activations: ValidatedActivation[];
+  hooks: { before: string[]; after: Array<string | { hand_to: string }> };
+  /** The role's own text, examples included; tool schemas are not counted. */
+  preamble_chars: number;
+}
+
+/** A shipped agent template the pond offers, shown only when this pond can run it. Nothing runs until it is turned on. */
+export interface AgentSuggestion {
+  /** The template's name; the key the enable and dismiss routes take. */
+  template: string;
+  title: string;
+  description: string;
+  /** Why it fits this pond, in the pond's words. */
+  why: string;
+  /** What it uses that this pond has, such as presence or a camera. */
+  needs: string[];
+  /** When it would run, such as "Every weekday at 7:00". */
+  activations_summary: string;
+}
+
+/** Where an agent's prefill (its saved start-up copy) stands; spellings are pond-core's `PrefillState`. */
+export type PrefillStatus = "ready" | "building" | "queued" | "idle" | "not_built" | "failed";
+
+export interface PrefillAgent {
+  /** The agent's recipe name; a built-in is `long-task-planner`, `-worker` or `-verifier`. */
+  agent: string;
+  kind: "default" | "member";
+  status: PrefillStatus;
+  compiled_at: string | null;
+  last_used_at: string | null;
+}
+
+/** What the compile pass is doing now; `current` is an agent or a prompt shape. */
+export interface PrefillBuild {
+  active: boolean;
+  current: string | null;
+  done: number;
+  total: number;
+}
+
+/** Answer of `GET /agents/prefills`. */
+export interface PrefillReport {
+  building: PrefillBuild;
+  /** Days unused before a copy is discarded and rebuilt on the agent's next run. */
+  retention_days: number;
+  agents: PrefillAgent[];
+}
+
+/** Where a long task is; spellings are pond-core's `LongTaskState`. */
+export type LongTaskState =
+  | "planning"
+  | "running"
+  | "awaiting_approval"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type LongTaskStepState = "pending" | "running" | "completed" | "failed" | "skipped" | "awaiting_approval";
+
+export interface LongTaskStep {
+  key: string;
+  /** The agent working the step: a recipe name, or `long-task-worker` and its kin. */
+  role: string;
+  state: LongTaskStepState;
+  attempts: number;
+  /** One line on how the step went, once it has. */
+  summary: string | null;
+  /** The pond's own reason, when the step failed. */
+  failure: string | null;
+}
+
+/** What a step made; the body comes from the artifact route, never with the task. */
+export interface LongTaskArtifact {
+  id: string;
+  task_id: string;
+  step_key: string | null;
+  kind: string;
+  title: string;
+  summary: string;
+  tokens: number;
+  created_at: string;
+}
+
+/** A long task as the chat card shows it. */
+export interface LongTask {
+  id: string;
+  goal: string;
+  state: LongTaskState;
+  origin_session_id: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  steps: LongTaskStep[];
+  artifacts: LongTaskArtifact[];
+  result_artifact_id: string | null;
+}
+
+export interface LongTaskArtifactBody {
+  id: string;
+  title: string;
+  kind: string;
+  summary: string;
+  body: string;
+}
+
+/** Answer of `POST /recipes/validate`: 200 whether or not the block is acceptable. */
+export interface RecipeValidation {
+  ok: boolean;
+  role: ValidatedRole | null;
+  errors: RecipeFieldError[];
 }
 
 // ── Chat / Streaming ──────────────────────────────────────────

@@ -3869,3 +3869,12 @@ PAI-2, PAI-3 and PAI-4; not a PAI milestone).** Design and store audit:
     late (cancelled-turn) sweep shares with the next turn's start.
 - **Invariants.** No migration: the new setting's row reads its default when absent. No new tool
   and no new egress host. No turn blocks on an LLM call.
+- **Verified on the Orin** (2026-10-28, release `0c9c3833`):
+  - the fast crates' tests pass. The one pond-core failure is a pre-existing race between two
+    `device_budget` tests over the process-global vision allowlist;
+  - live, with the household's key, three searches were answered by LLM Context, with local
+    places on and off;
+  - `pond_system.db` and goose's `sessions.db` held only the stub after each turn.
+
+  NOT VERIFIED: pond-adapters-goose's own tests (compiled by CI's `cargo check`, never run) and
+  the amended `live_checks.py` web search checks.

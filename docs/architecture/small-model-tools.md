@@ -1116,12 +1116,38 @@ place and LLM Context give a household question, through the one tool. Not taken
   - the setting's round-trip and the status field;
   - the stub and `ChatService` storing it;
   - the stored history over HTTP.
-- **pond-adapters-goose's own tests for the store rewrite** (`transient_history.rs`) are
-  compiled, not run. CI runs `cargo check -p pond-server -p pond-adapters-goose --all-targets`,
-  which compiles that crate's tests but does not run them, and a test build of that crate on the
-  Orin needs more disk than the board has free. The decisions they exercise (`stub_owed`,
-  `sweep_due`) run in pond-core's tests. The glue's evidence is the release build that compiles
-  it, and the live check below.
+- **pond-adapters-goose's own tests for the store rewrite** (`transient_history.rs`) have not
+  run anywhere:
+  - CI runs `cargo check -p pond-server -p pond-adapters-goose --all-targets`, which compiles
+    that crate's tests but does not run them;
+  - on the Orin they were not built at all, as a test build of that crate needs more disk than
+    the board has free.
+
+  The decisions they exercise (`stub_owed`, `sweep_due`) run in pond-core's tests. The glue's
+  evidence is the release build that compiles it, and the live check below.
+- **The release build on the Orin** (CUDA, `0c9c3833`) compiled, and the pond served from it.
+- **`scripts/live-test.sh`.** Its first run against that binary failed only the web search
+  checks: they compared the whole `GET /web-search` body, which now carries `local_results`. They
+  now compare the contract fields and switch local places on and off (`c1276495`). Those checks
+  have not run on a device: the rerun's fresh data dir was still downloading Kokoro when the
+  start window closed.
+- **Live, on the Orin's own pond** (E4B, a guest test device, the household's Brave key,
+  2026-10-28 10:34–10:36Z). Functional only, no model scored (§3(b)(xiii)), and nothing of
+  Brave's written to disk by the check:
+  - local places on, the same question twice: both turns were answered from LLM Context
+    (`source="llm_context"`, `local_sent=true`), each with a places part and one card place;
+  - local places off: LLM Context again, `local_sent=false`, no places;
+  - the searches took 2.1, 0.9 and 1.4 s (tool call to result), and the copies were 1,576, 1,383
+    and 1,603 bytes, with no URL;
+  - every SSE frame was marked `transient`, and `transient_redacted when="turn_end"` followed
+    each turn;
+  - after each turn, `pond_system.db` held only the stub ("Web search results are not kept after
+    the turn. Sources: thejunction.co.ke, …"), and goose's `sessions.db` held the stub with no
+    copy and no card;
+  - `pond_logs.db`, `pond.log` and the engine directory held no result text, no page URL and no
+    request log;
+  - the turn after a search began from a 4,023-token prompt with a 0.67 s prefill, against
+    4,556 tokens at the end of the turn that searched. One observation, not an A/B.
 
 #### 8.10.9 Open
 

@@ -106,7 +106,23 @@ pub fn sources(markdown: &str) -> Vec<Source> {
         let Some(close) = after.find("](") else { break };
         let title = &after[..close];
         let target = &after[close + 2..];
-        let Some(end) = target.find(')') else { break };
+        // Wikipedia's titles bracket their disambiguation, so the link ends at the `)` that
+        // closes it, not the first one inside it.
+        let mut depth = 0usize;
+        let Some(end) = target.char_indices().find_map(|(i, c)| match c {
+            '(' => {
+                depth += 1;
+                None
+            }
+            ')' if depth == 0 => Some(i),
+            ')' => {
+                depth -= 1;
+                None
+            }
+            _ => None,
+        }) else {
+            break;
+        };
         let url = target[..end].trim();
         let is_web = url.starts_with("https://") || url.starts_with("http://");
         if is_web && !title.contains('[') && !found.iter().any(|s| s.url == url) {
@@ -365,7 +381,8 @@ mod tests {
     #[test]
     fn only_web_links_are_sources() {
         let found = sources(
-            "[a](https://a.example) [b](javascript:alert(1)) [c](mailto:x@y) [](http://d.example)",
+            "[a](https://a.example) [b](javascript:alert(1)) [c](mailto:x@y) [](http://d.example) \
+             [Fort Jesus](https://en.wikipedia.org/wiki/Fort_Jesus_(Mombasa)).",
         );
         assert_eq!(
             found,
@@ -377,6 +394,10 @@ mod tests {
                 Source {
                     title: "http://d.example".into(),
                     url: "http://d.example".into()
+                },
+                Source {
+                    title: "Fort Jesus".into(),
+                    url: "https://en.wikipedia.org/wiki/Fort_Jesus_(Mombasa)".into()
                 },
             ]
         );

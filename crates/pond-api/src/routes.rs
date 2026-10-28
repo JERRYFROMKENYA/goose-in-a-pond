@@ -852,7 +852,8 @@ async fn emit_pairing_outcome(
     } else {
         tracing::warn!(
             kind = "pairing_rejected",
-            device = device_name.unwrap_or("unnamed"),
+            // A phone's name is often its owner's ("Amina's iPhone").
+            named = device_name.is_some(),
             reason = reason.unwrap_or("unspecified"),
             method,
             "pairing rejected"
@@ -2979,7 +2980,10 @@ async fn drive_turn(
                                     }
                                 }
                             } else {
-                                tracing::warn!("Unrecognised tool-call envelope: {body}");
+                                tracing::warn!(
+                                    body_chars = body.chars().count(),
+                                    "Unrecognised tool-call envelope"
+                                );
                             }
                         }
                     }
@@ -4231,7 +4235,7 @@ async fn retitle_session(
                 kind = "session_retitled",
                 trigger = "manual_one",
                 session_id = %session_id,
-                title = %title,
+                title_chars = title.chars().count(),
             );
             json!({ "session_id": session_id, "outcome": "retitled", "title": title })
         }
@@ -11579,7 +11583,10 @@ async fn agent_chat_stream(
                                 }
                             }
                         } else {
-                            tracing::warn!("Unrecognised tool-call envelope: {body}");
+                            tracing::warn!(
+                                body_chars = body.chars().count(),
+                                "Unrecognised tool-call envelope"
+                            );
                         }
                     }
                 }

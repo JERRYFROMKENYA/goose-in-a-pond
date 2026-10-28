@@ -3647,7 +3647,9 @@ impl GooseAdapter {
                                                 tracing::warn!(
                                                     tool = %tool_name,
                                                     tool_id = %tr.id,
-                                                    error = %content_text,
+                                                    // Can echo what it was asked: the log drain
+                                                    // hides it unless a developer may see it.
+                                                    tool_error = %content_text,
                                                     "tool call failed",
                                                 );
                                             }
@@ -3691,7 +3693,7 @@ impl GooseAdapter {
                                     // Echoed prompt scaffolding gets the empty-turn recovery.
                                     tracing::warn!(
                                         session_id = %session_id,
-                                        leaked = %raw_text,
+                                        leaked_chars = raw_text.chars().count(),
                                         "model echoed internal scaffolding instead of answering",
                                     );
                                 } else if !raw_text.is_empty() {
@@ -3876,7 +3878,7 @@ impl GooseAdapter {
                                     Some(reply) if looks_like_leaked_scaffold(&reply) => {
                                         tracing::warn!(
                                             session_id = %session_id,
-                                            leaked = %reply,
+                                            leaked_chars = reply.chars().count(),
                                             "the completeness check's hidden reply echoes \
                                              internal scaffolding; not showing it",
                                         );

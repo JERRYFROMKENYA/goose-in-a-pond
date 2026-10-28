@@ -1094,6 +1094,8 @@ export interface TurnStats {
   context_pct: number | null;
   model_load_ms: number | null;
   inference_count: number;
+  // Null when no MTP drafter ran; optional because servers built before it omit the key.
+  draft_accept_rate?: number | null;
 }
 
 /** Mid-stream frame when `should_compact` is true. Unlike `CompactionReport`, `turns_remaining`

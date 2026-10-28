@@ -44,9 +44,10 @@ export interface Entry {
   note?: string;
   /** No desktop control existed before this catalogue (API only); rendered with a "New" badge. */
   proposed?: boolean;
-  /** A mirror owned elsewhere: `pond-server` syncs `active_*` from `model_role_assignments`, so a
-   *  control here would lose to the next sync. Settings shows a pointer to the owner instead. */
-  ownedBy?: "models";
+  /** A setting owned elsewhere. `models`: `pond-server` syncs `active_*` from `model_role_assignments`,
+   *  so a control here would lose to the next sync. `web-search`: its switch sits beside the town it
+   *  sends and cannot turn on without one, which a plain toggle here could not say. */
+  ownedBy?: "models" | "web-search";
   /** Checked on every edit; a message blocks Save (see `validation.ts` for why). */
   validate?: Validator;
 }
@@ -440,6 +441,11 @@ export const CATALOGUE: CatalogueCategory[] = [
             key: "searxng_url", label: "Search server", description: "Address of your own search server, if you run one.",
             control: { kind: "text", placeholder: "Not set" }, consumer: "live", proposed: true,
             validate: optional(url(["http://", "https://"], "http://127.0.0.1:8888")),
+          },
+          {
+            key: "web_search_local_results", label: "Nearby places in web search", ownedBy: "web-search",
+            description: "Send your town with each web search, so results can include places near you. Off by default: it tells the search provider where you are. Chosen in the web search panel.",
+            control: { kind: "toggle" }, consumer: "live",
           },
         ],
       },

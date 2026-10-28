@@ -12,7 +12,9 @@ in this tree; the submodule is uninitialized in a fresh clone, so run
 `git submodule update --init --recursive` before re-checking (CI checks out the pinned submodule the
 same way).
 
-> Status (2026-10-28): P1-P8 are landed, and section 8 designs long-running tasks (P9-P13). P4's `context_fraction` shrink reaches only
+> Status (2026-10-28): P1-P8 are landed. Long-running tasks (section 8) and agents as recipes
+> (section 9) landed P9-P11, P14-P17 and P19 on 2026-10-28; P12 is partial, P13 is open and P18 is
+> deferred (8.6, 9.4). P4's `context_fraction` shrink reaches only
 > `plan_replay` since 2026-09-11, when goose took back trimming the live conversation; the device hold
 > half is unaffected. Programme summary: [checklist section 0](./00-checklist.md).
 
@@ -1404,13 +1406,21 @@ saved, as an idle lane job, not on its first step.
 ### 8.6 Phases
 
 - **P9 — engine.** Helper turns take the one context and the prime is rebuilt by whichever path the
-  bench picks; role snapshots get their own budget.
+  bench picks; role snapshots get their own budget. **LANDED 2026-10-28**, measured on the Orin
+  (8.5).
 - **P10 — the ledger.** Domain types, migration and repository for tasks, steps and artifacts.
+  **LANDED 2026-10-28** (migration 0062).
 - **P11 — plan and run.** The planner, verifier and step runner; `plan_write`, `artifact_read`,
   `artifact_search`, `artifact_write` for helpers; `task_start`, `task_status`, `task_cancel` for
-  the prime; the lane job.
+  the prime; the lane job. **LANDED 2026-10-28; VERIFIED on the Orin**: a four-step task ran each
+  step once under the verifier, wrote a 620-token result and notified the owner's devices.
+  `artifact_search` was not built: helpers page artifacts with `artifact_list` and `artifact_read`.
 - **P12 — the household's controls.** Approvals, the task panel in both UIs, phone milestones.
+  **PARTIAL.** A task's owner is notified when it ends, and the chat that started it shows a live
+  card with its steps, its result and Stop (desktop; the phone in goose-on-the-go #199). The
+  approval path is not built, so no step can act outward.
 - **P13 — on the Orin.** One task longer than any window, run end to end with the pond serving.
+  **OPEN**: the Orin's task fit in one window.
 
 ### 8.7 P11's seams
 
@@ -1530,15 +1540,24 @@ claims is not kept forever.
 ### 9.4 Phases
 
 - **P14 — prefill compile.** The engine primitive, checksums in the snapshot index, and the boot and
-  on-save compile passes.
+  on-save compile passes. **LANDED 2026-10-28.** The Orin found that snapshot files were named by
+  their first 256 tokens, which the prime and every role share, so each compile overwrote the last;
+  files are now named by their whole prefix and replaced only by their own shape.
 - **P15 — the block.** Parsing and validation of `context`, `activations`, `hooks` and `a2a`, plus a
-  validate route that names the field a small model or a person got wrong.
+  validate route that names the field a small model or a person got wrong. **LANDED 2026-10-28.**
 - **P16 — activations and hooks.** Schedule and event activations as lane runs, the hook catalog,
-  and mediated hand-offs.
+  and mediated hand-offs. **LANDED 2026-10-28; NOT VERIFIED on hardware**: no schedule or event
+  activation has fired on the Orin.
 - **P17 — the builder.** The Recipes screen in both UIs: a form over the block and a YAML view, a
-  test run, compile status and preamble cost.
+  test run, compile status and preamble cost. **LANDED 2026-10-28** on the desktop, with each
+  agent's prefill state and a rebuild; the phone's is goose-on-the-go #198.
 - **P18 — external A2A.** Agent cards and A2A tasks for exposed agents, off by default.
+  **DEFERRED**: `a2a.expose` is parsed and validated, but no agent card or A2A route exists, so an
+  exposed agent is reachable from nowhere outside the pond. It costs nothing until a second pond
+  or client needs one.
 - **P19 — suggested agents.** Shipped templates offered as suggestions, never switched on (9.5).
+  **LANDED 2026-10-28; VERIFIED on the Orin**: the cards listed, and one tap made a member's copy
+  that the next pass compiled.
 
 ### 9.5 Suggested agents
 

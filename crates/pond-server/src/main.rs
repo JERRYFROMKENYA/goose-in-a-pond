@@ -7130,7 +7130,9 @@ async fn run_long_task_runner(
         let mut every_role = vec![planner.clone(), verifier.clone()];
         every_role.extend(offered.iter().cloned());
         let roles_print = roles_fingerprint(&every_role);
-        let compile_due = compiled != Some(roles_print)
+        let progress = pond_core::shared::services::prefill_progress::process_prefill_progress();
+        // A member's rebuild request makes a compile due even when no role changed.
+        let compile_due = (compiled != Some(roles_print) || !progress.pending_rebuilds().is_empty())
             && matches!(settings.chat_provider.as_str(), "local" | "gguf");
 
         let sessions = storage.list_sessions().await.unwrap_or_default();
@@ -7193,7 +7195,15 @@ async fn run_long_task_runner(
                     }
                 };
             let retention = std::time::Duration::from_secs(u64::from(retention.max(1)) * 86_400);
-            compile_role_prefills(&helpers, &to_compile, prefills.as_ref(), retention).await;
+            let rebuilds = progress.take_rebuilds();
+            let mut to_compile = to_compile;
+            for role in &every_role {
+                if rebuilds.includes(role.name()) && !to_compile.iter().any(|r| r.name() == role.name()) {
+                    to_compile.push(role.clone());
+                }
+            }
+            compile_role_prefills(&helpers, &to_compile, prefills.as_ref(), retention, &rebuilds)
+                .await;
             compiled = Some(roles_print);
             drop(slot);
             continue;
@@ -7318,6 +7328,7 @@ impl LongTaskHelpers {
         role: &pond_core::shared::domain::orchestration::AgentRole,
         brief: &str,
         retention: std::time::Duration,
+        rebuild: bool,
     ) -> anyhow::Result<()> {
         use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
         use pond_core::shared::services::long_task_runner as runner;
@@ -7345,6 +7356,7 @@ impl LongTaskHelpers {
             .map_err(|e| anyhow::anyhow!("the compile run was refused: {e:?}"))?
             .compiling_prefill(format!("role:{}", role.name()))
             .retaining_helpers_for(retention);
+        let spec = if rebuild { spec.rebuilding() } else { spec };
         let cancel = tokio_util::sync::CancellationToken::new();
         let _lease = self.authorities.publish(&session_id, authority, cancel);
         self.orchestrator.spawn(spec).await?;
@@ -7359,17 +7371,24 @@ async fn compile_role_prefills(
     roles: &[pond_core::shared::domain::orchestration::AgentRole],
     prefills: &dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry,
     retention: std::time::Duration,
+    rebuilds: &pond_core::shared::services::prefill_progress::RebuildRequests,
 ) {
     let started = std::time::Instant::now();
+    let progress = pond_core::shared::services::prefill_progress::process_prefill_progress();
+    progress.begin(roles.len());
     for role in roles {
+        progress.working_on(role.name());
         let mut ok = true;
-        for brief in ["Alpha. Compile check.", "Begin. Compile check."] {
-            if let Err(e) = helpers.compile(role, brief, retention).await {
+        // The second call is always judged against the first, so it carries a rebuild.
+        for (i, brief) in ["Alpha. Compile check.", "Begin. Compile check."].into_iter().enumerate() {
+            let rebuild = i == 1 && rebuilds.includes(role.name());
+            if let Err(e) = helpers.compile(role, brief, retention, rebuild).await {
                 tracing::warn!(role = %role.name(), error = %e, "a role's prefill compile failed");
                 ok = false;
                 break;
             }
         }
+        progress.finished(role.name(), ok);
         // Recorded only when both calls ran, so a failed compile is tried again next pass.
         if ok {
             let hash = pond_core::shared::services::agent_prefill::definition_hash(role);

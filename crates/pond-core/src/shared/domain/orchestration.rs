@@ -645,6 +645,7 @@ impl DelegationAuthority {
             background: request.background,
             compile_shape: None,
             prefill_retention: None,
+            prefill_rebuild: false,
             persona: role.instructions.clone(),
         })
     }
@@ -731,6 +732,8 @@ pub struct TaskSpec {
     compile_shape: Option<String>,
     /// Helper snapshots unused for longer are discarded by that compile.
     prefill_retention: Option<std::time::Duration>,
+    /// The compile rebuilds the role's snapshot even when it is valid.
+    prefill_rebuild: bool,
     /// The role's own instructions, examples included: the child's persona in its preamble.
     persona: String,
 }
@@ -807,6 +810,16 @@ impl TaskSpec {
 
     pub fn prefill_retention(&self) -> Option<std::time::Duration> {
         self.prefill_retention
+    }
+
+    /// The compile rebuilds the snapshot even when it is valid: a member invalidated it.
+    pub fn rebuilding(mut self) -> Self {
+        self.prefill_rebuild = true;
+        self
+    }
+
+    pub fn rebuilds_prefill(&self) -> bool {
+        self.prefill_rebuild
     }
 
     /// The role's instructions, for the child's system prompt; the request's are its task.

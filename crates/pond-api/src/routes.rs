@@ -527,6 +527,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route("/agents/prefills", get(agent_prefills))
+        .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
+        .route("/agents/{name}/prefill/rebuild", post(rebuild_agent_prefill))
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
         .route("/recipes/{name}/run", post(run_recipe))
         // ── Face biometrics ───────────────────────────────────────────────────
@@ -15285,6 +15288,99 @@ async fn pond_capabilities(
         weather: settings.ext_weather_enabled && state.weather_provider.is_some(),
         web_search,
     }
+}
+
+/// Every agent whose prefill the pond keeps: the shipped planner, worker and verifier, then each
+/// household recipe with a role, in the shape the compile pass builds them.
+async fn prefill_agents(state: &Arc<AppState>) -> Vec<pond_core::shared::domain::orchestration::AgentRole> {
+    use pond_core::shared::services::{long_task_roles as roles, long_task_runner};
+    let recipes = match &state.recipe_repo {
+        Some(repo) => repo.list().await.unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut agents: Vec<_> = [roles::planner_role(), roles::verifier_role()]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    agents.extend(long_task_runner::step_roles(&recipes));
+    agents
+}
+
+/// `GET /api/v1/agents/prefills` -- whether the pond is building caches now, and where each
+/// agent's prefill stands.
+async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::response::IntoResponse {
+    use pond_core::shared::ports::agent_prefill::AgentPrefillRegistry as _;
+    use pond_core::shared::services::agent_prefill::{is_default_agent, prefill_state};
+    use pond_core::shared::services::prefill_progress::process_prefill_progress;
+
+    let progress = process_prefill_progress();
+    let build = progress.build();
+    let queued = progress.pending_rebuilds();
+    let failed = progress.failed();
+    let retention = state
+        .settings_repo
+        .get()
+        .await
+        .map(|s| s.agent_prefill_retention_days)
+        .unwrap_or(14);
+    let records = pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
+        state.db.system.clone(),
+    )
+    .get_all()
+    .await
+    .unwrap_or_default();
+    let now = chrono::Utc::now();
+    let agents: Vec<Value> = prefill_agents(&state)
+        .await
+        .iter()
+        .map(|role| {
+            let name = role.name();
+            let is_default = is_default_agent(name);
+            let record = records.get(name);
+            let status = prefill_state(
+                role,
+                is_default,
+                record,
+                build.current.as_deref() == Some(name),
+                queued.includes(name),
+                failed.contains(name),
+                now,
+                retention,
+            );
+            json!({
+                "agent": name,
+                "kind": if is_default { "default" } else { "member" },
+                "status": status,
+                "compiled_at": record.and_then(|r| r.compiled_at),
+                "last_used_at": record.and_then(|r| r.last_used_at),
+            })
+        })
+        .collect();
+    Json(json!({ "building": build, "retention_days": retention, "agents": agents }))
+}
+
+/// `POST /api/v1/agents/{name}/prefill/rebuild` -- invalidates one agent's prefill; the pond
+/// rebuilds it at the next quiet moment.
+async fn rebuild_agent_prefill(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl axum::response::IntoResponse {
+    if !prefill_agents(&state).await.iter().any(|role| role.name() == name) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no agent named {name}")})),
+        )
+            .into_response();
+    }
+    pond_core::shared::services::prefill_progress::process_prefill_progress()
+        .request_rebuild(Some(&name));
+    (StatusCode::ACCEPTED, Json(json!({"queued": [name]}))).into_response()
+}
+
+/// `POST /api/v1/agents/prefills/rebuild` -- invalidates every agent's prefill.
+async fn rebuild_all_prefills() -> impl axum::response::IntoResponse {
+    pond_core::shared::services::prefill_progress::process_prefill_progress().request_rebuild(None);
+    (StatusCode::ACCEPTED, Json(json!({"queued": "all"})))
 }
 
 /// `GET /api/v1/agents/suggestions` -- the shipped agents this pond can run for the caller, less

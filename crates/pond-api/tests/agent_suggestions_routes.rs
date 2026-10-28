@@ -375,3 +375,76 @@ async fn an_edited_copy_may_narrow_its_tools_but_not_widen_them() {
         "an edit keeps where the copy came from"
     );
 }
+
+/// The status route lists every agent the pond keeps a prefill for, and a rebuild shows as
+/// queued until the compile pass takes it.
+#[tokio::test]
+async fn prefill_status_lists_every_agent_and_a_rebuild_queues_one() {
+    let pond = pond(true, false).await;
+    let (status, body) = send(
+        &pond,
+        call(Method::GET, "/api/v1/agents/prefills", None, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let agents: Vec<String> = body["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["agent"].as_str().unwrap().to_string())
+        .collect();
+    for shipped in [
+        "long-task-planner",
+        "long-task-verifier",
+        "long-task-worker",
+    ] {
+        assert!(agents.iter().any(|a| a == shipped), "{agents:?}");
+    }
+    assert_eq!(
+        body["building"]["active"], false,
+        "nothing compiles in a test"
+    );
+
+    let (status, _) = send(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/agents/no-such-agent/prefill/rebuild",
+            None,
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "an unknown agent has no cache to rebuild"
+    );
+    let (status, _) = send(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/agents/long-task-worker/prefill/rebuild",
+            None,
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, body) = send(
+        &pond,
+        call(Method::GET, "/api/v1/agents/prefills", None, false),
+    )
+    .await;
+    let worker = body["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == "long-task-worker")
+        .unwrap()
+        .clone();
+    // The record is process-wide; take the request back so no other test sees it.
+    pond_core::shared::services::prefill_progress::process_prefill_progress().take_rebuilds();
+    assert_eq!(worker["status"], "queued");
+    assert_eq!(worker["kind"], "default");
+}

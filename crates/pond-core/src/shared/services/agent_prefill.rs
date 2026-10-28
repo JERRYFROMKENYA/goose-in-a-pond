@@ -104,6 +104,53 @@ pub fn prefill_decision(
     }
 }
 
+/// Where an agent's prefill stands, as the status route reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrefillState {
+    Ready,
+    Building,
+    /// A rebuild was asked for, or the agent was edited: the next compile pass builds it.
+    Queued,
+    /// Unused past the retention: discarded, and built again on its next run.
+    Idle,
+    NotBuilt,
+    Failed,
+}
+
+/// One agent's state from its record and what the compile pass is doing now.
+#[allow(clippy::too_many_arguments)]
+pub fn prefill_state(
+    role: &AgentRole,
+    is_default: bool,
+    record: Option<&PrefillRecord>,
+    building_now: bool,
+    queued: bool,
+    failed: bool,
+    now: DateTime<Utc>,
+    retention_days: u32,
+) -> PrefillState {
+    if building_now {
+        return PrefillState::Building;
+    }
+    if queued {
+        return PrefillState::Queued;
+    }
+    if failed {
+        return PrefillState::Failed;
+    }
+    let Some(record) = record.filter(|r| r.compiled_at.is_some()) else {
+        return PrefillState::NotBuilt;
+    };
+    if record.definition_hash != definition_hash(role) {
+        return PrefillState::Queued;
+    }
+    match prefill_decision(role, is_default, Some(record), now, retention_days) {
+        PrefillDecision::Compile => PrefillState::Ready,
+        PrefillDecision::Skip { .. } => PrefillState::Idle,
+    }
+}
+
 /// One start-up pass: what to compile, what to skip and why, and the rows of agents that no
 /// longer exist.
 #[derive(Debug)]

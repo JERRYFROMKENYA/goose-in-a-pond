@@ -242,3 +242,53 @@ async fn the_registry_keeps_a_compile_and_a_use_apart() {
     assert!(!registry.forget("trip").await.unwrap());
     assert!(registry.note_used(" ", t(0)).await.is_err());
 }
+
+#[test]
+fn an_agents_state_says_what_the_next_pass_will_do() {
+    let agent = role("study-planner", "Plan study.", "giap-task-work");
+    let fresh = record(&agent, Some(0), Some(1));
+    let state = |record: Option<&PrefillRecord>, building, queued, failed, now| {
+        prefill_state(&agent, false, record, building, queued, failed, now, 14)
+    };
+    assert_eq!(
+        state(Some(&fresh), false, false, false, t(2)),
+        PrefillState::Ready
+    );
+    assert_eq!(
+        state(Some(&fresh), true, false, false, t(2)),
+        PrefillState::Building
+    );
+    assert_eq!(
+        state(Some(&fresh), false, true, false, t(2)),
+        PrefillState::Queued,
+        "a rebuild a member asked for shows before anything else the record says"
+    );
+    assert_eq!(
+        state(Some(&fresh), false, false, true, t(2)),
+        PrefillState::Failed
+    );
+    assert_eq!(
+        state(None, false, false, false, t(2)),
+        PrefillState::NotBuilt
+    );
+    assert_eq!(
+        state(Some(&fresh), false, false, false, t(30)),
+        PrefillState::Idle,
+        "unused past the retention"
+    );
+    let edited = role(
+        "study-planner",
+        "Plan study, by the week.",
+        "giap-task-work",
+    );
+    assert_eq!(
+        prefill_state(&edited, false, Some(&fresh), false, false, false, t(2), 14),
+        PrefillState::Queued,
+        "an edited agent is rebuilt on the next pass"
+    );
+    assert_eq!(
+        prefill_state(&agent, true, Some(&fresh), false, false, false, t(30), 14),
+        PrefillState::Ready,
+        "a default agent never goes idle"
+    );
+}

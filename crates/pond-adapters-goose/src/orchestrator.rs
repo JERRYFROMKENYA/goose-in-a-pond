@@ -503,6 +503,8 @@ pub struct ChildPlan {
     pub compile_shape: Option<String>,
     /// [`TaskSpec::prefill_retention`].
     pub prefill_retention: Option<std::time::Duration>,
+    /// [`TaskSpec::rebuilds_prefill`].
+    pub prefill_rebuild: bool,
 }
 
 /// What came back from one child run, before it is classified.
@@ -750,6 +752,7 @@ pub fn build_child_plan(
         model: ChildModel::resolve(spec.requested_model(), &env.provider_name),
         compile_shape: spec.compile_shape().map(str::to_string),
         prefill_retention: spec.prefill_retention(),
+        prefill_rebuild: spec.rebuilds_prefill(),
     })
 }
 
@@ -930,9 +933,15 @@ async fn drive_run(
         .bind(&plan_child_session_id, &parent_session_id);
     // A child's engine calls take the model's one context rather than a second beside the parent's.
     let (compile, retention) = (plan.compile_shape.clone(), plan.prefill_retention);
+    let rebuild = plan.prefill_rebuild;
     let outcome = goose_providers::request_context::as_helper(prime_waiting, async {
-        use goose_providers::request_context::{compiling_prefill, compiling_prefill_retaining};
+        use goose_providers::request_context::{
+            compiling_prefill, compiling_prefill_retaining, rebuilding_prefill,
+        };
         match (compile, retention) {
+            (Some(shape), _) if rebuild => {
+                rebuilding_prefill(shape, runner.run(plan, cancel.clone())).await
+            }
             (Some(shape), Some(retention)) => {
                 compiling_prefill_retaining(shape, retention, runner.run(plan, cancel.clone()))
                     .await

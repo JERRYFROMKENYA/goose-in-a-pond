@@ -118,6 +118,8 @@ const PLACES = [
   { name: "Artcaffe Junction", url: "", snippet: "" },
 ];
 
+const STUB = "Web search results are not kept after the turn. Sources: javahouseafrica.com, thejunction.co.ke.";
+
 function placesStream() {
   return mockSseStream([
     { type: "tool_call", id: "call-1", tool: "giap-knowledge__search_web", result: {} },
@@ -197,6 +199,69 @@ test.describe("Chat: nearby places on the result card", () => {
       for (const part of [".ui-search__label", ".ui-search__domain", ".ui-search__snippet"]) {
         expect(await contrastOf(page.locator(part).first()), part).toBeGreaterThanOrEqual(4.5);
       }
+    });
+  }
+});
+
+test.describe("Chat: a reloaded conversation whose search results were not kept", () => {
+  async function reload(page: Page, rows: unknown[]) {
+    await mockAllApiRoutes(page);
+    await page.route("**/api/v1/sessions/*/messages", (route) => route.fulfill({ json: { messages: rows } }));
+    await page.route("**/api/v1/sessions/*/active-run", (route) => route.fulfill({ status: 404, json: { error: "none" } }));
+    // The run pointer is how a window finds the conversation it was last showing.
+    await page.addInitScript(() => {
+      localStorage.setItem("giap-section", "chat");
+      localStorage.setItem(
+        "giap-chat-run",
+        JSON.stringify({ sessionId: "e2e-session", runId: "run-1", epoch: "e", lastSeq: 4 }),
+      );
+    });
+    await page.goto("/");
+  }
+
+  const base = { session_id: "e2e-session", created_at: new Date().toISOString() };
+  const rows = [
+    { ...base, id: "u1", role: "user", content: "when does java house at junction close" },
+    {
+      ...base,
+      id: "t1",
+      role: "tool",
+      tool_call_id: "call-1",
+      content: JSON.stringify({
+        tool_call_id: "call-1",
+        tool: "giap-knowledge__search_web",
+        content: STUB,
+        arguments: '{"question":"when does java house at junction close"}',
+        transient: true,
+      }),
+    },
+    {
+      ...base,
+      id: "a1",
+      role: "assistant",
+      content: "It closes at ten.",
+      tool_calls: [{ id: "call-1", name: "giap-knowledge__search_web", arguments: "{}" }],
+    },
+  ];
+
+  test("shows one quiet line naming the sources, not an empty card", async ({ page }) => {
+    await reload(page, rows);
+    await expect(page.getByText("It closes at ten.")).toBeVisible({ timeout: 10_000 });
+    const note = page.locator(".kept-note");
+    await expect(note).toHaveText(
+      "Web search: results aren't kept after the turn. Sources: javahouseafrica.com, thejunction.co.ke.",
+    );
+    await expect(page.locator(".ui-search, .tool-call-card")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^Web search/ })).toHaveCount(0);
+  });
+
+  for (const scheme of ["Light", "Dark"]) {
+    test(`the line reads at 4.5:1, ${scheme}`, async ({ page }) => {
+      await page.addInitScript((theme) => localStorage.setItem("goosehub_theme", theme), scheme);
+      await reload(page, rows);
+      const note = page.locator(".kept-note");
+      await expect(note).toBeVisible({ timeout: 10_000 });
+      expect(await contrastOf(note)).toBeGreaterThanOrEqual(4.5);
     });
   }
 });

@@ -1556,6 +1556,7 @@ export class PondApiClient {
               images: m.images as SessionMessage["images"],
               // As sent: absent and `[]` mean different things.
               thinking: m.thinking as SessionMessage["thinking"],
+              transient: m.transient === true ? true : undefined,
               liked: m.liked as boolean | null | undefined,
             }) satisfies Record<keyof SessionMessage, unknown>,
         );

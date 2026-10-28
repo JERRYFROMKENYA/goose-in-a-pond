@@ -1010,6 +1010,8 @@ export interface ChatEvent {
     card_type?: string;
     data?: Record<string, unknown>;
   };
+  /** On "tool_result": shown for this turn only; history keeps a stub, so the card is never stored. */
+  transient?: boolean;
   /** Turn budget that was exhausted — present on "turn_limit_reached" events. */
   max_turns?: number;
   /** On "subagent_progress": the run; group tree nodes by it, not `role` (a role can repeat). */
@@ -1182,6 +1184,8 @@ export interface SessionMessage {
   images?: SessionMessageImage[];
   /** Reasoning passages in order, if `persist_thinking` was on; absent (not `[]`) if unrecorded. */
   thinking?: string[];
+  /** On a role="tool" row whose result is not kept: `content` holds only a stub naming the sources. */
+  transient?: boolean;
   /** Training-feedback vote: true keeps it as training data, false excludes it, null = no vote. */
   liked?: boolean | null;
 }

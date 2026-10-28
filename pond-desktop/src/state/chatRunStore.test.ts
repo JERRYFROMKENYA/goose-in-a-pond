@@ -24,6 +24,13 @@ import type { ChatRunBridge } from "./chatRunStore";
 import { ApiError } from "../api/types";
 import type { ChatEvent } from "../api/types";
 import type { PreparedImage } from "../lib/imageAttach";
+import {
+  SEARCH_STUB,
+  SEARCH_TOOL,
+  assistantRow,
+  keptToolRow,
+  userRow,
+} from "../test-support/keptRows";
 
 vi.mock("../api/PondApiClient", () => ({
   api: {
@@ -953,5 +960,133 @@ describe("stopping on purpose", () => {
 
     await expect(abortRun()).resolves.toBeUndefined();
     expect(getChatRun().busy).toBe(false);
+  });
+});
+
+/** Brave's terms let the pond hold a search result only for the turn, so history keeps a stub. */
+describe("a web search result the pond does not keep", () => {
+  const TITLE = "Kenya Power outage schedule";
+  const SNIPPET = "Planned maintenance in Westlands from 9 am to 5 pm.";
+  const DOMAIN = "kenyapower.co.ke";
+
+  function searchTurn(transient: boolean): ChatEvent[] {
+    return [
+      { type: "tool_call", tool: SEARCH_TOOL, id: "call-1" } as ChatEvent,
+      {
+        type: "tool_result",
+        tool: SEARCH_TOOL,
+        id: "call-1",
+        content: `Web results for: power\n${SNIPPET}`,
+        ui: {
+          card_type: "search",
+          data: {
+            query: "when does the power come back",
+            results: [{ title: TITLE, url: `https://${DOMAIN}/outages`, domain: DOMAIN, snippet: SNIPPET }],
+          },
+        },
+        ...(transient ? { transient: true } : {}),
+      } as ChatEvent,
+      { type: "text", content: "Power should be back by 6 pm.", token: "Power should be back by 6 pm." } as ChatEvent,
+      { done: true, session_id: "sess-1", model_role: "chat" } as ChatEvent,
+    ];
+  }
+
+  function everythingStored(): string {
+    const dump = (s: Storage) => JSON.stringify(Object.fromEntries(Object.keys(s).map((k) => [k, s.getItem(k)])));
+    return dump(localStorage) + dump(sessionStorage);
+  }
+
+  it("shows the card for the turn, and writes none of it to web storage", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream(searchTurn(true)) as never);
+    sendTurn({ text: "when does the power come back?" });
+    await flush();
+
+    const card = getChatRun().messages[1].cards?.[0];
+    expect(card?.renderHint).toBe("search");
+    expect(JSON.stringify(card?.data)).toContain(TITLE);
+
+    const stored = everythingStored();
+    expect(stored).not.toContain(TITLE);
+    expect(stored).not.toContain(SNIPPET);
+    expect(stored).not.toContain(DOMAIN);
+  });
+
+  it("keeps a reattachable run's pointer free of the result, as it must be of any content", async () => {
+    const held = deferredStream();
+    vi.mocked(api.chatStream).mockReturnValue(held.gen as never);
+    sendTurn({ text: "q" });
+    await held.push({ type: "run_started", run_id: "run-1", session_id: "sess-1", epoch: "e", seq: 1 } as ChatEvent);
+    for (const ev of searchTurn(true).slice(0, 2)) await held.push(ev);
+
+    const pointer = JSON.parse(localStorage.getItem("giap-chat-run") ?? "{}");
+    expect(Object.keys(pointer).sort()).toEqual(["epoch", "lastSeq", "runId", "sessionId"]);
+    expect(everythingStored()).not.toContain(SNIPPET);
+    await held.end();
+  });
+
+  it("drops the card when the conversation is reopened, and shows one quiet line in its place", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(stream(searchTurn(true)) as never);
+    sendTurn({ text: "when does the power come back?" });
+    await flush();
+
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow(),
+      keptToolRow(),
+      assistantRow(),
+    ]);
+    await openSession("sess-1");
+
+    const [asked, answered] = getChatRun().messages;
+    expect(asked.role).toBe("user");
+    expect(answered.cards).toBeUndefined();
+    expect(answered.text).toBe("Power should be back by 6 pm.");
+    expect(answered.keptResults).toEqual([
+      { callId: "call-1", tool: SEARCH_TOOL, stub: SEARCH_STUB },
+    ]);
+    expect(JSON.stringify(getChatRun().messages)).not.toContain(SNIPPET);
+  });
+
+  it("gives each turn its own notes, and none to a turn that kept its results whole", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      keptToolRow({ id: "t1" }),
+      assistantRow({ id: "a1", content: "First answer." }),
+      userRow({ id: "u2", content: "and the weather?" }),
+      keptToolRow(
+        { id: "t2", tool_call_id: "call-2" },
+        { tool_call_id: "call-2", tool: "get_current_weather", transient: undefined, content: "24 degrees" },
+      ),
+      assistantRow({ id: "a2", content: "24 degrees." }),
+    ]);
+    await openSession("sess-1");
+
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents.map((m) => m.keptResults?.length ?? 0)).toEqual([1, 0]);
+  });
+
+  it("does not carry a note over to the next answer when its own turn showed nothing", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      keptToolRow({ id: "t1" }),
+      // A turn that called a tool and said nothing is not shown, so its note has no bubble to sit under.
+      assistantRow({ id: "a1", content: "" }),
+      userRow({ id: "u2", content: "thanks" }),
+      assistantRow({ id: "a2", content: "You're welcome.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents).toHaveLength(1);
+    expect(agents[0].keptResults).toBeUndefined();
+  });
+
+  it("reads the same stub from a history that marks the row itself", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow(),
+      keptToolRow({ content: SEARCH_STUB, transient: true }),
+      assistantRow(),
+    ]);
+    await openSession("sess-1");
+    expect(getChatRun().messages[1].keptResults?.[0].stub).toBe(SEARCH_STUB);
   });
 });

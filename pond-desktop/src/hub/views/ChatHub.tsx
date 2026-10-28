@@ -16,6 +16,8 @@ import type { CardKind } from "./chat/ResultCard";
 import { TurnStatsFooter } from "../../components/TurnStatsFooter";
 import { ContextPressureNote } from "../../components/ContextPressureNote";
 import { SubagentTree } from "../../components/SubagentTree";
+import { KeptResultNote } from "../../components/KeptResultNote";
+import type { KeptResult } from "../../state/keptResults";
 import type { SubagentRun } from "../../components/subagentRuns";
 import { AttachmentTray } from "../../components/AttachmentTray";
 import { ImageSupportStatus } from "../../components/ImageSupportStatus";
@@ -49,6 +51,7 @@ interface Row {
   contextWarning?: ContextWarning;
   delegations?: SubagentRun[];
   images?: string[];
+  keptResults?: KeptResult[];
 }
 
 // ── Constants ─────────────────────────────────────────────────
@@ -91,6 +94,7 @@ function toRow(m: Message): Row {
     contextWarning: m.contextWarning,
     delegations: m.delegations,
     images: m.images,
+    keptResults: m.keptResults,
   };
 }
 
@@ -342,6 +346,9 @@ export function ChatHubView() {
                 )}
                 {m.text || (m.streaming ? " " : "")}
               </div>
+              {m.who === "goose" && m.keptResults?.map((kept, i) => (
+                <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
+              ))}
               {m.card && !m.streaming && (
                 <div className="ch-card">
                   <ResultCard kind={m.card} />

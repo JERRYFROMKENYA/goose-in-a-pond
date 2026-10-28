@@ -8,6 +8,7 @@ import { api } from "../../api/PondApiClient";
 import { ApiError } from "../../api/types";
 import type { VisionStatus } from "../../api/types";
 import { __resetChatRunForTests, openSession } from "../../state/chatRunStore";
+import { assistantRow, keptToolRow, userRow } from "../../test-support/keptRows";
 import { ATTACH_BLOCKED_COPY, NOT_DECLARED_COPY } from "../../components/imageSupportCopy";
 import { prepareImage } from "../../lib/imageAttach";
 import type { PreparedImage } from "../../lib/imageAttach";
@@ -308,5 +309,27 @@ describe("ChatHubView — no conversation model", () => {
       expect((screen.getByLabelText("Message input") as HTMLInputElement).value).toBe("lights on");
     });
     await screen.findByText(/Your message is back in the box; send it once a model is chosen\./);
+  });
+});
+
+describe("ChatHubView, a result the pond did not keep", () => {
+  it("shows one quiet line under the answer, naming the sources", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([userRow(), keptToolRow(), assistantRow()] as never);
+    await openSession("sess-hub");
+    render(<ChatHubView />);
+
+    const note = await screen.findByText(
+      "Web search: results aren't kept after the turn. Sources: kenyapower.co.ke, nation.africa.",
+    );
+    expect(note.closest(".kept-note")).toBeTruthy();
+    expect(screen.getByText("Power should be back by 6 pm.")).toBeTruthy();
+  });
+
+  it("puts the line under the answer once, and nowhere under the question", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([userRow(), keptToolRow(), assistantRow()] as never);
+    await openSession("sess-hub");
+    render(<ChatHubView />);
+    await screen.findByText("Power should be back by 6 pm.");
+    expect(document.querySelectorAll(".kept-note")).toHaveLength(1);
   });
 });

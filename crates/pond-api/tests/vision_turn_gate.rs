@@ -838,7 +838,13 @@ async fn a_finished_gguf_download_prepares_the_model() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["pictures"], "left_out");
+    // A budgeted device does not carry the add-on, which outranks the household leaving it out.
+    let pictures = if pond_core::models::domain::device_budget::budgeted_device() {
+        "not_on_this_device"
+    } else {
+        "left_out"
+    };
+    assert_eq!(body["pictures"], pictures);
     assert_eq!(body["parts"].as_array().map(Vec::len), Some(1));
     let agent = pond.agent.clone();
     eventually("prepare_model after the download", || {

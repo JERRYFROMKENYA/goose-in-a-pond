@@ -33,6 +33,7 @@ use crate::format::{format_api_error, format_dead_end, format_no_results};
 use crate::knowledge::KnowledgeMcpServer;
 
 mod bounded_html;
+mod pictures;
 mod sections;
 
 use sections::{news_card, read_sections, videos_card, News, PlaceDetails, Sections, Video};

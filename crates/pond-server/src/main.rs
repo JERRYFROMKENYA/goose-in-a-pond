@@ -3894,9 +3894,11 @@ async fn run_server(
                 settings: settings_repo.clone(),
             });
             let prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry> =
-                Arc::new(pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
-                    db.system.clone(),
-                ));
+                Arc::new(
+                    pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
+                        db.system.clone(),
+                    ),
+                );
             tokio::spawn(run_long_task_runner(
                 settings_repo.clone(),
                 session_storage.clone(),
@@ -7040,8 +7042,9 @@ fn install_long_task_deps(
     wake: Option<Arc<tokio::sync::Notify>>,
 ) -> Option<Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>> {
     let orchestration = pond_mcp_server::installed_orchestrator_deps()?;
-    let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> =
-        Arc::new(pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(pool));
+    let repo: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = Arc::new(
+        pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(pool),
+    );
     pond_mcp_server::init_long_task_deps(pond_mcp_server::LongTaskDeps {
         repo: repo.clone(),
         authorities: orchestration.authorities(),
@@ -7106,12 +7109,16 @@ async fn run_long_task_runner(
     let mut fruitless: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     // The roles last compiled; a start, a new recipe or an edited one makes a compile due.
     let mut compiled: Option<u64> = None;
-    tracing::info!("long-task runner active - off unless `long_tasks_enabled` and `ext_orchestrator_enabled`");
+    tracing::info!(
+        "long-task runner active - off unless `long_tasks_enabled` and `ext_orchestrator_enabled`"
+    );
 
     loop {
-        let tick =
-            crate::inference_lane_runner::wait_for_tick(std::time::Duration::from_secs(POLL_SECS), &wake)
-                .await;
+        let tick = crate::inference_lane_runner::wait_for_tick(
+            std::time::Duration::from_secs(POLL_SECS),
+            &wake,
+        )
+        .await;
         let Ok(settings) = settings_repo.get().await else {
             continue;
         };
@@ -7132,7 +7139,8 @@ async fn run_long_task_runner(
         let roles_print = roles_fingerprint(&every_role);
         let progress = pond_core::shared::services::prefill_progress::process_prefill_progress();
         // A member's rebuild request makes a compile due even when no role changed.
-        let compile_due = (compiled != Some(roles_print) || !progress.pending_rebuilds().is_empty())
+        let compile_due = (compiled != Some(roles_print)
+            || !progress.pending_rebuilds().is_empty())
             && matches!(settings.chat_provider.as_str(), "local" | "gguf");
 
         let sessions = storage.list_sessions().await.unwrap_or_default();
@@ -7153,7 +7161,12 @@ async fn run_long_task_runner(
                     && ((settings.long_tasks_enabled && candidate.is_some()) || compile_due),
                 cadence,
                 tick.waives(),
-                sched::saw_activity_since_start(started_at, in_process_at, started_at_utc, db_activity),
+                sched::saw_activity_since_start(
+                    started_at,
+                    in_process_at,
+                    started_at_utc,
+                    db_activity,
+                ),
                 sched::combined_idle_for(in_process_at, db_activity, now),
             )
             .await
@@ -7198,12 +7211,20 @@ async fn run_long_task_runner(
             let rebuilds = progress.take_rebuilds();
             let mut to_compile = to_compile;
             for role in &every_role {
-                if rebuilds.includes(role.name()) && !to_compile.iter().any(|r| r.name() == role.name()) {
+                if rebuilds.includes(role.name())
+                    && !to_compile.iter().any(|r| r.name() == role.name())
+                {
                     to_compile.push(role.clone());
                 }
             }
-            compile_role_prefills(&helpers, &to_compile, prefills.as_ref(), retention, &rebuilds)
-                .await;
+            compile_role_prefills(
+                &helpers,
+                &to_compile,
+                prefills.as_ref(),
+                retention,
+                &rebuilds,
+            )
+            .await;
             compiled = Some(roles_print);
             drop(slot);
             continue;
@@ -7257,7 +7278,10 @@ impl LongTaskHelpers {
         let authority = DelegationAuthority::root(
             &session_id,
             task.scope().clone(),
-            runner::LONG_TASK_ROOT_GROUPS.iter().map(|g| (*g).to_string()).collect(),
+            runner::LONG_TASK_ROOT_GROUPS
+                .iter()
+                .map(|g| (*g).to_string())
+                .collect(),
         );
         let spec = authority
             .delegate(
@@ -7280,7 +7304,9 @@ impl LongTaskHelpers {
             },
         );
         let cancel = tokio_util::sync::CancellationToken::new();
-        let lease = self.authorities.publish(&session_id, authority, cancel.clone());
+        let lease = self
+            .authorities
+            .publish(&session_id, authority, cancel.clone());
 
         // A household turn stops the run: it holds the only GPU that turn needs.
         let watcher = {
@@ -7302,7 +7328,12 @@ impl LongTaskHelpers {
                     if tick % 4 == 0 {
                         db_seen = newest_session_activity(storage.as_ref()).await;
                     }
-                    if cancelled_by_activity(run_started, *activity.read().await, run_started_utc, db_seen) {
+                    if cancelled_by_activity(
+                        run_started,
+                        *activity.read().await,
+                        run_started_utc,
+                        db_seen,
+                    ) {
                         tracing::info!("user activity resumed - stopping the long-task step");
                         cancel.cancel();
                         break;
@@ -7341,7 +7372,10 @@ impl LongTaskHelpers {
         let authority = DelegationAuthority::root(
             &session_id,
             pond_core::user_data::domain::profile::ProfileScope::household(),
-            runner::LONG_TASK_ROOT_GROUPS.iter().map(|g| (*g).to_string()).collect(),
+            runner::LONG_TASK_ROOT_GROUPS
+                .iter()
+                .map(|g| (*g).to_string())
+                .collect(),
         );
         let spec = authority
             .delegate(
@@ -7380,7 +7414,10 @@ async fn compile_role_prefills(
         progress.working_on(role.name());
         let mut ok = true;
         // The second call is always judged against the first, so it carries a rebuild.
-        for (i, brief) in ["Alpha. Compile check.", "Begin. Compile check."].into_iter().enumerate() {
+        for (i, brief) in ["Alpha. Compile check.", "Begin. Compile check."]
+            .into_iter()
+            .enumerate()
+        {
             let rebuild = i == 1 && rebuilds.includes(role.name());
             if let Err(e) = helpers.compile(role, brief, retention, rebuild).await {
                 tracing::warn!(role = %role.name(), error = %e, "a role's prefill compile failed");
@@ -7448,20 +7485,34 @@ async fn advance_long_task(
     match runner::next_run(task, &steps, tries, now) {
         NextRun::Wait => Ok(()),
         NextRun::GiveUp(reason) => {
-            tasks.set_task_state(task.id(), LongTaskState::Failed, now).await?;
+            tasks
+                .set_task_state(task.id(), LongTaskState::Failed, now)
+                .await?;
             fruitless.remove(task.id());
             if activations::runner_notifies_at_end(task, &steps, offered, false) {
-                notify_long_task_owner(sender, task, false, format!("I couldn't finish it: {reason}."))
-                    .await;
+                notify_long_task_owner(
+                    sender,
+                    task,
+                    false,
+                    format!("I couldn't finish it: {reason}."),
+                )
+                .await;
             }
             Ok(())
         }
         NextRun::Finish => {
-            tasks.set_task_state(task.id(), LongTaskState::Completed, now).await?;
+            tasks
+                .set_task_state(task.id(), LongTaskState::Completed, now)
+                .await?;
             fruitless.remove(task.id());
             let body = runner::result_artifact(&artifacts)
                 .map(|a| a.summary.clone())
-                .or_else(|| steps.iter().rev().find_map(|s| s.summary().map(str::to_string)))
+                .or_else(|| {
+                    steps
+                        .iter()
+                        .rev()
+                        .find_map(|s| s.summary().map(str::to_string))
+                })
                 .unwrap_or_else(|| "It's done.".to_string());
             if activations::runner_notifies_at_end(task, &steps, offered, true) {
                 notify_long_task_owner(sender, task, true, body).await;
@@ -7470,7 +7521,9 @@ async fn advance_long_task(
         }
         // An activation's one step is its whole plan; it is never handed to the planner.
         NextRun::Plan(_) if activations::is_activation_task(task) => {
-            tasks.set_task_state(task.id(), LongTaskState::Failed, now).await?;
+            tasks
+                .set_task_state(task.id(), LongTaskState::Failed, now)
+                .await?;
             fruitless.remove(task.id());
             if activations::runner_notifies_at_end(task, &steps, offered, false) {
                 notify_long_task_owner(
@@ -7492,7 +7545,9 @@ async fn advance_long_task(
             }
             let replanned = tasks.list_steps(task.id()).await?;
             if task.state() == LongTaskState::Planning && !replanned.is_empty() {
-                tasks.set_task_state(task.id(), LongTaskState::Running, chrono::Utc::now()).await?;
+                tasks
+                    .set_task_state(task.id(), LongTaskState::Running, chrono::Utc::now())
+                    .await?;
             }
             let runnable = matches!(
                 runner::next_run(task, &replanned, 0, chrono::Utc::now()),
@@ -7510,7 +7565,10 @@ async fn advance_long_task(
             let Some(role) = offered.iter().find(|r| r.name() == step.role()) else {
                 step.start(now)?;
                 tasks.update_step(&step).await?;
-                step.fail(&format!("there is no role named {}", step.role()), chrono::Utc::now())?;
+                step.fail(
+                    &format!("there is no role named {}", step.role()),
+                    chrono::Utc::now(),
+                )?;
                 tasks.update_step(&step).await?;
                 return Ok(());
             };
@@ -7529,7 +7587,10 @@ async fn advance_long_task(
             let mut brief = runner::worker_brief(task, &step, &artifacts, now);
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
             brief.push_str(&activations::hand_back_offer(role, offered));
-            let outcome = match helpers.run(task, role, StepWork::Do(key.clone()), brief).await {
+            let outcome = match helpers
+                .run(task, role, StepWork::Do(key.clone()), brief)
+                .await
+            {
                 Ok(RunEnd::Reported(outcome)) => outcome,
                 Ok(RunEnd::Preempted) => {
                     step.preempt()?;
@@ -7543,22 +7604,28 @@ async fn advance_long_task(
                 }
             };
 
-            let verdict = if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
-                let saved = tasks.list_artifacts(task.id()).await?;
-                let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
-                Some(helpers.run(task, verifier, StepWork::Check(key), brief).await?)
-            } else {
-                None
-            };
+            let verdict =
+                if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
+                    let saved = tasks.list_artifacts(task.id()).await?;
+                    let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
+                    Some(
+                        helpers
+                            .run(task, verifier, StepWork::Check(key), brief)
+                            .await?,
+                    )
+                } else {
+                    None
+                };
             match verdict {
                 Some(RunEnd::Preempted) => step.preempt()?,
-                Some(RunEnd::Reported(check)) if check.outcome() != OutcomeKind::Completed => step.fail(
-                    &format!(
-                        "it did not pass its check: {}",
-                        check.failure().unwrap_or(check.summary())
-                    ),
-                    chrono::Utc::now(),
-                )?,
+                Some(RunEnd::Reported(check)) if check.outcome() != OutcomeKind::Completed => step
+                    .fail(
+                        &format!(
+                            "it did not pass its check: {}",
+                            check.failure().unwrap_or(check.summary())
+                        ),
+                        chrono::Utc::now(),
+                    )?,
                 Some(RunEnd::Reported(_)) | None => step.record(&outcome, chrono::Utc::now())?,
             }
             tasks.update_step(&step).await?;
@@ -7579,7 +7646,11 @@ async fn advance_long_task(
             }
             if outcome.outcome() == OutcomeKind::NeedsApproval {
                 tasks
-                    .set_task_state(task.id(), LongTaskState::AwaitingApproval, chrono::Utc::now())
+                    .set_task_state(
+                        task.id(),
+                        LongTaskState::AwaitingApproval,
+                        chrono::Utc::now(),
+                    )
                     .await?;
             }
             Ok(())
@@ -7600,7 +7671,12 @@ async fn notify_long_task_owner(
     let report = sender
         .send_to_profile(
             owner,
-            pond_server::system_notices::long_task_notification(task.id(), task.goal(), finished, body),
+            pond_server::system_notices::long_task_notification(
+                task.id(),
+                task.goal(),
+                finished,
+                body,
+            ),
         )
         .await;
     tracing::info!(

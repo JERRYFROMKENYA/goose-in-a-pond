@@ -536,7 +536,10 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
-        .route("/agents/{name}/prefill/rebuild", post(rebuild_agent_prefill))
+        .route(
+            "/agents/{name}/prefill/rebuild",
+            post(rebuild_agent_prefill),
+        )
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
         .route("/recipes/{name}/run", post(run_recipe))
         // ── Face biometrics ───────────────────────────────────────────────────
@@ -15318,9 +15321,7 @@ fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::
     task.owner_profile_id().is_none_or(|owner| owner == member)
 }
 
-fn long_task_repo(
-    state: &Arc<AppState>,
-) -> pond_infra::sqlite_long_task::SqliteLongTaskRepository {
+fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::SqliteLongTaskRepository {
     pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
 }
 
@@ -15375,15 +15376,23 @@ async fn list_long_tasks(
     Query(query): Query<LongTaskListQuery>,
 ) -> impl axum::response::IntoResponse {
     use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
-    let Some(member) =
-        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
-            .await
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
     else {
         return Json(json!([])).into_response();
     };
     let repo = long_task_repo(&state);
     let mut tasks = Vec::new();
-    for filter in [LongTaskOwnerFilter::Member(&member), LongTaskOwnerFilter::Unowned] {
+    for filter in [
+        LongTaskOwnerFilter::Member(&member),
+        LongTaskOwnerFilter::Unowned,
+    ] {
         match repo.list_tasks(filter, true).await {
             Ok(found) => tasks.extend(found),
             Err(e) => {
@@ -15406,7 +15415,9 @@ async fn list_long_tasks(
     for task in &tasks {
         match long_task_view(&repo, task).await {
             Ok(view) => views.push(view),
-            Err(e) => tracing::warn!(task = %task.id(), error = %e, "a long task could not be read"),
+            Err(e) => {
+                tracing::warn!(task = %task.id(), error = %e, "a long task could not be read")
+            }
         }
     }
     Json(json!(views)).into_response()
@@ -15446,11 +15457,20 @@ async fn get_long_task(
     insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
     tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
 ) -> Response<axum::body::Body> {
-    let Some(member) =
-        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
-            .await
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
     else {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "nobody identified"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
     };
     let task = match reachable_long_task(&state, &member, &id).await {
         Ok(task) => task,
@@ -15480,11 +15500,20 @@ async fn get_long_task_artifact(
     tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
 ) -> Response<axum::body::Body> {
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
-    let Some(member) =
-        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
-            .await
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
     else {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "nobody identified"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
     };
     if let Err(response) = reachable_long_task(&state, &member, &id).await {
         return response;
@@ -15525,11 +15554,20 @@ async fn cancel_long_task(
 ) -> Response<axum::body::Body> {
     use pond_core::shared::domain::long_task::LongTaskState;
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
-    let Some(member) =
-        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
-            .await
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
     else {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "nobody identified"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
     };
     let task = match reachable_long_task(&state, &member, &id).await {
         Ok(task) => task,
@@ -15553,7 +15591,9 @@ async fn cancel_long_task(
 
 /// Every agent whose prefill the pond keeps: the shipped planner, worker and verifier, then each
 /// household recipe with a role, in the shape the compile pass builds them.
-async fn prefill_agents(state: &Arc<AppState>) -> Vec<pond_core::shared::domain::orchestration::AgentRole> {
+async fn prefill_agents(
+    state: &Arc<AppState>,
+) -> Vec<pond_core::shared::domain::orchestration::AgentRole> {
     use pond_core::shared::services::{long_task_roles as roles, long_task_runner};
     let recipes = match &state.recipe_repo {
         Some(repo) => repo.list().await.unwrap_or_default(),
@@ -15584,12 +15624,11 @@ async fn agent_prefills(State(state): State<Arc<AppState>>) -> impl axum::respon
         .await
         .map(|s| s.agent_prefill_retention_days)
         .unwrap_or(14);
-    let records = pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
-        state.db.system.clone(),
-    )
-    .get_all()
-    .await
-    .unwrap_or_default();
+    let records =
+        pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(state.db.system.clone())
+            .get_all()
+            .await
+            .unwrap_or_default();
     let now = chrono::Utc::now();
     let agents: Vec<Value> = prefill_agents(&state)
         .await
@@ -15626,7 +15665,11 @@ async fn rebuild_agent_prefill(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl axum::response::IntoResponse {
-    if !prefill_agents(&state).await.iter().any(|role| role.name() == name) {
+    if !prefill_agents(&state)
+        .await
+        .iter()
+        .any(|role| role.name() == name)
+    {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": format!("there is no agent named {name}")})),

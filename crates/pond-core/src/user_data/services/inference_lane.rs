@@ -353,7 +353,7 @@ mod tests {
                 job.as_str()
             );
         }
-        assert_eq!(LaneJob::ALL.len(), 8, "a job was added or removed");
+        assert_eq!(LaneJob::ALL.len(), 9, "a job was added or removed");
     }
 
     #[test]

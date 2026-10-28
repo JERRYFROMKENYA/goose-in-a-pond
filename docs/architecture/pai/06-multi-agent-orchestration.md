@@ -1445,6 +1445,25 @@ saved, as an idle lane job, not on its first step.
   rides and cameras (`groups_denied_to_subagents`), so in P11 no step can act outward at all. P12
   adds the approval path that lets one do so.
 
+### 8.8 Deep research (Jerry, 2026-10-28)
+
+A member can ask for research from the chat composer's + menu, on the phone and the desktop,
+instead of waiting for the prime to decide a question needs a long task.
+
+| Piece | Design |
+|---|---|
+| Start | The turn is sent with `deep_research`. The pond starts the task itself, with the message as its goal, rather than relying on a small model to call `task_start`. |
+| Owner | The caller the long-task routes answer: the device's member, or the primary member on the pond's own desktop. So the chat card can always read the task it started. |
+| Record | `drive_turn` folds a `task_start` call and its result through `absorb` before the engine's events. The stream and the stored tool rows are those of the prime's own call, so the card anchors live and in history. |
+| The prime | The turn's `<system-context>` says the research has started, so the reply acknowledges it in a sentence or two and doesn't answer unresearched. |
+| Research | `LongTaskKind::Research` (migration 0067). The planner is told to gather with `search_web` and `get_wikipedia_article` before one step writes the `Result` report. Workers keep each source's title and link beside what it says. The helpers' tools are unchanged: `giap-knowledge` was already theirs. |
+| Refusals | `GET /long-tasks/deep-research` says whether this caller may use it, and the composer hides or disables the item. The stream refuses before saving anything: 409 when long tasks or the orchestrator are off, 403 when nobody is identified. |
+| Start time | The runner picks the task up on its next poll (30 s) once the household has been quiet for 30 s, as for any task. |
+| Length | A report is not one artifact a worker writes in one reply. Research tasks get 24 steps; the planner gathers, then gives each section a step that saves it as a draft, then writes the `Result` summary. `research_report::assemble` joins the summary and the drafts in plan order, then lists the pages they cite, so a report is as long as its plan and no context window holds it whole. |
+| Plans | A shipped `long-task-composer` role builds itineraries, meal plans and lists: a heading per day, time lists, tables, checklists, map links, the forecast, and what the household has said about who is coming and what they eat. Dated events go to a `Calendar` data artifact. Neither the composer nor a research step puts a person's name, health or diet in a web search. |
+| Export | `GET /long-tasks/{id}/report` gives the joined report and its sources. `GET /long-tasks/{id}/export` gives Markdown; a standalone page that prints or saves as a PDF, with every bit of markup the model wrote escaped, links only to web and mail addresses, and nothing fetched; or an iCalendar file of the plan's events. |
+| Pictures | None are generated: the Orin runs no image model. A report's pictures are links, and the export never loads them. |
+
 ---
 
 ## 9. Agents are recipes (designed 2026-10-28; P14-P18)

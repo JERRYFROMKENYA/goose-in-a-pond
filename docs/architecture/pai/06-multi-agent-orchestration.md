@@ -12,7 +12,7 @@ in this tree; the submodule is uninitialized in a fresh clone, so run
 `git submodule update --init --recursive` before re-checking (CI checks out the pinned submodule the
 same way).
 
-> Status (2026-10-23): P1-P8 are landed. P4's `context_fraction` shrink reaches only
+> Status (2026-10-28): P1-P8 are landed, and section 8 designs long-running tasks (P9-P13). P4's `context_fraction` shrink reaches only
 > `plan_replay` since 2026-09-11, when goose took back trimming the live conversation; the device hold
 > half is unaffected. Programme summary: [checklist section 0](./00-checklist.md).
 
@@ -1294,3 +1294,90 @@ mutation was run.
   does it.
 - **`list_roles` has no test because it has no code.** It is in section 3.6's tool list and no phase
   built it; see that section.
+
+---
+
+## 8. Long-running tasks (designed 2026-10-28; P9-P13)
+
+### 8.1 Why one window cannot hold them
+
+A window on the Orin is at most `MAX_CTX` = 16,384 tokens (`device_budget.rs`), and that cap is set
+by latency rather than memory: a cold 16K prefill takes about 20 s. A task that needs more context
+than one window holds cannot be one conversation. It runs as many short windows, one after another,
+with everything it learns kept on disk. The task's working memory is its store, not a KV cache, so a
+task resumes after a restart with nothing to re-derive.
+
+### 8.2 Shape
+
+| Part | What it is | Who decides |
+|---|---|---|
+| Task | Goal, owner, budget, status; rows in `pond_system.db` | The member who started it |
+| Plan | Steps: role, instructions, input artifacts, acceptance check, dependencies | The planner role, through `plan_write` |
+| Step runner | Picks the next ready step, runs its helper, records the result | Code, on the inference lane |
+| Helper | A saved role. One step is one helper life in a fresh window; nothing of it is kept | The model |
+| Artifact | A step's output: typed, titled, token-counted, scoped to the task's owner | Written by helpers |
+| Prime | The household's conversation: starts a task, reports on it, asks for decisions | The model |
+
+The runner is code, not a model, so the depth cap (invariant 6) and "only the prime talks to the
+household" both hold without a nested agent.
+
+### 8.3 Rules
+
+1. **The model decomposes.** The planner writes the plan with a tool call; nothing splits a goal by
+   keyword. The runner only follows the plan's dependencies.
+2. **Pull, don't push.** A step is given artifact ids with a one-line summary each, never their
+   bodies. It pages in what it needs with `artifact_read(id, from, to)` and `artifact_search`.
+3. **A fixed hand-back.** Every step returns its outcome, a capped summary, the artifacts it wrote
+   and what failed. The planner and the prime see that shape, not a helper's prose.
+4. **Checked, then replanned.** A step with an acceptance check is verified by a verifier role. A
+   failure retries once with the reason, then goes back to the planner with the results so far,
+   then to the household.
+5. **One at a time, at the household's pace.** Steps are a lane job: none starts while a turn is in
+   flight, and a step is the unit of pre-emption. A step stopped by a household turn reruns from the
+   ledger, so steps record outward effects before they happen and never repeat one.
+6. **Outward effects wait for a person.** A step whose role holds a tool that sends, buys or moves
+   something parks the task as awaiting approval, and the member is asked on their own phone
+   (PAI-2's gate), never in the helper's window.
+7. **Visible and stoppable.** The task, its plan, each step's state and its artifacts are on screen;
+   a member can pause, cancel or edit the plan, and milestones reach their phone.
+8. **Budgets.** Each task has a step cap and a wall-clock cap; quiet hours and the device's thermal
+   state pause it.
+9. **Scope.** A task runs at its owner's scope (PAI-1) and its artifacts inherit it. Memory
+   extraction never reads helper turns (invariant 4).
+
+### 8.4 What it reuses
+
+- PAI-7's reviewer already runs a child from the lane through `Orchestrator::spawn`, under a root
+  authority it registers as the run's parent turn (`review_authority`, `plan_review`). The step
+  runner is that loop, generalised to a plan.
+- Roles are `agent_recipes` rows parsed into `AgentRole`; concurrency 1, child history never
+  reaching a parent, and child sessions deleted on release are invariants 3 and 4.
+- `delegate` with `background: true` stays refused on this device. The lane runner is how background
+  work runs here: it waits for the device instead of holding it.
+- Goose's `todo` stays stripped (section 6): `plan_write` is the plan tool, with its text written
+  for the on-device models.
+
+### 8.5 The engine: one context, handed over
+
+A helper's prompt is short, so `prefill_plan` sends it to `SacrificialContext`: a second context
+beside the prime's, decoded from nothing, with no snapshot. On the Orin a context costs about
+522 MiB of compute buffers before any KV (`device_budget.rs`), against roughly 0.5 GB the serving
+pond has free. The alternative hands the helper the one context, seeded from its role's snapshot,
+and rebuilds the prime afterwards: from its preamble snapshot plus the history, or from a suspend
+file. `what_a_helper_turn_costs_the_prime` (goose `inference_engine.rs`) measures the three.
+
+Role preambles also need their own snapshots. The ladder keeps `MAX_SNAPSHOTS` = 6 per model and
+window, and the Orin's E4B family already holds six (typed chat, voice, extraction, titling, the
+reviewer, the summariser), so roles would evict them. A role's snapshot is written when the role is
+saved, as an idle lane job, not on its first step.
+
+### 8.6 Phases
+
+- **P9 — engine.** Helper turns take the one context and the prime is rebuilt by whichever path the
+  bench picks; role snapshots get their own budget.
+- **P10 — the ledger.** Domain types, migration and repository for tasks, steps and artifacts.
+- **P11 — plan and run.** The planner, verifier and step runner; `plan_write`, `artifact_read`,
+  `artifact_search`, `artifact_write` for helpers; `task_start`, `task_status`, `task_cancel` for
+  the prime; the lane job.
+- **P12 — the household's controls.** Approvals, the task panel in both UIs, phone milestones.
+- **P13 — on the Orin.** One task longer than any window, run end to end with the pond serving.

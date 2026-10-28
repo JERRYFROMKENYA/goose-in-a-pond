@@ -7209,7 +7209,12 @@ async fn run_long_task_runner(
                 };
             let retention = std::time::Duration::from_secs(u64::from(retention.max(1)) * 86_400);
             let rebuilds = progress.take_rebuilds();
-            let mut to_compile = to_compile;
+            // No role changed since the last pass, so only the agents a member asked about are due.
+            let mut to_compile = if compiled == Some(roles_print) {
+                Vec::new()
+            } else {
+                to_compile
+            };
             for role in &every_role {
                 if rebuilds.includes(role.name())
                     && !to_compile.iter().any(|r| r.name() == role.name())

@@ -82,6 +82,10 @@ pub enum AgentStreamEvent {
         /// block may become a card, so text a tool quotes from a web page can never forge one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         card: Option<String>,
+        /// What history keeps in place of `content` and `card` once the turn is over; `None`
+        /// keeps the result whole. Set from the tool's transient marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        keep: Option<String>,
     },
     Text {
         content: String,

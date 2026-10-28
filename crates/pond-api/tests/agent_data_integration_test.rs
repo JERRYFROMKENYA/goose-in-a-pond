@@ -94,6 +94,7 @@ impl pond_core::mcp::ports::tools::tool_dispatcher::ToolDispatcher for StubDispa
             pond_core::mcp::ports::tools::tool_dispatcher::ToolCallResult {
                 content: format!("dispatched {tool_name} with {arguments}"),
                 success: true,
+                keep: None,
             },
         )
     }

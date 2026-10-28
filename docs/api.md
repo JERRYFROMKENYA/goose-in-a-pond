@@ -819,7 +819,7 @@ The same `ChatRequest`, answered as Server-Sent Events. Every frame is an unname
 | `thinking` | `content` | Reasoning text |
 | `text` | `content`, `token` (same value) | Answer text |
 | `tool_call` | `tool, id, input` | A tool call |
-| `tool_result` | `tool, id, content, ui?` | Its result; `ui` drives the MCP-UI renderer |
+| `tool_result` | `tool, id, content, ui?, transient?` | Its result; `ui` drives the MCP-UI renderer. `transient: true` (web search): show it in the conversation in view, never store it; history keeps only a stub |
 | `subagent_progress` | | A sub-agent's progress |
 | `review_status` | `content` | Answer review in progress |
 | `review_revision` | `content, score, rounds` | A revised answer replaces the streamed text |
@@ -1210,7 +1210,7 @@ writes are scoped to the member the caller resolves to; a guest cannot create a 
 | `PUT /secrets/{key}` | `{value}` | `{key, stored, restarted, restart_errors}` |
 | `DELETE /secrets/{key}` | | `204` |
 | `GET /secrets/{key}/exists` | | `{key, exists}` |
-| `GET /web-search` | | `{provider, configured, status}` |
+| `GET /web-search` | | `{provider, configured, status, local_results: {enabled, town}}`; `town` is what a search would send with local places on, `null` without a place name ([small-model-tools.md §8.10.5](architecture/small-model-tools.md)) |
 | `PUT /web-search/key` | `{key}` | `{configured, status}`; one Brave request first, `422` if Brave refused the key |
 | `DELETE /web-search/key` | | `204` |
 | `GET /oauth/providers` | | `{providers: [{id, display_name, scopes}]}` |

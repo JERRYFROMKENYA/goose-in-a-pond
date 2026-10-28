@@ -387,6 +387,9 @@ pub struct ScheduleRun {
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
     pub duration_ms: Option<u64>,
+    /// When a run someone chose to make late was originally due.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caught_up_from: Option<DateTime<Utc>>,
 }
 
 /// Event emitted when a scheduled task completes (for SSE broadcast / desktop notification).

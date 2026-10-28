@@ -433,6 +433,8 @@ export interface ScheduleRun {
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /** Set on a missed run someone chose to make late: when it was originally due. */
+  caught_up_from?: string;
 }
 
 /** Enriched schedule run for UI notification display. */

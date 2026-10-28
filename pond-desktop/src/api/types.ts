@@ -936,6 +936,34 @@ export interface AgentSuggestion {
   activations_summary: string;
 }
 
+/** Where an agent's prefill (its saved start-up copy) stands; spellings are pond-core's `PrefillState`. */
+export type PrefillStatus = "ready" | "building" | "queued" | "idle" | "not_built" | "failed";
+
+export interface PrefillAgent {
+  /** The agent's recipe name; a built-in is `long-task-planner`, `-worker` or `-verifier`. */
+  agent: string;
+  kind: "default" | "member";
+  status: PrefillStatus;
+  compiled_at: string | null;
+  last_used_at: string | null;
+}
+
+/** What the compile pass is doing now; `current` is an agent or a prompt shape. */
+export interface PrefillBuild {
+  active: boolean;
+  current: string | null;
+  done: number;
+  total: number;
+}
+
+/** Answer of `GET /agents/prefills`. */
+export interface PrefillReport {
+  building: PrefillBuild;
+  /** Days unused before a copy is discarded and rebuilt on the agent's next run. */
+  retention_days: number;
+  agents: PrefillAgent[];
+}
+
 /** Answer of `POST /recipes/validate`: 200 whether or not the block is acceptable. */
 export interface RecipeValidation {
   ok: boolean;

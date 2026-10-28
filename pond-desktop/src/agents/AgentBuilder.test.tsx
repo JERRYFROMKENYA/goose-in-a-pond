@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-li
 import { api } from "../api/PondApiClient";
 import { ApiError, type AgentRecipe, type Extension, type RecipeValidation } from "../api/types";
 import { AgentBuilder, type AgentBuilderProps } from "./AgentBuilder";
+import { agentRow, fakePrefills, reportOf } from "./prefillFixtures";
 import type { AgentEnvironment } from "./useAgentEnvironment";
 
 vi.mock("../api/PondApiClient", () => ({
@@ -43,6 +44,7 @@ const ENV: AgentEnvironment = {
   gate: { delegation: true, activations: true, longTasks: true },
   timezone: "Africa/Nairobi",
   enableDelegation: vi.fn(async () => {}),
+  prefills: fakePrefills(),
 };
 
 const GREETER_YAML = `title: Greeter
@@ -666,5 +668,52 @@ describe("the examples", () => {
     for (let i = 0; i < 8; i++) fireEvent.click(screen.getByRole("button", { name: "Add an example" }));
     expect((screen.getByRole("button", { name: "Add an example" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText("8 of 8")).toBeTruthy();
+  });
+});
+
+describe("the start-up copy", () => {
+  function envWith(status: Parameters<typeof agentRow>[1] = {}) {
+    const prefills = fakePrefills({
+      report: reportOf([agentRow("greeter", status)]),
+      rebuild: vi.fn(async () => true),
+      refresh: vi.fn(),
+    });
+    return { env: { ...ENV, prefills }, prefills };
+  }
+
+  it("says whether a saved agent's copy is ready, and when it was built and last used", () => {
+    setup({ recipe: greeter(), recipes: [greeter()], env: envWith().env });
+    expect(screen.getByText("Start-up copy")).toBeTruthy();
+    expect(screen.getByText("Ready")).toBeTruthy();
+    expect(screen.getByText("Built 2 days ago. Last used 3 hours ago.")).toBeTruthy();
+  });
+
+  it("says in plain words when it is resting", () => {
+    const { env } = envWith({ status: "idle", last_used_at: new Date(Date.now() - 20 * 86_400_000).toISOString() });
+    setup({ recipe: greeter(), recipes: [greeter()], env });
+    expect(screen.getByText("Resting: unused for 20 days, rebuilt on its next run")).toBeTruthy();
+  });
+
+  it("asks for a rebuild of this agent", () => {
+    const { env, prefills } = envWith();
+    setup({ recipe: greeter(), recipes: [greeter()], env });
+    fireEvent.click(screen.getByRole("button", { name: "Rebuild greeter" }));
+    expect(prefills.rebuild).toHaveBeenCalledWith("greeter");
+  });
+
+  it("shows nothing for an agent that is not saved yet", () => {
+    setup({ env: envWith().env });
+    expect(screen.queryByText("Start-up copy")).toBeNull();
+  });
+
+  it("asks the pond how the copy stands again once the agent is saved, since saving rebuilds it", async () => {
+    vi.mocked(api.updateRecipe).mockResolvedValue(greeter());
+    const { env, prefills } = envWith();
+    setup({ recipe: greeter(), recipes: [greeter()], env });
+    type("In one line", "Greets everyone");
+    const save = screen.getByRole("button", { name: "Save agent" }) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false), { timeout: 2000 });
+    fireEvent.click(save);
+    await waitFor(() => expect(prefills.refresh).toHaveBeenCalledTimes(1));
   });
 });

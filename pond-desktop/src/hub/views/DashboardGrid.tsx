@@ -5,6 +5,7 @@ import { Fragment, useState, type ReactElement, type ReactNode } from "react";
 import { InkBudget, InkButton, InkSegmented, InkSheet, InkStack, InkText } from "@jarida/ink/react";
 import { HubIco } from "../primitives/HubIco";
 import { HP_PATHS, micEl } from "../primitives/icons";
+import { AgentPrefillLine } from "../../agents/AgentPrefill";
 import { AgentSuggestions } from "../../agents/AgentSuggestions";
 import { requestOpenAgent } from "../../agents/openAgent";
 import { SuggestionChips } from "../primitives/SuggestionChips";
@@ -161,6 +162,8 @@ export function DashboardGrid({ onNavigate, onTalk, sessionId, onAsk }: Dashboar
         userName={home.user}
         subtitle={quietLine}
       />
+
+      <AgentPrefillLine />
 
       {/* A plain stacking wrapper below 1101px (matches the three standing alone before this
           existed); at >=1101px it becomes the row that puts alerts beside the composer

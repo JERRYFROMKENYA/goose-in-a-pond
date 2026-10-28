@@ -7,6 +7,7 @@ import { useConfirm } from "../../components/shared";
 import { AgentBuilder } from "../../agents/AgentBuilder";
 import { AgentList } from "../../agents/AgentList";
 import { AgentSuggestions } from "../../agents/AgentSuggestions";
+import { BuiltInAgents, PrefillBar } from "../../agents/BuiltInAgents";
 import { isAgentYaml } from "../../agents/agentModel";
 import { clearOpenAgent, peekOpenAgent } from "../../agents/openAgent";
 import { useAgentEnvironment } from "../../agents/useAgentEnvironment";
@@ -126,7 +127,10 @@ export function AgentsView({ go }: { go: (route: string) => void }) {
         onDelete={remove}
         onToggle={toggle}
         headingRef={listHeading}
+        toolbar={<PrefillBar prefills={env.prefills} />}
       />
+
+      <BuiltInAgents prefills={env.prefills} variant="hub" />
 
       {!loading && otherCount > 0 ? (
         <section className="ag-list ag-list--hub" aria-labelledby="hub-other-recipes">

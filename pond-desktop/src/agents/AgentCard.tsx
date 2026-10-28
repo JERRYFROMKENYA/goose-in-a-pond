@@ -3,6 +3,7 @@ import { Switch } from "@heroui/react";
 import { AlertTriangle, Bot, CalendarClock, Info, Link2, ListChecks, MessageSquare, Pencil, Trash2, Zap } from "lucide-react";
 import "./agents.css";
 import type { AgentRecipe } from "../api/types";
+import { AgentPrefill } from "./AgentPrefill";
 import { draftFromYaml, type ActivationDraft } from "./agentModel";
 import { describeActivation, describeAfter, describeBefore, purposeLine, readOwner, type Names } from "./agentWords";
 import { gateOpen, type ActivationGate, type AgentEnvironment } from "./useAgentEnvironment";
@@ -122,6 +123,8 @@ export function AgentCard({ recipe, variant, env, onEdit, onDelete, onToggle }: 
           ) : null}
         </>
       )}
+
+      <AgentPrefill agent={recipe.name} prefills={env.prefills} variant="card" />
 
       <p className="ag-hint">{owner.line}</p>
       {warning ? (

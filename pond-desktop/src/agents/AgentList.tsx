@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import { Bot, Plus } from "lucide-react";
 import "./agents.css";
 import type { AgentRecipe } from "../api/types";
@@ -19,9 +19,11 @@ interface Props {
   onToggle: (recipe: AgentRecipe) => void;
   /** Where focus returns when the builder closes. */
   headingRef?: RefObject<HTMLHeadingElement | null>;
+  /** Sits under the heading, over the cards. */
+  toolbar?: ReactNode;
 }
 
-export function AgentList({ agents, loading, error, onRetry, env, variant, onNew, onEdit, onDelete, onToggle, headingRef }: Props) {
+export function AgentList({ agents, loading, error, onRetry, env, variant, onNew, onEdit, onDelete, onToggle, headingRef, toolbar }: Props) {
   return (
     <section className={`ag-list ag-list--${variant}`} aria-labelledby="ag-list-heading">
       <div className="ag-list__head">
@@ -33,6 +35,8 @@ export function AgentList({ agents, loading, error, onRetry, env, variant, onNew
           happens at home.
         </p>
       </div>
+
+      {toolbar}
 
       {error ? <ErrorBanner error={error} onRetry={onRetry} /> : null}
 

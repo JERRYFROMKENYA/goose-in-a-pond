@@ -109,3 +109,60 @@ describe("agent suggestions", () => {
     expect(methodOf(0)).toBe("POST");
   });
 });
+
+describe("agent start-up copies", () => {
+  const report = {
+    building: { active: true, current: "study-planner", done: 2, total: 5 },
+    retention_days: 14,
+    agents: [
+      { agent: "long-task-planner", kind: "default", status: "ready", compiled_at: "2026-10-26T08:00:00Z", last_used_at: null },
+      { agent: "study-planner", kind: "member", status: "building", compiled_at: null, last_used_at: null },
+    ],
+  };
+
+  it("reads the status with a GET, as the pond sends it", async () => {
+    fetchMock.mockResolvedValueOnce(okJson(report));
+    expect(await client().getAgentPrefills()).toEqual(report);
+    expect(urlOf(0)).toBe("http://localhost:4000/api/v1/agents/prefills");
+    expect(methodOf(0)).toBe("GET");
+  });
+
+  it("throws a 404 on an older pond, with the status for the caller to read", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ error: "Not Found" }, 404));
+    const failure = await client()
+      .getAgentPrefills()
+      .catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(404);
+  });
+
+  it("asks for one agent to be rebuilt with a POST to its own route, and reads the 202 as done", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ queued: ["study-planner"] }, 202));
+    await expect(client().rebuildAgentPrefill("study-planner")).resolves.toBeUndefined();
+    expect(urlOf(0)).toBe("http://localhost:4000/api/v1/agents/study-planner/prefill/rebuild");
+    expect(methodOf(0)).toBe("POST");
+  });
+
+  it("encodes the agent's name in the path", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ queued: ["a b"] }, 202));
+    await client().rebuildAgentPrefill("a b/c");
+    expect(urlOf(0)).toBe("http://localhost:4000/api/v1/agents/a%20b%2Fc/prefill/rebuild");
+  });
+
+  it("throws a 404 for an agent the pond does not know", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ error: "there is no agent named gone" }, 404));
+    const failure = await client()
+      .rebuildAgentPrefill("gone")
+      .catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(404);
+    expect((failure as ApiError).message).toBe("there is no agent named gone");
+  });
+
+  it("asks for every agent to be rebuilt with a POST", async () => {
+    fetchMock.mockResolvedValueOnce(okJson({ queued: "all" }, 202));
+    await expect(client().rebuildAllPrefills()).resolves.toBeUndefined();
+    expect(urlOf(0)).toBe("http://localhost:4000/api/v1/agents/prefills/rebuild");
+    expect(methodOf(0)).toBe("POST");
+  });
+});

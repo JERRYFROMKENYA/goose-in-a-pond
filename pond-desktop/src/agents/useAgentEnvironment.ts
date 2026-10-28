@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/PondApiClient";
 import type { Device, Extension, Settings } from "../api/types";
 import type { MemberName } from "./agentWords";
+import { useAgentPrefills, type PrefillsState } from "./useAgentPrefills";
 
 /** What must be on before an agent starts by itself; each is a setting the pond checks per tick. */
 export interface ActivationGate {
@@ -23,6 +24,7 @@ export interface AgentEnvironment {
   gate: ActivationGate | null;
   timezone: string | null;
   enableDelegation: () => Promise<void>;
+  prefills: PrefillsState;
 }
 
 /** The two switches the desktop has no field for are read off the settings body, never written. */
@@ -78,5 +80,7 @@ export function useAgentEnvironment(): AgentEnvironment {
     setGate((g) => (g ? { ...g, delegation: true } : g));
   }, []);
 
-  return { extensions, members, devices, gate, timezone, enableDelegation };
+  const prefills = useAgentPrefills();
+
+  return { extensions, members, devices, gate, timezone, enableDelegation, prefills };
 }

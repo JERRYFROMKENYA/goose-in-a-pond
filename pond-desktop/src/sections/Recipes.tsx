@@ -7,6 +7,7 @@ import type { AgentRecipe, RecipeParameter } from "../api/types";
 import { AgentBuilder } from "../agents/AgentBuilder";
 import { AgentList } from "../agents/AgentList";
 import { AgentSuggestions } from "../agents/AgentSuggestions";
+import { BuiltInAgents, PrefillBar } from "../agents/BuiltInAgents";
 import { isAgentYaml } from "../agents/agentModel";
 import { clearOpenAgent, peekOpenAgent } from "../agents/openAgent";
 import { useAgentEnvironment } from "../agents/useAgentEnvironment";
@@ -483,6 +484,7 @@ export function Recipes() {
         onDelete={remove}
         onToggle={toggleActive}
         headingRef={listHeading}
+        toolbar={<PrefillBar prefills={env.prefills} />}
       />
 
       <section className="ag-list" aria-labelledby="recipes-other-heading">
@@ -561,6 +563,8 @@ export function Recipes() {
           </div>
         )}
       </section>
+
+      <BuiltInAgents prefills={env.prefills} variant="classic" />
 
       {runTarget && (
         <div className="recipe-run-modal-backdrop" onClick={() => setRunTarget(null)}>

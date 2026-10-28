@@ -4112,10 +4112,11 @@ impl AgentPort for GooseAdapter {
         } else {
             "prime-typed"
         };
-        // Home shows that the pond is building caches while this runs.
+        // Home shows that the pond is building caches while this runs, under the name a person
+        // knows rather than the shape's.
         let building = pond_core::shared::services::prefill_progress::process_prefill_progress();
         building.begin(1);
-        building.working_on(shape);
+        building.working_on("assistant");
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
             use futures::StreamExt;
             for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
@@ -4136,7 +4137,7 @@ impl AgentPort for GooseAdapter {
         })
         .await;
 
-        building.finished(shape, matches!(outcome, Ok(Ok(()))));
+        building.finished("assistant", matches!(outcome, Ok(Ok(()))));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(Ok(())) => {

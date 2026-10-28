@@ -46,6 +46,7 @@ import {
   type ModelMemoryStatus,
   type OllamaModel,
   type PairingCodeResponse,
+  type PrefillReport,
   type PromptTemplate,
   type RecipeValidation,
   type RetitleOneResult,
@@ -1663,6 +1664,21 @@ export class PondApiClient {
 
   removeRecipe(id: string): Promise<void> {
     return this.del(`/api/v1/recipes/${encodeURIComponent(id)}`);
+  }
+
+  /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */
+  getAgentPrefills(): Promise<PrefillReport> {
+    return this.get("/api/v1/agents/prefills");
+  }
+
+  /** Throws the old copy away; the pond rebuilds it at its next quiet moment. 404 for an unknown agent. */
+  async rebuildAgentPrefill(name: string): Promise<void> {
+    await this.post(`/api/v1/agents/${encodeURIComponent(name)}/prefill/rebuild`);
+  }
+
+  /** The same for every agent. */
+  async rebuildAllPrefills(): Promise<void> {
+    await this.post("/api/v1/agents/prefills/rebuild");
   }
 
   /** Agent templates this pond could run, none switched on. A dismissed one is not listed again. */

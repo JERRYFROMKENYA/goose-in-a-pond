@@ -9,6 +9,7 @@ import { agentNames } from "./agentModel";
 import { readOwner, type Names } from "./agentWords";
 import { Field, FormSection, Messages } from "./AgentField";
 import { ActivationsEditor } from "./ActivationsEditor";
+import { AgentPrefill } from "./AgentPrefill";
 import { ExamplesEditor } from "./ExamplesEditor";
 import { HooksEditor } from "./HooksEditor";
 import { StartCost } from "./StartCost";
@@ -129,8 +130,12 @@ export function AgentBuilder({ variant, recipe, recipes, env, onBack, onSaved, o
 
   async function onSave() {
     const saved = await b.save();
-    if (saved) onSaved(saved);
-    else setFocusTick((t) => t + 1);
+    if (saved) {
+      env.prefills.refresh();
+      onSaved(saved);
+    } else {
+      setFocusTick((t) => t + 1);
+    }
   }
 
   async function toggleExpose() {
@@ -361,6 +366,7 @@ export function AgentBuilder({ variant, recipe, recipes, env, onBack, onSaved, o
                   )}
                 </Field>
                 <StartCost report={b.report} checking={b.checking} unchecked={b.unchecked} />
+                {b.current ? <AgentPrefill agent={b.current.name} prefills={env.prefills} variant="builder" /> : null}
               </FormSection>
 
               <ToolsEditor draft={draft} edit={b.edit} errors={errors} extensions={env.extensions} />

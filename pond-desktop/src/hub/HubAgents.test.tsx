@@ -4,9 +4,10 @@
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { api } from "../api/PondApiClient";
-import type { AgentRecipe, AgentSuggestion, RecipeValidation } from "../api/types";
+import { ApiError, type AgentRecipe, type AgentSuggestion, type RecipeValidation } from "../api/types";
 import { ConfirmProvider } from "../components/shared";
 import { clearOpenAgent, peekOpenAgent, requestOpenAgent } from "../agents/openAgent";
+import { readyReport } from "../agents/prefillFixtures";
 
 const dispatch = vi.fn();
 
@@ -86,6 +87,7 @@ function stubPond(recipes: AgentRecipe[], suggestions: AgentSuggestion[] = []) {
   } as never);
   vi.spyOn(api, "validateRecipe").mockResolvedValue(OK);
   vi.spyOn(api, "listAgentSuggestions").mockResolvedValue(suggestions);
+  vi.spyOn(api, "getAgentPrefills").mockResolvedValue(readyReport("greeter"));
 }
 
 beforeEach(() => {
@@ -184,6 +186,65 @@ describe("the hub's Recipes screen", () => {
     );
     expect(await screen.findByRole("heading", { level: 1, name: "Morning brief" })).toBeTruthy();
     await waitFor(() => expect(peekOpenAgent()).toBeNull());
+  });
+});
+
+describe("start-up copies on the hub's Recipes screen", () => {
+  it("shows an agent's copy on its card, and the built-in agents apart, read-only", async () => {
+    stubPond([GREETER]);
+    render(
+      <ConfirmProvider>
+        <AgentsView go={() => {}} />
+      </ConfirmProvider>,
+    );
+    const card = await screen.findByRole("article", { name: "Greeter" });
+    expect(await within(card).findByText("Ready")).toBeTruthy();
+    const group = await screen.findByRole("region", { name: "Built-in agents" });
+    expect(within(group).getByRole("listitem", { name: "Long-task planner" })).toBeTruthy();
+    expect(within(group).queryByRole("button", { name: /edit|delete/i })).toBeNull();
+  });
+
+  it("asks for one rebuild from the card", async () => {
+    stubPond([GREETER]);
+    const rebuild = vi.spyOn(api, "rebuildAgentPrefill").mockResolvedValue(undefined);
+    render(
+      <ConfirmProvider>
+        <AgentsView go={() => {}} />
+      </ConfirmProvider>,
+    );
+    const card = await screen.findByRole("article", { name: "Greeter" });
+    fireEvent.click(await within(card).findByRole("button", { name: "Rebuild greeter" }));
+    await waitFor(() => expect(rebuild).toHaveBeenCalledWith("greeter"));
+  });
+
+  it("rebuilds everything only after the question, which says agents will be slower for a while", async () => {
+    stubPond([GREETER]);
+    const rebuildAll = vi.spyOn(api, "rebuildAllPrefills").mockResolvedValue(undefined);
+    render(
+      <ConfirmProvider>
+        <AgentsView go={() => {}} />
+      </ConfirmProvider>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Rebuild all" }));
+    const dialog = await screen.findByRole("dialog", { name: "Rebuild all" });
+    expect(within(dialog).getByText(/slower until the pond is quiet again/)).toBeTruthy();
+    expect(rebuildAll).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Rebuild all" }));
+    await waitFor(() => expect(rebuildAll).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows nothing about them on a pond that has no such route", async () => {
+    stubPond([GREETER]);
+    vi.spyOn(api, "getAgentPrefills").mockRejectedValue(new ApiError(404, "Not Found"));
+    render(
+      <ConfirmProvider>
+        <AgentsView go={() => {}} />
+      </ConfirmProvider>,
+    );
+    await screen.findByRole("article", { name: "Greeter" });
+    await waitFor(() => expect(api.getAgentPrefills).toHaveBeenCalled());
+    expect(screen.queryByText("Start-up copy")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Built-in agents" })).toBeNull();
   });
 });
 

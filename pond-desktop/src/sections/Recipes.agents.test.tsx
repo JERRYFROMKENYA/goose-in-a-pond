@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react";
 import { api } from "../api/PondApiClient";
-import type { AgentRecipe, AgentSuggestion, RecipeValidation } from "../api/types";
+import { ApiError, type AgentRecipe, type AgentSuggestion, type RecipeValidation } from "../api/types";
 import { clearOpenAgent, peekOpenAgent, requestOpenAgent } from "../agents/openAgent";
+import { agentRow, readyReport, reportOf } from "../agents/prefillFixtures";
 import { Recipes } from "./Recipes";
 
 vi.mock("../api/PondApiClient", () => ({
@@ -23,6 +24,9 @@ vi.mock("../api/PondApiClient", () => ({
     listAgentSuggestions: vi.fn(),
     enableAgentSuggestion: vi.fn(),
     dismissAgentSuggestion: vi.fn(),
+    getAgentPrefills: vi.fn(),
+    rebuildAgentPrefill: vi.fn(),
+    rebuildAllPrefills: vi.fn(),
   },
 }));
 
@@ -101,6 +105,9 @@ beforeEach(() => {
   vi.mocked(api.getSettings).mockResolvedValue({ ext_orchestrator_enabled: true } as never);
   vi.mocked(api.validateRecipe).mockResolvedValue(OK);
   vi.mocked(api.listAgentSuggestions).mockResolvedValue([]);
+  vi.mocked(api.getAgentPrefills).mockResolvedValue(readyReport("greeter"));
+  vi.mocked(api.rebuildAgentPrefill).mockResolvedValue(undefined);
+  vi.mocked(api.rebuildAllPrefills).mockResolvedValue(undefined);
   confirmMock.mockResolvedValue(true);
 });
 
@@ -240,5 +247,81 @@ describe("suggested agents on the Recipes screen", () => {
     render(<Recipes />);
     await screen.findByRole("article", { name: "Greeter" });
     expect(screen.queryByText("Suggested for this pond")).toBeNull();
+  });
+});
+
+describe("start-up copies on the Recipes screen", () => {
+  it("says on an agent's card whether its start-up copy is ready, and when it was built and used", async () => {
+    render(<Recipes />);
+    const card = await screen.findByRole("article", { name: "Greeter" });
+    expect(await within(card).findByText("Start-up copy")).toBeTruthy();
+    expect(within(card).getByText("Ready")).toBeTruthy();
+    expect(within(card).getByText("Built 2 days ago. Last used 3 hours ago.")).toBeTruthy();
+  });
+
+  it("says in plain words when the copy is waiting, resting or failed", async () => {
+    vi.mocked(api.getAgentPrefills).mockResolvedValue(
+      reportOf([agentRow("greeter", { status: "failed" }), agentRow("long-task-planner", { status: "queued" })]),
+    );
+    render(<Recipes />);
+    const card = await screen.findByRole("article", { name: "Greeter" });
+    expect(await within(card).findByText("Couldn't build")).toBeTruthy();
+    expect(within(await screen.findByRole("region", { name: "Built-in agents" })).getByText("Waiting to be rebuilt")).toBeTruthy();
+  });
+
+  it("asks for one agent to be rebuilt from its card", async () => {
+    render(<Recipes />);
+    const card = await screen.findByRole("article", { name: "Greeter" });
+    fireEvent.click(await within(card).findByRole("button", { name: "Rebuild greeter" }));
+    await waitFor(() => expect(api.rebuildAgentPrefill).toHaveBeenCalledWith("greeter"));
+    await waitFor(() => expect(api.getAgentPrefills).toHaveBeenCalledTimes(2));
+  });
+
+  it("lists the built-in agents apart, with their state, and without edit or delete", async () => {
+    render(<Recipes />);
+    const group = await screen.findByRole("region", { name: "Built-in agents" });
+    expect(within(group).getAllByText("Ready")).toHaveLength(3);
+    expect(within(group).getByRole("listitem", { name: "Long-task planner" })).toBeTruthy();
+    expect(within(group).queryByRole("button", { name: /edit|delete/i })).toBeNull();
+    expect(within(group).queryByText("greeter")).toBeNull();
+    fireEvent.click(within(group).getByRole("button", { name: "Rebuild Long-task verifier" }));
+    await waitFor(() => expect(api.rebuildAgentPrefill).toHaveBeenCalledWith("long-task-verifier"));
+  });
+
+  it("rebuilds everything only after saying agents will be slower until the pond is quiet again", async () => {
+    render(<Recipes />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rebuild all" }));
+    await waitFor(() => expect(api.rebuildAllPrefills).toHaveBeenCalledTimes(1));
+    expect(confirmMock).toHaveBeenCalledWith(
+      expect.stringMatching(/Agents will be slower until the pond is quiet again/),
+      expect.objectContaining({ confirmLabel: "Rebuild all" }),
+    );
+  });
+
+  it("does not rebuild everything when the question is answered no", async () => {
+    confirmMock.mockResolvedValue(false);
+    render(<Recipes />);
+    fireEvent.click(await screen.findByRole("button", { name: "Rebuild all" }));
+    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    expect(api.rebuildAllPrefills).not.toHaveBeenCalled();
+  });
+
+  it("shows an agent's copy in its builder too, with Rebuild", async () => {
+    render(<Recipes />);
+    fireEvent.click(await screen.findByRole("button", { name: "Edit Greeter" }));
+    await screen.findByRole("heading", { name: "Greeter" });
+    expect(await screen.findByText("Start-up copy")).toBeTruthy();
+    expect(screen.getByText("Ready")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Rebuild greeter" })).toBeTruthy();
+  });
+
+  it("shows nothing about start-up copies on a pond that has no such route", async () => {
+    vi.mocked(api.getAgentPrefills).mockRejectedValue(new ApiError(404, "Not Found"));
+    render(<Recipes />);
+    await screen.findByRole("article", { name: "Greeter" });
+    await waitFor(() => expect(api.getAgentPrefills).toHaveBeenCalled());
+    expect(screen.queryByText("Start-up copy")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Built-in agents" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rebuild all" })).toBeNull();
   });
 });

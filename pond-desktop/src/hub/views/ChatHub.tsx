@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { WarmupBanner } from "../../components/WarmupBanner";
 import { Paperclip } from "lucide-react";
 import { api } from "../../api/PondApiClient";
@@ -16,6 +16,8 @@ import type { CardKind } from "./chat/ResultCard";
 import { TurnStatsFooter } from "../../components/TurnStatsFooter";
 import { ContextPressureNote } from "../../components/ContextPressureNote";
 import { SubagentTree } from "../../components/SubagentTree";
+import { LongTaskCards, LongTaskStrays } from "../../longtasks/LongTaskCards";
+import { useLongTasks } from "../../longtasks/useLongTasks";
 import { KeptResultNote } from "../../components/KeptResultNote";
 import type { KeptResult } from "../../state/keptResults";
 import type { SubagentRun } from "../../components/subagentRuns";
@@ -50,6 +52,7 @@ interface Row {
   /** Set when the server said the context window is filling. */
   contextWarning?: ContextWarning;
   delegations?: SubagentRun[];
+  longTaskIds?: string[];
   images?: string[];
   keptResults?: KeptResult[];
 }
@@ -93,6 +96,7 @@ function toRow(m: Message): Row {
     turnLimit: m.turnLimit,
     contextWarning: m.contextWarning,
     delegations: m.delegations,
+    longTaskIds: m.longTaskIds,
     images: m.images,
     keptResults: m.keptResults,
   };
@@ -116,6 +120,10 @@ export function ChatHubView() {
   // In the shared store, so a turn survives the remount on a Hub route change and Chat shows the same one.
   const run = useChatRun();
   const { messages, busy } = run;
+
+  const startedTasks = useMemo(() => messages.flatMap((m) => m.longTaskIds ?? []), [messages]);
+  const startedTaskSet = useMemo(() => new Set(startedTasks), [startedTasks]);
+  const longTasks = useLongTasks(run.sessionId ?? null, startedTasks);
 
   const chips = useSuggestedPrompts(state.sessionId);
   const conversationModel = useConversationModel();
@@ -336,6 +344,7 @@ export function ChatHubView() {
               {m.who === "goose" && m.delegations && m.delegations.length > 0 && (
                 <SubagentTree runs={m.delegations} />
               )}
+              {m.who === "goose" && <LongTaskCards ids={m.longTaskIds} longTasks={longTasks} variant="hub" />}
               <div className={`ch-bubble ch-bubble--${m.who}`}>
                 {m.images && m.images.length > 0 && (
                   <div className="ch-bubble__images">
@@ -380,6 +389,9 @@ export function ChatHubView() {
             </div>
           </div>
         ))}
+        {messages.length > 0 && !run.loadingSession && (
+          <LongTaskStrays anchored={startedTaskSet} longTasks={longTasks} variant="hub" />
+        )}
         {busy && rows[rows.length - 1]?.text === "" && (
           <TypingIndicator />
         )}

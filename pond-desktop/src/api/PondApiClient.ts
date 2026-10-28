@@ -40,6 +40,8 @@ import {
   type MeshPeerCapabilities,
   type MeshSettlementStatus,
   type MeshSelf,
+  type LongTask,
+  type LongTaskArtifactBody,
   type ModelActiveRoles,
   type ModelEntry,
   type ModelEngine,
@@ -1664,6 +1666,28 @@ export class PondApiClient {
 
   removeRecipe(id: string): Promise<void> {
     return this.del(`/api/v1/recipes/${encodeURIComponent(id)}`);
+  }
+
+  /** This conversation's long tasks, newest first; without a session, every task the caller reaches. 404 on an older pond. */
+  async listLongTasks(sessionId?: string | null): Promise<LongTask[]> {
+    const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+    const r = await this.get<LongTask[] | undefined>(`/api/v1/long-tasks${query}`);
+    return Array.isArray(r) ? r : [];
+  }
+
+  /** One task, its steps and its artifacts. 404 for a task the caller does not reach. */
+  getLongTask(id: string): Promise<LongTask> {
+    return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}`);
+  }
+
+  /** An artifact's whole body, for "Read the result". */
+  getLongTaskArtifact(id: string, artifactId: string): Promise<LongTaskArtifactBody> {
+    return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}`);
+  }
+
+  /** Stops a task; a step already under way finishes first. 409 if it has already ended. */
+  async cancelLongTask(id: string): Promise<void> {
+    await this.post(`/api/v1/long-tasks/${encodeURIComponent(id)}/cancel`);
   }
 
   /** Whether the pond is building agents' start-up copies now, and where each stands. 404 on an older pond. */

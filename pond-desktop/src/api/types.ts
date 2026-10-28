@@ -964,6 +964,64 @@ export interface PrefillReport {
   agents: PrefillAgent[];
 }
 
+/** Where a long task is; spellings are pond-core's `LongTaskState`. */
+export type LongTaskState =
+  | "planning"
+  | "running"
+  | "awaiting_approval"
+  | "paused"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type LongTaskStepState = "pending" | "running" | "completed" | "failed" | "skipped" | "awaiting_approval";
+
+export interface LongTaskStep {
+  key: string;
+  /** The agent working the step: a recipe name, or `long-task-worker` and its kin. */
+  role: string;
+  state: LongTaskStepState;
+  attempts: number;
+  /** One line on how the step went, once it has. */
+  summary: string | null;
+  /** The pond's own reason, when the step failed. */
+  failure: string | null;
+}
+
+/** What a step made; the body comes from the artifact route, never with the task. */
+export interface LongTaskArtifact {
+  id: string;
+  task_id: string;
+  step_key: string | null;
+  kind: string;
+  title: string;
+  summary: string;
+  tokens: number;
+  created_at: string;
+}
+
+/** A long task as the chat card shows it. */
+export interface LongTask {
+  id: string;
+  goal: string;
+  state: LongTaskState;
+  origin_session_id: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  steps: LongTaskStep[];
+  artifacts: LongTaskArtifact[];
+  result_artifact_id: string | null;
+}
+
+export interface LongTaskArtifactBody {
+  id: string;
+  title: string;
+  kind: string;
+  summary: string;
+  body: string;
+}
+
 /** Answer of `POST /recipes/validate`: 200 whether or not the block is acceptable. */
 export interface RecipeValidation {
   ok: boolean;

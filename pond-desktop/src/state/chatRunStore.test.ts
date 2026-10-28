@@ -24,6 +24,7 @@ import type { ChatRunBridge } from "./chatRunStore";
 import { ApiError } from "../api/types";
 import type { ChatEvent } from "../api/types";
 import type { PreparedImage } from "../lib/imageAttach";
+import { OTHER_ID, STARTED_TEXT, TASK_ID } from "../longtasks/longTaskFixtures";
 import {
   SEARCH_STUB,
   SEARCH_TOOL,
@@ -1088,5 +1089,114 @@ describe("a web search result the pond does not keep", () => {
     ]);
     await openSession("sess-1");
     expect(getChatRun().messages[1].keptResults?.[0].stub).toBe(SEARCH_STUB);
+  });
+});
+
+// A long task the prime starts is found in the tool's own text, live and in a stored row.
+describe("a long task the prime starts", () => {
+  const START_TOOL = "giap-tasks__task_start";
+
+  function startRow(id: string, text: string, tool = START_TOOL) {
+    return {
+      id: `tool-${id}`,
+      session_id: "sess-1",
+      role: "tool" as const,
+      created_at: "",
+      tool_call_id: `call-${id}`,
+      content: JSON.stringify({ tool_call_id: `call-${id}`, tool, content: text }),
+    };
+  }
+
+  const startedText = (id: string) => `Started task ${id}. It runs in the background.`;
+
+  it("is found in the result of a live turn, on the answer that follows", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: START_TOOL, id: "t1" },
+        { type: "tool_result", tool: START_TOOL, id: "t1", content: STARTED_TEXT },
+        { type: "text", content: "Started." },
+      ]) as never,
+    );
+    sendTurn({ text: "plan a trip" });
+    await flush();
+    expect(getChatRun().messages[1].longTaskIds).toEqual([TASK_ID]);
+    expect(getChatRun().messages[1].text).toBe("Started.");
+  });
+
+  it("is found once however many times the result is repeated, and again for a second task", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: START_TOOL, id: "t1" },
+        { type: "tool_result", tool: START_TOOL, id: "t1", content: STARTED_TEXT },
+        { type: "tool_result", tool: START_TOOL, id: "t1", content: STARTED_TEXT },
+        { type: "tool_call", tool: START_TOOL, id: "t2" },
+        { type: "tool_result", tool: START_TOOL, id: "t2", content: startedText(OTHER_ID) },
+      ]) as never,
+    );
+    sendTurn({ text: "plan two trips" });
+    await flush();
+    expect(getChatRun().messages[1].longTaskIds).toEqual([TASK_ID, OTHER_ID]);
+  });
+
+  it("is not found in the same words from another tool", async () => {
+    vi.mocked(api.chatStream).mockReturnValue(
+      stream([
+        { type: "tool_call", tool: "giap-notes__read_note", id: "t1" },
+        { type: "tool_result", tool: "giap-notes__read_note", id: "t1", content: STARTED_TEXT },
+      ]) as never,
+    );
+    sendTurn({ text: "read my note" });
+    await flush();
+    expect(getChatRun().messages[1].longTaskIds).toBeUndefined();
+  });
+
+  it("is found in a stored tool row, and goes to the answer of its own turn", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      startRow("1", STARTED_TEXT),
+      assistantRow({ id: "a1", content: "Started.", tool_calls: undefined }),
+      userRow({ id: "u2", content: "thanks" }),
+      assistantRow({ id: "a2", content: "You're welcome.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents.map((m) => m.longTaskIds)).toEqual([[TASK_ID], undefined]);
+  });
+
+  it("is found in a stored row whose content is the text itself", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      { ...startRow("1", ""), content: STARTED_TEXT },
+      assistantRow({ id: "a1", content: "Started.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    expect(getChatRun().messages[1].longTaskIds).toEqual([TASK_ID]);
+  });
+
+  it("reaches the answer past an empty step of the same turn, but not into the next question's answer", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      startRow("1", STARTED_TEXT),
+      assistantRow({ id: "a0", content: "" }),
+      assistantRow({ id: "a1", content: "Started.", tool_calls: undefined }),
+      userRow({ id: "u2", content: "and another" }),
+      startRow("2", startedText(OTHER_ID)),
+      assistantRow({ id: "a2", content: "" }),
+      userRow({ id: "u3", content: "thanks" }),
+      assistantRow({ id: "a3", content: "You're welcome.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    const agents = getChatRun().messages.filter((m) => m.role === "agent");
+    expect(agents.map((m) => m.longTaskIds)).toEqual([[TASK_ID], undefined]);
+  });
+
+  it("is not found in a stored row of another tool", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow({ id: "u1" }),
+      startRow("1", STARTED_TEXT, "giap-notes__read_note"),
+      assistantRow({ id: "a1", content: "Here it is.", tool_calls: undefined }),
+    ]);
+    await openSession("sess-1");
+    expect(getChatRun().messages[1].longTaskIds).toBeUndefined();
   });
 });

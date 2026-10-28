@@ -1539,6 +1539,9 @@ whose user messages differ from their first token, under `request_context::compi
   index. Anything else is rebuilt: **missing** (none matched), **unreadable** (llama.cpp refused
   it), **corrupt** (the checksum differs) or **stale** (it covers less than the preamble).
 - A compile call decodes one token at most and never resumes a chat's cache.
+- Nothing else may reach the engine under the scope, or it becomes the pair's first call. So the
+  engine admits a prompt by its window alone: a refused warm-up sends goose into a recovery
+  compaction, which runs inside the scope.
 
 The boot pass is a lane job, exempt from the activity gate, after the existing prewarm. The
 household's turns still come first.

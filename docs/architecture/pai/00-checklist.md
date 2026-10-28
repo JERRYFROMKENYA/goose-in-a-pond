@@ -3915,9 +3915,43 @@ PAI-4 and PAI-7).** Design: [06 sections 8 and 9](./06-multi-agent-orchestration
   - the status, rebuild and long-task routes answered as designed, 401, 404 and 409 included;
   - the engine's tests (205 passed) and its two real-model tests, the suspend file (a 2,500-token
     turn resumed in 447 ms) and the compile with two shapes sharing an opening.
-- **Still open.** Boot's first prewarm call is preceded by a goose side call of about 750 tokens
-  under the compile scope, whose system prompt is not GIAP's (`system_appendix_dropped`); it is
-  harmless to the compile and its caller is unidentified.
+- **Found the same day.** Boot's first prewarm call was preceded by a goose side call of about 750
+  tokens under the compile scope (`system_appendix_dropped`): a recovery compaction. See the next
+  entry.
+
+**2026-10-28 — the side call before every boot's first prefill compile (touches PAI-3 and PAI-6;
+not a PAI milestone).**
+
+- **What it was.** goose's recovery compaction. The engine refused any prompt longer than half
+  the free memory divided by an estimated KV cost per token, even under a window the host had
+  set. The estimate charges every layer a full-width f16 cache: 168 KiB a token for Gemma 4 E4B,
+  where its windowed q8_0 cache holds about 9.5 KiB. The first call after a model load has no
+  retained window to credit back. So the boot warm-up's 7,816-token prompt got
+  `ContextLengthExceeded`, and goose summarised the one-message conversation: the 755-token call,
+  run under the compile scope and its one-token cap. That call's context then let the retry
+  through.
+- **How it was found.** On the Orin, with `GIAP_CAPTURE_PAYLOAD` and the shim at trace level. The
+  side call's system prompt is goose's `compaction.md` ("## Task Context ..."), with no tools. It
+  is logged after `Performing message compaction` and before a byte-identical second copy of the
+  warm-up's payload.
+- **The fix** (goose `fix/admit-prompt-by-window`): a prompt is checked against its window only.
+  Every context is created at the window's size whatever the prompt's length, so the per-prompt
+  memory check never bounded an allocation. With no window set, the estimate still sizes it.
+- **PAI-6.** The compile pair is again the warm-up's own two calls (06 section 9.3). Before the
+  fix, the warm-up's first prompt was judged against the compaction prompt (`TooShort`, 5 tokens
+  shared), and only the second warm-up call judged the snapshot Valid.
+- **PAI-3.** A real turn that is the first call after a model load, such as a scheduled task
+  that fires before the warm-up, is no longer refused, so goose no longer compacts its
+  conversation.
+- **Verified on the Orin** (E4B QAT with its MTP drafter, 16,384 context, one boot each of main
+  `f8831d73` and this branch):
+  - before: the engine's first call was the 755-token compaction, 3.0 s between the model loading
+    and the warm-up's compile; verdicts Unobserved (755), TooShort (7,816), Valid;
+  - after: the first call is the 7,816-token warm-up, 0.24 s after the model loads; verdicts
+    Unobserved then Valid with the 6,144-token preamble, and every role Valid; no compaction and
+    no `system_appendix_dropped` in the boot;
+  - `cargo test --release -p goose-local-inference --features cuda --lib`: 208 passed (three of
+    them new, for the window check) and 12 ignored.
 
 **2026-10-28 — deep research, long reports, plans and export (PAI-6 8.8; touches PAI-1, PAI-2,
 PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).

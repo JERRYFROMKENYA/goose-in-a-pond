@@ -4045,6 +4045,9 @@ impl GooseAdapter {
                 context_used_tokens = turn_stats.context_used_tokens,
                 context_limit_tokens = turn_stats.context_limit_tokens,
                 inference_count = turn_stats.inference_count,
+                // Always written, so `giap.sh doctor` can tell "no drafter ran" from an older server.
+                drafter = turn_stats.draft_accept_rate.is_some(),
+                draft_accept_rate = turn_stats.draft_accept_rate,
             );
             let stats = saw_usage.then_some(turn_stats);
             // Before Done: a client that stops reading at Done drops this stream.

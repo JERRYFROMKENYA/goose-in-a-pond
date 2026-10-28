@@ -15,6 +15,7 @@ that apply. Every verb also runs without the menu:
 | Command | Does |
 |---|---|
 | `giap.sh doctor` | health report; exits 1 on any FAIL. Run it after every install |
+| `giap.sh console [HOST]` | live stats, charts and logs: this machine, the Jetson the deploy scripts use (`nano`), and HOST over ssh. Keys: `tab` host, `l` logs, `d` doctor, `r` restart, `?` all |
 | `giap.sh status` | the detection banner only |
 | `giap.sh install` | first-time install through `scripts/install.sh`, with guardrails (below) |
 | `giap.sh build` | web UI, then a release `pond-server` with this host's features, then `pondnet` if Go is present |
@@ -129,8 +130,9 @@ Build:
   --no-verify       skip the post-install health check
 
 Models:
-  --ollama          install Ollama if needed and pull gemma4:e2b
-  --llamafile       download the gemma-2-2b-it llamafile into <data_dir>/bin
+  (default)         offer GIAP's own conversation models, run in process; pick one or none
+  --ollama          use Ollama instead: install it if needed and pull gemma4:e2b
+  --llamafile       use a llamafile instead: gemma-2-2b-it into <data_dir>/bin
   --no-models       skip model downloads
   --whisper-model MODEL   tiny|base|small (default: base)
 
@@ -153,9 +155,12 @@ Its steps, in order:
    `scripts/build-network-helper.sh` builds `pondnet`.
 5. `pond-server setup --model <size>` (next section).
 6. The printed setup card (below).
-7. Unless `--minimal`: the LLM step (Ollama when it is installed or on production/Jetson,
-   llamafile with `--llamafile`, else nothing), and a Piper voice file under `models/tts/` that
-   the Kokoro TTS engine does not use.
+7. Unless `--minimal`: the LLM step, and a Piper voice file under `models/tts/` that the Kokoro
+   TTS engine does not use. The LLM step lists GIAP's picks (E4B 4.2 GB, E2B 2.6 GB) and downloads
+   only the one chosen, with `pond-server models download` and `models activate`. Without a
+   terminal it downloads nothing: the app's Models page shows the same picks and waits. On a
+   Jetson whose L4T release caps large GPU allocations it says E4B will not load and defaults to
+   none. `--ollama` and `--llamafile` replace the step.
 8. Production and Jetson: the systemd unit and mDNS.
 9. Linux: the Wi-Fi polkit grant on production and Jetson; a dev machine only prints the command.
 10. `--desktop`: `npm install` in `pond-desktop`.

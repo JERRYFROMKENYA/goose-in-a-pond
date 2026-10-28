@@ -3918,3 +3918,37 @@ PAI-4 and PAI-7).** Design: [06 sections 8 and 9](./06-multi-agent-orchestration
 - **Still open.** Boot's first prewarm call is preceded by a goose side call of about 750 tokens
   under the compile scope, whose system prompt is not GIAP's (`system_appendix_dropped`); it is
   harmless to the compile and its caller is unidentified.
+
+**2026-10-28 — deep research, long reports, plans and export (PAI-6 8.8; touches PAI-1, PAI-2,
+PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
+
+- **What landed.** The chat composer's + menu, on the desktop and the phone, offers Deep research.
+  The pond starts a research task on the message itself, owned by the member asking, and opens
+  the turn's stream with the same `task_start` call the prime would make, so the card follows
+  it. Research is planned as gathering, then a step per section, then a summary. The pond joins
+  those into one report, as long as its plan, which exports as Markdown, a printable page or an
+  iCalendar file. A shipped composer role writes itineraries, meal plans and lists.
+- **PAI-1.** The task belongs to the caller the long-task routes answer, so its card is always
+  readable by whoever asked. A guest or an unattributed device is refused before anything is
+  saved (403).
+- **PAI-2.** Research and plan steps are told never to put a person's name, health or diet in a
+  web search. The exported page escapes everything the model wrote and fetches nothing when
+  opened.
+- **PAI-3 and PAI-4.** The prime's preamble is unchanged: the deep research note rides the
+  turn's `<system-context>`. The composer is a fifth default agent, so boot compiles one more
+  snapshot.
+- **Verified on the Orin** (E4B QAT with its MTP drafter, 16,384 context, 2026-10-28, a member's
+  paired test device): Deep research on "Plan a four-day trip to Mombasa for me and three
+  friends" started a research task from the turn. The prime acknowledged it from its cached
+  preamble, with the first token at 4.4 s, and the task finished in 13 minutes: two research
+  steps, then an itinerary, a meal plan and a shopping list from the composer, then the
+  summary, which passed on its second try. The joined report has three sections, links to the
+  pages it read, and a calendar of 15 timed events taken from the itinerary. It exports as
+  Markdown, a web page and an iCalendar file. A first run found the defects fixed before this
+  one: a compile step that repeated every section, plans given to the worker, emoji and quoted
+  markup in headings, and map links listed as sources.
+- **Also found.** Two checkouts built into one `target/` on the board reuse each other's path
+  crates. A deploy compiled pond-api against the other checkout's pond-core; clearing the
+  `pond-*`/`goose*` fingerprints fixed it.
+- **Not verified.** Printing to PDF in the built Electron app. The phone's report and share
+  screens (goose-on-the-go #200 and its follow-up) on a device.

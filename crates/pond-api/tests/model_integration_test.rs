@@ -1548,7 +1548,8 @@ async fn a_reconnecting_download_reports_its_attempt() {
     assert!(by_name("flowing.gguf").get("reconnecting").is_none());
 }
 
-/// A live add-on part reads as downloading on its model's row.
+/// A live add-on part reads as downloading on its model's row. The listing takes the device's
+/// verdict from the agent, and `MockAgent` gives none, so this holds on a budgeted device too.
 #[tokio::test]
 async fn the_pictures_companion_reads_downloading_while_its_part_is_fetched() {
     let f = pond_with(Arc::new(MockAgent::new())).await;
@@ -1574,10 +1575,6 @@ async fn the_pictures_companion_reads_downloading_while_its_part_is_fetched() {
     let before = companion(&list(f.app.clone()).await);
     assert_eq!(before["kind"], "pictures");
     assert_eq!(before["size_bytes"], 986_833_728u64);
-    if pond_core::models::domain::device_budget::budgeted_device() {
-        assert_eq!(before["state"], "not_on_this_device");
-        return;
-    }
     assert_eq!(before["state"], "available");
 
     let mut part = tracked("mmproj/gemma-4-e2b-it/mmproj-BF16.gguf", "downloading");

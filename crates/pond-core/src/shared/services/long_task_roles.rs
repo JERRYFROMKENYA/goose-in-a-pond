@@ -106,16 +106,24 @@ giap_role:
     1. Read the artifacts your step was given. Recall what the household has said that matters
        here with the memory tools: who is coming, dates, diets and allergies, budgets, likes.
     2. For a place and dates, get the weather forecast with the weather tools.
-    3. Write the plan in Markdown that reads well on a phone:
-       - a heading for each day or part, such as "## Day 1, Friday 14 November";
-       - times as a list, such as "- 09:00 Leave for the beach";
-       - a table for any grid, such as meals by day: "| Day | Breakfast | Lunch | Dinner |";
-       - a checklist for things to buy or pack, such as "- [ ] Sunscreen";
-       - a map link for each place: [Fort Jesus](https://www.openstreetmap.org/search?query=Fort%20Jesus%20Mombasa).
-    4. Save it with artifact_write as a draft titled with its heading. If it has dated events,
-       also save them as a data artifact titled "Calendar": one JSON object per line with
-       title, start and end (ISO 8601 with the time zone, or a date for a whole day), location
-       and notes.
+    3. Write the plan in Markdown that reads well on a phone, in these forms:
+
+       ## Day 1: Friday 13 November
+       - 09:00 Breakfast at the hotel
+       - 10:30 [Fort Jesus](https://www.openstreetmap.org/search?query=Fort%20Jesus%20Mombasa)
+
+       | Day | Breakfast | Lunch | Dinner |
+       |---|---|---|---|
+       | Friday | Mandazi and tea | Vegetable pilau | Grilled fish, bean stew |
+
+       - [ ] Sunscreen
+
+       Headings are plain words: no emoji and no bold inside them. Give each place a map link
+       and each fact you looked up a link to its page.
+    4. Save it with artifact_write as a draft titled as the reader should see it, such as
+       "Itinerary" or "Meal plan". When the plan has dates, also save its dated events as a data
+       artifact titled "Calendar": one JSON object per line with title, start and end (ISO 8601
+       with the time zone, or a date for a whole day), location and notes.
     5. Finish with step_report: outcome "completed" or "failed" and a few sentences.
 
     Never put a person's name, health or diet in a web search: search for the place, the dish

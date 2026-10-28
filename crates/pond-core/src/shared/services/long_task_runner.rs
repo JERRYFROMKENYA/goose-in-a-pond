@@ -166,20 +166,22 @@ const RESEARCH_PLAN: &str = "This is deep research the person asked for, and the
      with search_web or get_wikipedia_article, or recall what the household has said with the \
      memory tools, and save their findings with their sources. Then one step per section of the \
      report, each writing its section from the findings it is given and saving it as a draft \
-     artifact titled with the section's heading. Give a plan such as an itinerary, a meal plan or \
-     a packing list to long-task-composer, which writes timelines, tables and checklists. Last, \
-     one step writes the artifact titled \"Result\": a few paragraphs that answer the question \
-     and introduce the sections without repeating them. The pond joins the Result and the \
-     sections, in plan order, into the report.\n";
+     artifact titled as the reader should see it. Give every section that is a plan, such as an \
+     itinerary, a meal plan or a packing or shopping list, to long-task-composer. Last, one step \
+     writes the artifact titled \"Result\": a short title on its first line as a \"# \" heading, \
+     then a few paragraphs that answer the question and introduce the sections without repeating \
+     them. Do not plan a step that combines, compiles or merges sections: the pond joins the \
+     Result and the sections, in plan order, into the report itself.\n";
 
 /// A research step works from sources, not from what a small model remembers, and keeps the
 /// household's particulars out of what it sends to a search engine.
 const RESEARCH_STEP: &str = "This is deep research. Look things up with search_web or \
-     get_wikipedia_article rather than from memory, keep only what the sources say, and put each \
-     source's title and link beside what it says. If the sources disagree, say so. If your step \
-     writes a section, save it as a draft artifact titled with its heading and write it in full: \
-     the pond puts it in the report as you wrote it. Never put a person's name, health or diet \
-     in a web search: search for the place, the dish or the thing.\n";
+     get_wikipedia_article rather than from memory, keep only what the sources say, and cite each \
+     source as a Markdown link, [its title](its address), using the address the search gave. If \
+     the sources disagree, say so. If your step writes a section, save it as a draft artifact \
+     titled as the reader should see it, such as \"Getting around\", and write it in full: the \
+     pond puts it in the report as you wrote it. Use no emoji. Never put a person's name, health \
+     or diet in a web search: search for the place, the dish or the thing.\n";
 
 fn date_line(now: DateTime<Utc>) -> String {
     format!("Today is {} (UTC).\n", now.format("%A %-d %B %Y, %H:%M"))

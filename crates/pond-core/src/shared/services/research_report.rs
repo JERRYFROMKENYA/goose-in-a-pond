@@ -62,16 +62,46 @@ pub fn report_title(goal: &str) -> String {
     format!("{}...", cut.trim_end())
 }
 
+/// The title an assembled report leads with.
+pub fn assembled_title(markdown: &str) -> String {
+    markdown
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("# "))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or("Report")
+        .to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub title: String,
     pub url: String,
 }
 
-/// The whole report in Markdown: title, summary, sections, then the sources they link to.
+/// The title the summary gives itself on a leading `# ` line, and the summary without it.
+fn titled(summary: &str) -> (Option<&str>, &str) {
+    let summary = summary.trim();
+    match summary.strip_prefix("# ") {
+        Some(rest) => {
+            let (title, body) = rest.split_once('\n').unwrap_or((rest, ""));
+            let title = title.trim();
+            ((!title.is_empty()).then_some(title), body.trim())
+        }
+        None => (None, summary),
+    }
+}
+
+/// The whole report in Markdown: title, summary, sections, then the sources they link to. The
+/// title is the one the summary gives itself, else the goal's first line.
 pub fn assemble(goal: &str, summary: Option<&str>, sections: &[(String, String)]) -> String {
-    let mut out = format!("# {}\n\n", report_title(goal));
-    if let Some(summary) = summary.map(str::trim).filter(|s| !s.is_empty()) {
+    let (own_title, summary) = summary.map(titled).unwrap_or((None, ""));
+    let title = own_title
+        .map(report_title)
+        .unwrap_or_else(|| report_title(goal));
+    let mut out = format!("# {title}\n\n");
+    if !summary.is_empty() {
         out.push_str(summary);
         out.push_str("\n\n");
     }
@@ -125,7 +155,9 @@ pub fn sources(markdown: &str) -> Vec<Source> {
         };
         let url = target[..end].trim();
         let is_web = url.starts_with("https://") || url.starts_with("http://");
-        if is_web && !title.contains('[') && !found.iter().any(|s| s.url == url) {
+        // A map link names a place in the plan; it is not something the report read.
+        let is_map = url.contains("openstreetmap.org/") || url.contains("google.com/maps");
+        if is_web && !is_map && !title.contains('[') && !found.iter().any(|s| s.url == url) {
             let title = title.trim();
             found.push(Source {
                 title: if title.is_empty() {
@@ -400,6 +432,37 @@ mod tests {
                     url: "https://en.wikipedia.org/wiki/Fort_Jesus_(Mombasa)".into()
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn the_summary_names_the_report_and_map_links_are_not_sources() {
+        let report = assemble(
+            "Plan a four-day trip to Mombasa for me and three friends from Friday 13 November",
+            Some("# Four days in Mombasa\n\nBy the sea, mostly."),
+            &[(
+                "Itinerary".into(),
+                "See [Fort Jesus](https://www.openstreetmap.org/search?query=Fort%20Jesus) and \
+                 [its history](https://example.org/fort-jesus)."
+                    .into(),
+            )],
+        );
+        assert!(
+            report.starts_with("# Four days in Mombasa\n\nBy the sea, mostly."),
+            "{report}"
+        );
+        assert_eq!(assembled_title(&report), "Four days in Mombasa");
+        assert_eq!(
+            sources(&report),
+            [Source {
+                title: "its history".into(),
+                url: "https://example.org/fort-jesus".into()
+            }],
+            "a place's map link is not a source"
+        );
+        assert_eq!(
+            assembled_title(&assemble("Compare heat pumps", Some("No title here."), &[])),
+            "Compare heat pumps"
         );
     }
 

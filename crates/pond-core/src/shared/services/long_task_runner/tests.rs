@@ -223,7 +223,14 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
         plan(&research).contains(RESULT_TITLE),
         "the plan ends in the report the card opens"
     );
-    assert!(work(&research).contains("title and link"));
+    assert!(
+        work(&research).contains("Markdown link"),
+        "sources are cited as links"
+    );
+    assert!(
+        plan(&research).contains("Do not plan a step that combines"),
+        "a compile step would repeat every section in the joined report"
+    );
     assert!(!plan(&general).contains("deep research"));
     assert!(!work(&general).contains("deep research"));
 }

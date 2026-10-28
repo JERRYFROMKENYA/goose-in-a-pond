@@ -15723,7 +15723,7 @@ async fn get_long_task_report(
     match long_task_report(&state, &task).await {
         Ok((markdown, events, sections)) => Json(json!({
             "id": task.id(),
-            "title": report::report_title(task.goal()),
+            "title": report::assembled_title(&markdown),
             "state": task.state(),
             "kind": task.kind(),
             "markdown": markdown,
@@ -15800,7 +15800,7 @@ async fn export_long_task(
                 .into_response()
         }
     };
-    let title = report::report_title(task.goal());
+    let title = report::assembled_title(&markdown);
     let stem = crate::report_export::file_stem(&title);
     let now = chrono::Utc::now();
     let (content_type, extension, body) = match format {

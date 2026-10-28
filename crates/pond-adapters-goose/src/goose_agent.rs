@@ -3197,9 +3197,9 @@ impl GooseAdapter {
                 msg.push('\n');
             }
             if let Some(ref task_id) = request.deep_research_task {
-                msg.push_str(
-                    &pond_core::shared::services::long_task_roles::deep_research_turn_note(task_id),
-                );
+                msg.push_str(&pond_core::shared::services::deep_research::turn_note(
+                    task_id,
+                ));
                 msg.push('\n');
             }
             if !dynamic_suffix_for_user_msg.is_empty() {

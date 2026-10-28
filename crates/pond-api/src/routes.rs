@@ -2939,7 +2939,9 @@ async fn drive_turn(
         crate::thought_filter::ThoughtFilter::new()
     });
     if let Some(task_id) = &deep_research_task {
-        for event in deep_research_events(&req.message, task_id) {
+        for event in
+            pond_core::shared::services::deep_research::opening_events(&req.message, task_id)
+        {
             if let StreamStep::Frame(data) = turn.absorb(event) {
                 run.push(data, false);
             }
@@ -15446,8 +15448,12 @@ impl DeepResearchRefusal {
                  anyone in the household.",
             ),
         };
+        // Both spellings: clients read refusals by `code`, and the composers' contract says `reason`.
         let reason = format!("deep_research_{}", self.reason());
-        (status, Json(json!({"error": error, "reason": reason})))
+        (
+            status,
+            Json(json!({"error": error, "code": reason, "reason": reason})),
+        )
     }
 }
 
@@ -15490,34 +15496,20 @@ async fn deep_research_availability(
     }
 }
 
-/// Longest research question kept as a goal; it reaches every step's brief.
-const DEEP_RESEARCH_GOAL_CHARS: usize = 2_000;
-
-/// A member's deep research: a research task they own, reported back to this conversation.
+/// A member's deep research, stored: a research task they own, reported back to this conversation.
 async fn start_deep_research(
     state: &Arc<AppState>,
     member: &str,
     question: &str,
     session_id: &str,
 ) -> anyhow::Result<String> {
-    use pond_core::shared::domain::long_task::{
-        LongTask, LongTaskBudget, LongTaskKind, DEFAULT_LONG_TASK_STEPS,
-    };
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
-    let goal: String = question
-        .trim()
-        .chars()
-        .take(DEEP_RESEARCH_GOAL_CHARS)
-        .collect();
-    let task = LongTask::start(
-        ProfileScope::Owner(member.to_string()),
-        None,
-        &goal,
-        Some(session_id.to_string()),
-        LongTaskBudget::new(DEFAULT_LONG_TASK_STEPS, None)?,
+    let task = pond_core::shared::services::deep_research::research_task(
+        member,
+        question,
+        session_id,
         chrono::Utc::now(),
-    )?
-    .with_kind(LongTaskKind::Research);
+    )?;
     long_task_repo(state).create_task(&task).await?;
     tracing::info!(
         target: "giap::trace",
@@ -15528,37 +15520,6 @@ async fn start_deep_research(
         "a member asked for deep research"
     );
     Ok(task.id().to_string())
-}
-
-/// The `task_start` call and result a deep research turn opens with, spelled as the prime's own
-/// call reaches the stream, so no client tells the two apart.
-fn deep_research_events(
-    question: &str,
-    task_id: &str,
-) -> [pond_core::shared::domain::agent::AgentStreamEvent; 2] {
-    use pond_core::shared::domain::agent::AgentStreamEvent;
-    let id = format!("deep-research-{task_id}");
-    let tool = format!(
-        "{}__task_start",
-        pond_core::mcp::domain::tool_group::TASKS_EXTENSION
-    );
-    [
-        AgentStreamEvent::ToolCall {
-            id: id.clone(),
-            tool: tool.clone(),
-            input: Some(json!({ "goal": question.trim() })),
-        },
-        AgentStreamEvent::ToolResult {
-            id,
-            tool,
-            content: format!(
-                "Started task {task_id}. The pond researches it while the household is quiet and \
-                 tells the person on their phone when the report is ready."
-            ),
-            card: None,
-            keep: None,
-        },
-    ]
 }
 
 /// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a

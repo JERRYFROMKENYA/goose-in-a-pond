@@ -3,6 +3,7 @@ pub mod agent_prefill;
 pub mod agent_templates;
 pub mod chat;
 pub mod child_sessions;
+pub mod deep_research;
 pub mod delegation;
 pub mod egress;
 pub mod in_process_event_bus;

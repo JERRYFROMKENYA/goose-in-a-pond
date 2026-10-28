@@ -770,8 +770,8 @@ mod tests {
         );
         assert_eq!(
             report.matches("\n# ").count(),
-            0,
-            "only the title is level one"
+            1,
+            "only the title is level one, beside the fenced line that is not a heading"
         );
     }
 

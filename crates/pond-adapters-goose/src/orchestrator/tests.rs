@@ -148,6 +148,8 @@ struct FakeRunnerState {
     session_seq: AtomicUsize,
     /// The parent's reserved fraction, read inside the run: the only moment the claim exists.
     reserved_during_run: Mutex<Vec<f32>>,
+    /// Whether the run's engine calls were helper calls, read where the engine would read it.
+    helper_during_run: Mutex<Vec<bool>>,
 }
 
 struct FakeRunner {
@@ -217,6 +219,11 @@ impl ChildRunner for FakeRunner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(process_device_ledger().reserved_fraction(&plan.parent_session_id));
+        self.state
+            .helper_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(goose_providers::request_context::is_helper());
         self.state
             .plans
             .lock()
@@ -444,6 +451,39 @@ fn a_provider_somewhere_else_takes_only_one_permit() {
         subagent_permits("local") > subagent_permits("anthropic"),
         "the on-device and remote cases ask for the same number of permits, so the assertion \
          next door is satisfied by everything and proves nothing"
+    );
+}
+
+/// A child's engine calls take the model's one context; outside a run nothing is a helper call.
+#[tokio::test]
+async fn a_childs_engine_calls_are_helper_calls() {
+    let _serial = ONE_RUN_AT_A_TIME.lock().await;
+    let role = role("researcher", &["giap-weather"]);
+    let env = env_with(
+        "ollama",
+        parent_tools(&[("giap-weather", &["get_weather"])]),
+    );
+    let runner = Arc::new(FakeRunner::new(env));
+    let state = runner.state.clone();
+    let (orchestrator, _turn) = live_turn(runner);
+
+    orchestrator
+        .spawn(spec_for(&role, &["giap-weather"]))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        *state
+            .helper_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        vec![true],
+        "a child ran outside the helper scope, so the engine would put it beside the parent's \
+         context instead of in it"
+    );
+    assert!(
+        !goose_providers::request_context::is_helper(),
+        "the scope ends with the run"
     );
 }
 

@@ -917,7 +917,9 @@ async fn drive_run(
     );
 
     let max_turns = plan.max_turns;
-    let outcome = runner.run(plan, cancel.clone()).await;
+    // A child's engine calls take the model's one context rather than a second beside the parent's.
+    let outcome =
+        goose_providers::request_context::as_helper(runner.run(plan, cancel.clone())).await;
     runner.release(&plan_child_session_id).await;
 
     let (status, result, error) = match outcome {

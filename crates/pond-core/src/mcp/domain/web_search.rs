@@ -170,8 +170,14 @@ mod tests {
 
     #[test]
     fn llm_context_answers_map_as_the_fallback_table_says() {
-        assert_eq!(LlmContextOutcome::from_http(200), LlmContextOutcome::Answered);
-        assert_eq!(LlmContextOutcome::from_http(401), LlmContextOutcome::Rejected);
+        assert_eq!(
+            LlmContextOutcome::from_http(200),
+            LlmContextOutcome::Answered
+        );
+        assert_eq!(
+            LlmContextOutcome::from_http(401),
+            LlmContextOutcome::Rejected
+        );
         assert_eq!(LlmContextOutcome::from_http(429), LlmContextOutcome::Quota);
         for code in [400, 402, 403, 404, 422, 500, 502, 503] {
             assert_eq!(
@@ -186,8 +192,14 @@ mod tests {
     fn the_town_is_the_place_name_before_its_first_comma() {
         assert_eq!(local_town("Nairobi, Kenya").as_deref(), Some("Nairobi"));
         assert_eq!(local_town("  Kisumu  ").as_deref(), Some("Kisumu"));
-        assert_eq!(local_town("Dar es\tSalaam").as_deref(), Some("Dar es Salaam"));
-        assert_eq!(local_town("São Paulo, Brazil").as_deref(), Some("São Paulo"));
+        assert_eq!(
+            local_town("Dar es\tSalaam").as_deref(),
+            Some("Dar es Salaam")
+        );
+        assert_eq!(
+            local_town("São Paulo, Brazil").as_deref(),
+            Some("São Paulo")
+        );
         assert_eq!(local_town("Nai\r\nrobi").as_deref(), Some("Nai robi"));
         assert_eq!(local_town(""), None);
         assert_eq!(local_town(" , Kenya"), None);

@@ -2218,7 +2218,11 @@ mod tests {
     async fn a_transient_tool_result_is_stored_as_its_stub() {
         let storage = Arc::new(InMemorySessionStorage::new());
         storage.create_session("sess-t".to_string()).await.unwrap();
-        let service = ChatService::new(Arc::new(MockAgent::new()), "sess-t".to_string(), storage.clone());
+        let service = ChatService::new(
+            Arc::new(MockAgent::new()),
+            "sess-t".to_string(),
+            storage.clone(),
+        );
         let stub = "Web search results are not kept after the turn. Sources: kws.go.ke.";
         let searched = serde_json::json!({
             "tool_call_id": "call-1",
@@ -2249,10 +2253,16 @@ mod tests {
         assert_eq!(rows[0]["transient"], true);
         assert!(rows[0].get("keep").is_none(), "{}", rows[0]);
         assert_eq!(rows[0]["tool_call_id"], "call-1");
-        assert_eq!(rows[0]["arguments"], "{\"question\":\"when does the park close\"}");
+        assert_eq!(
+            rows[0]["arguments"],
+            "{\"question\":\"when does the park close\"}"
+        );
         let stored: String = messages.iter().map(|m| m.message.content.clone()).collect();
         assert!(!stored.contains("6:00 PM"), "{stored}");
-        assert_eq!(rows[1]["content"], "ok", "a result with no stub is kept whole");
+        assert_eq!(
+            rows[1]["content"], "ok",
+            "a result with no stub is kept whole"
+        );
         assert!(rows[1].get("transient").is_none());
     }
 

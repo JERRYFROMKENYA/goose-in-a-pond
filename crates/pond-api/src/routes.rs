@@ -19176,7 +19176,10 @@ mod tests {
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
             keep: Some(stub.to_string()),
         }));
-        assert_eq!(frame["content"], "Web results for: q\nThe park closes at 6:00 PM.");
+        assert_eq!(
+            frame["content"],
+            "Web results for: q\nThe park closes at 6:00 PM."
+        );
         assert_eq!(frame["transient"], true);
         assert_eq!(frame["ui"]["card_type"], "search");
         let row: Value = serde_json::from_str(&turn.tool_results[0]).unwrap();

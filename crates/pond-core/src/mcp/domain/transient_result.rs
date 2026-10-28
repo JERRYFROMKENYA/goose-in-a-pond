@@ -66,9 +66,139 @@ pub fn keep_from_meta(meta: &Map<String, Value>) -> Option<String> {
         .map(str::to_string)
 }
 
+/// One stored tool result, as an engine's store holds it, seen by the rule below.
+#[derive(Debug, Clone, Default)]
+pub struct StoredResult<'a> {
+    pub meta: Option<&'a Map<String, Value>>,
+    /// Each content block's text, `None` for a block that is not text.
+    pub blocks: Vec<Option<&'a str>>,
+    pub has_structured_content: bool,
+}
+
+/// The stub `result` must be reduced to before it may stay in a store: one text block holding
+/// the stub, no structured content, its marker kept so the next look sees it done. `None` when
+/// it stays as it is: it carries no marker, or it is its stub already.
+pub fn stub_owed(result: &StoredResult<'_>) -> Option<String> {
+    let keep = keep_from_meta(result.meta?)?;
+    let reduced = !result.has_structured_content
+        && result.blocks.len() == 1
+        && result.blocks[0] == Some(keep.as_str());
+    (!reduced).then_some(keep)
+}
+
+/// Where a turn stands when its engine's store could be swept of transient results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepPoint {
+    /// Before the turn's first reply; catches what a crash or a missed sweep left.
+    TurnStart,
+    /// The turn ended on its own.
+    TurnEnd { saw_transient: bool },
+    /// The turn was dropped unfinished: cancelled, or it returned early.
+    TurnDropped { newer_turn_began: bool },
+}
+
+/// Whether the store is swept at `point`. A finished turn that saw no transient result has
+/// nothing to sweep, as its start cleared any earlier one. A dropped turn sweeps even so, as the
+/// engine may have stored a result the stream never yielded, unless a newer turn has the
+/// conversation: that turn sweeps at its start, and a rewrite under it would race its writes.
+pub fn sweep_due(point: SweepPoint) -> bool {
+    match point {
+        SweepPoint::TurnStart => true,
+        SweepPoint::TurnEnd { saw_transient } => saw_transient,
+        SweepPoint::TurnDropped { newer_turn_began } => !newer_turn_began,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn marked(stub: &str) -> Map<String, Value> {
+        transient_meta(stub)
+    }
+
+    #[test]
+    fn a_marked_result_owes_its_stub_until_it_is_one() {
+        let stub = "Web search results are not kept after the turn. Sources: kws.go.ke.";
+        let meta = marked(stub);
+        let whole = StoredResult {
+            meta: Some(&meta),
+            blocks: vec![
+                Some("Web results for: q\nThe park closes at 6 pm."),
+                Some("[[[mcp-ui:search:{}]]]"),
+            ],
+            has_structured_content: false,
+        };
+        assert_eq!(stub_owed(&whole).as_deref(), Some(stub));
+
+        let reduced = StoredResult {
+            meta: Some(&meta),
+            blocks: vec![Some(stub)],
+            has_structured_content: false,
+        };
+        assert_eq!(stub_owed(&reduced), None, "a reduced result is left alone");
+
+        for not_yet in [
+            StoredResult {
+                meta: Some(&meta),
+                blocks: vec![Some(stub)],
+                has_structured_content: true,
+            },
+            StoredResult {
+                meta: Some(&meta),
+                blocks: vec![Some(stub), None],
+                has_structured_content: false,
+            },
+            StoredResult {
+                meta: Some(&meta),
+                blocks: vec![None],
+                has_structured_content: false,
+            },
+            StoredResult {
+                meta: Some(&meta),
+                blocks: Vec::new(),
+                has_structured_content: false,
+            },
+        ] {
+            assert_eq!(stub_owed(&not_yet).as_deref(), Some(stub), "{not_yet:?}");
+        }
+    }
+
+    #[test]
+    fn an_unmarked_result_owes_nothing() {
+        let other = serde_json::json!({"goose": {"mcpApp": {}}});
+        for result in [
+            StoredResult {
+                meta: None,
+                blocks: vec![Some("24C and clear")],
+                has_structured_content: false,
+            },
+            StoredResult {
+                meta: other.as_object(),
+                blocks: vec![Some("24C and clear")],
+                has_structured_content: true,
+            },
+        ] {
+            assert_eq!(stub_owed(&result), None, "{result:?}");
+        }
+    }
+
+    #[test]
+    fn sweeps_are_due_as_the_turn_ends() {
+        assert!(sweep_due(SweepPoint::TurnStart));
+        assert!(sweep_due(SweepPoint::TurnEnd {
+            saw_transient: true
+        }));
+        assert!(!sweep_due(SweepPoint::TurnEnd {
+            saw_transient: false
+        }));
+        assert!(sweep_due(SweepPoint::TurnDropped {
+            newer_turn_began: false
+        }));
+        assert!(!sweep_due(SweepPoint::TurnDropped {
+            newer_turn_began: true
+        }));
+    }
 
     #[test]
     fn the_stub_names_domains_only() {

@@ -9,12 +9,17 @@ use std::sync::{Arc, Mutex};
 use goose::conversation::message::{Message, MessageContent};
 use goose::conversation::Conversation;
 use goose::session::SessionManager;
-use pond_core::mcp::domain::transient_result::keep_from_meta;
+use pond_core::mcp::domain::transient_result::{
+    keep_from_meta, stub_owed, sweep_due, StoredResult, SweepPoint,
+};
 use rmcp::model::{CallToolResult, ContentBlock};
 
 /// The stub a result asks history to keep in its place; `None` for a result kept whole.
 pub(crate) fn keep_of(result: &CallToolResult) -> Option<String> {
-    result.meta.as_ref().and_then(|meta| keep_from_meta(&meta.0))
+    result
+        .meta
+        .as_ref()
+        .and_then(|meta| keep_from_meta(&meta.0))
 }
 
 /// `result` as history keeps it: its stub alone, its marker kept so a later sweep sees it done.
@@ -25,24 +30,31 @@ fn as_kept(result: &CallToolResult, keep: &str) -> CallToolResult {
     kept
 }
 
-/// The stub `content` still owes, or `None` when it is no transient result or already its stub.
+/// The stub `content` still owes, by pond-core's rule; `None` for anything else.
 fn owed_stub(content: &MessageContent) -> Option<String> {
     let MessageContent::ToolResponse(response) = content else {
         return None;
     };
     let result = response.tool_result.as_ref().ok()?;
-    let keep = keep_of(result)?;
-    let done = result.structured_content.is_none()
-        && result.content.len() == 1
-        && result.content[0].as_text().is_some_and(|t| t.text == keep);
-    (!done).then_some(keep)
+    stub_owed(&StoredResult {
+        meta: result.meta.as_ref().map(|meta| &meta.0),
+        blocks: result
+            .content
+            .iter()
+            .map(|block| block.as_text().map(|t| t.text.as_str()))
+            .collect(),
+        has_structured_content: result.structured_content.is_some(),
+    })
 }
 
 /// `messages` with every transient tool response reduced to its stub, and how many were; `None`
 /// when none was owed, so an unchanged conversation is never rewritten. Ids, roles and every
 /// other part stay as they were: a provider rejects a tool response re-keyed from its call.
 pub(crate) fn redact(messages: &[Message]) -> Option<(Vec<Message>, usize)> {
-    if !messages.iter().any(|m| m.content.iter().any(|c| owed_stub(c).is_some())) {
+    if !messages
+        .iter()
+        .any(|m| m.content.iter().any(|c| owed_stub(c).is_some()))
+    {
         return None;
     }
     let mut redacted = 0usize;
@@ -170,11 +182,12 @@ impl TurnSweep {
         self.saw_transient = true;
     }
 
-    /// The turn ended on its own: sweep before the caller hears it is done. A turn that saw no
-    /// transient result has nothing to sweep, as its start already cleared any earlier one.
+    /// The turn ended on its own: sweep, when due, before the caller hears it is done.
     pub(crate) async fn finish(&mut self) {
         self.finished = true;
-        if !self.saw_transient {
+        if !sweep_due(SweepPoint::TurnEnd {
+            saw_transient: self.saw_transient,
+        }) {
             return;
         }
         let _held = self.turns.rewrite.lock().await;
@@ -194,11 +207,10 @@ impl Drop for TurnSweep {
         let generation = self.generation;
         let goose_sid = std::mem::take(&mut self.goose_sid);
         let manager = self.manager.clone();
-        // Even with no transient result seen: goose may have stored one the stream never yielded.
         runtime.spawn(async move {
             let _held = turns.rewrite.lock().await;
-            // A newer turn sweeps at its own start, and rewriting under it would race its writes.
-            if turns.begun.load(Ordering::SeqCst) != generation {
+            let newer_turn_began = turns.begun.load(Ordering::SeqCst) != generation;
+            if !sweep_due(SweepPoint::TurnDropped { newer_turn_began }) {
                 return;
             }
             sweep(&manager, &goose_sid, "turn_dropped").await;
@@ -278,7 +290,12 @@ mod tests {
             "Web search results are not kept after the turn. Sources: kws.go.ke."
         );
         let stored = serde_json::to_string(&redacted).unwrap();
-        for gone in [PAGE_TEXT, "BRAVE SNIPPET", "mcp-ui", "nairobi-national-park"] {
+        for gone in [
+            PAGE_TEXT,
+            "BRAVE SNIPPET",
+            "mcp-ui",
+            "nairobi-national-park",
+        ] {
             assert!(!stored.contains(gone), "{gone:?} survived: {stored}");
         }
     }

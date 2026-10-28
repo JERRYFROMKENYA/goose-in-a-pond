@@ -757,7 +757,10 @@ async fn chat_stream_keeps_only_the_stub_of_a_transient_result() {
         .await
         .unwrap();
     let streamed = String::from_utf8_lossy(&streamed);
-    assert!(streamed.contains(TRANSIENT_PAGE_TEXT), "the turn shows the result: {streamed}");
+    assert!(
+        streamed.contains(TRANSIENT_PAGE_TEXT),
+        "the turn shows the result: {streamed}"
+    );
     assert!(streamed.contains("\"transient\":true"), "{streamed}");
 
     let get_resp = app
@@ -777,8 +780,16 @@ async fn chat_stream_keeps_only_the_stub_of_a_transient_result() {
         .unwrap();
     let history = String::from_utf8_lossy(&bytes);
     assert!(history.contains("Sources: kws.go.ke."), "{history}");
-    for gone in [TRANSIENT_PAGE_TEXT, "BRAVE SNIPPET", "mcp-ui", "kws.go.ke/park"] {
-        assert!(!history.contains(gone), "{gone:?} reached history: {history}");
+    for gone in [
+        TRANSIENT_PAGE_TEXT,
+        "BRAVE SNIPPET",
+        "mcp-ui",
+        "kws.go.ke/park",
+    ] {
+        assert!(
+            !history.contains(gone),
+            "{gone:?} reached history: {history}"
+        );
     }
     assert!(history.contains("It closes at 6 pm."), "{history}");
 }

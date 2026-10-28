@@ -11,9 +11,9 @@ use std::time::Duration;
 use pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY;
 use pond_core::mcp::domain::transient_result::{transient_meta, web_search_stub};
 use pond_core::mcp::domain::web_search::{
-    local_search_town, LlmContextOutcome, WebSearchStatus, BRAVE_API_BASE,
-    BRAVE_LLM_CONTEXT_PATH, BRAVE_LLM_CONTEXT_TIMEOUT, BRAVE_LOC_CITY_HEADER, BRAVE_TIMEOUT,
-    BRAVE_TOKEN_HEADER, BRAVE_WEB_SEARCH_PATH,
+    local_search_town, LlmContextOutcome, WebSearchStatus, BRAVE_API_BASE, BRAVE_LLM_CONTEXT_PATH,
+    BRAVE_LLM_CONTEXT_TIMEOUT, BRAVE_LOC_CITY_HEADER, BRAVE_TIMEOUT, BRAVE_TOKEN_HEADER,
+    BRAVE_WEB_SEARCH_PATH,
 };
 use pond_core::mcp::services::web_search_status::{self, WebSearchStatusBoard};
 use pond_core::shared::services::passages;
@@ -550,8 +550,7 @@ impl WebSearch<'_> {
             Ok(r) => r,
             Err(e) => {
                 // The same network mode refuses the fallback's search too.
-                if e
-                    .downcast_ref::<pond_core::shared::services::egress::EgressDenied>()
+                if e.downcast_ref::<pond_core::shared::services::egress::EgressDenied>()
                     .is_some()
                 {
                     return ContextAnswer::Miss(search_failed(&describe_failure(&e)));
@@ -914,7 +913,10 @@ impl LlmContext {
 }
 
 /// A generic result with something quotable, its title and age from `sources` where it has none.
-fn context_source(item: GroundingItem, meta: &HashMap<String, SourceMeta>) -> Option<ContextSource> {
+fn context_source(
+    item: GroundingItem,
+    meta: &HashMap<String, SourceMeta>,
+) -> Option<ContextSource> {
     let url = item.url.unwrap_or_default().trim().to_string();
     if url.is_empty() {
         return None;
@@ -2640,7 +2642,11 @@ mod tests {
     ) -> CallToolResult {
         let base = format!("http://127.0.0.1:{brave_port}");
         against(&base, pages, board, None)
-            .search_and_read("test-key-123", "What time does Junction Mall close?", "test")
+            .search_and_read(
+                "test-key-123",
+                "What time does Junction Mall close?",
+                "test",
+            )
             .await
     }
 
@@ -2962,7 +2968,10 @@ mod tests {
     ) -> CallToolResult {
         let base = format!("http://127.0.0.1:{port}");
         against(&base, None, board, town)
-            .run("test-key-123", "What time does Nairobi National Park close?")
+            .run(
+                "test-key-123",
+                "What time does Nairobi National Park close?",
+            )
             .await
     }
 
@@ -3004,9 +3013,15 @@ mod tests {
             assert!(!line.contains(absent), "{absent} was sent: {line}");
         }
         let lower = head.to_ascii_lowercase();
-        assert!(lower.contains("x-subscription-token: test-key-123"), "{head}");
+        assert!(
+            lower.contains("x-subscription-token: test-key-123"),
+            "{head}"
+        );
         assert!(lower.contains("accept: application/json"), "{head}");
-        assert!(!lower.contains("x-loc-"), "a location went with local places off: {head}");
+        assert!(
+            !lower.contains("x-loc-"),
+            "a location went with local places off: {head}"
+        );
     }
 
     #[tokio::test]
@@ -3020,7 +3035,10 @@ mod tests {
         let lower = head.to_ascii_lowercase();
         assert!(lower.contains("x-loc-city: nairobi"), "{head}");
         assert_eq!(lower.matches("x-loc-").count(), 1, "only the town: {head}");
-        assert!(!head.lines().next().unwrap().contains("enable_local"), "{head}");
+        assert!(
+            !head.lines().next().unwrap().contains("enable_local"),
+            "{head}"
+        );
     }
 
     #[test]
@@ -3029,19 +3047,25 @@ mod tests {
         let search = against("http://127.0.0.1:1", None, board, Some("Nai\nrobi"));
         assert!(search.town_header().is_none());
         let search = against("http://127.0.0.1:1", None, board, Some("São Paulo"));
-        assert!(search.town_header().is_some(), "UTF-8 travels as header bytes");
+        assert!(
+            search.town_header().is_some(),
+            "UTF-8 travels as header bytes"
+        );
     }
 
     #[test]
     fn grounding_is_read_with_titles_ages_places_and_json_flattened() {
         let context = context_of(&context_body());
-        assert_eq!(context.sources.len(), 2, "a page with no snippet is dropped");
+        assert_eq!(
+            context.sources.len(),
+            2,
+            "a page with no snippet is dropped"
+        );
         let park = &context.sources[0];
         assert_eq!(park.hit.title, "Nairobi National Park");
         assert_eq!(park.hit.age.as_deref(), Some("2024-01-15"));
         assert_eq!(
-            park.snippets[1],
-            "gate: Main Gate; opening hours: 6:00 AM - 6:00 PM",
+            park.snippets[1], "gate: Main Gate; opening hours: 6:00 AM - 6:00 PM",
             "the URL value is left out"
         );
         assert_eq!(
@@ -3113,7 +3137,11 @@ mod tests {
             .map(|i| serde_json::json!({"stop": format!("Stop {i}"), "fare": format!("KES {i}0")}))
             .collect();
         let passages_out = flatten_json(&Value::Array(rows));
-        assert_eq!(passages_out.len(), MAX_JSON_ITEMS, "rows past the cap are not read");
+        assert_eq!(
+            passages_out.len(),
+            MAX_JSON_ITEMS,
+            "rows past the cap are not read"
+        );
         let total: usize = passages_out.iter().map(String::len).sum();
         assert!(total <= MAX_FLATTENED_BYTES, "{total}");
         assert!(passages_out.iter().all(|p| p.len() <= MAX_PASSAGE_BYTES));
@@ -3122,11 +3150,17 @@ mod tests {
         for _ in 0..20 {
             deep = serde_json::json!({ "level": deep });
         }
-        assert!(flatten_json(&deep).is_empty(), "past the depth cap nothing is read");
+        assert!(
+            flatten_json(&deep).is_empty(),
+            "past the depth cap nothing is read"
+        );
 
         let long = serde_json::json!({ "text": "word ".repeat(2_000) });
         let flat = flatten_json(&long);
-        assert!(flat.iter().all(|p| p.len() <= MAX_PASSAGE_BYTES + 12), "{flat:?}");
+        assert!(
+            flat.iter().all(|p| p.len() <= MAX_PASSAGE_BYTES + 12),
+            "{flat:?}"
+        );
     }
 
     #[test]
@@ -3148,13 +3182,22 @@ mod tests {
             "{}",
             copy.text
         );
-        assert!(copy.text.contains("Park news (nation.africa)"), "{}", copy.text);
+        assert!(
+            copy.text.contains("Park news (nation.africa)"),
+            "{}",
+            copy.text
+        );
         assert!(!copy.text.contains("://"), "{}", copy.text);
         assert!(!copy.text.contains("www."), "{}", copy.text);
         assert!(copy.text.len() <= selection_limits(2).1);
         assert_eq!(
             copy.domains,
-            ["javahouseafrica.com", "artcaffe.co.ke", "kws.go.ke", "nation.africa"]
+            [
+                "javahouseafrica.com",
+                "artcaffe.co.ke",
+                "kws.go.ke",
+                "nation.africa"
+            ]
         );
     }
 
@@ -3164,7 +3207,8 @@ mod tests {
         let copy = context_copy("Java House opening hours on Sunday", &context).unwrap();
         assert_eq!(copy.place_snippets[0], "day: Sunday; hours: 8 am - 9 pm");
         assert!(
-            copy.text.contains("Java House Junction: day: Sunday; hours: 8 am - 9 pm"),
+            copy.text
+                .contains("Java House Junction: day: Sunday; hours: 8 am - 9 pm"),
             "{}",
             copy.text
         );
@@ -3181,7 +3225,11 @@ mod tests {
         let context = LlmContext {
             sources: (0..5)
                 .map(|i| ContextSource {
-                    hit: hit(&format!("Source {i}"), &format!("https://s{i}.example/"), ""),
+                    hit: hit(
+                        &format!("Source {i}"),
+                        &format!("https://s{i}.example/"),
+                        "",
+                    ),
                     snippets: (0..8).map(|j| long(i * 10 + j)).collect(),
                 })
                 .collect(),
@@ -3194,12 +3242,19 @@ mod tests {
                 .collect(),
         };
         let copy = context_copy("When do the park gates close?", &context).unwrap();
-        assert!(copy.text.len() <= RESULT_BUDGET, "{} bytes", copy.text.len());
+        assert!(
+            copy.text.len() <= RESULT_BUDGET,
+            "{} bytes",
+            copy.text.len()
+        );
         for i in 0..5 {
             let from_source = (0..8)
                 .filter(|j| copy.text.contains(&format!("Passage {}:", i * 10 + j)))
                 .count();
-            assert!(from_source <= MAX_PASSAGES_PER_SOURCE, "source {i}: {from_source}");
+            assert!(
+                from_source <= MAX_PASSAGES_PER_SOURCE,
+                "source {i}: {from_source}"
+            );
         }
         let places_part: usize = copy
             .text
@@ -3214,8 +3269,8 @@ mod tests {
     #[test]
     fn the_context_card_carries_places_and_the_copy_does_not_carry_the_card() {
         let context = context_of(&context_body());
-        let result = context_result("What time does Nairobi National Park close?", &context)
-            .unwrap();
+        let result =
+            context_result("What time does Nairobi National Park close?", &context).unwrap();
         assert_eq!(result.content.len(), 2);
         let visible = agent_visible_text(&result);
         assert!(!visible.contains("mcp-ui"), "{visible}");
@@ -3284,7 +3339,11 @@ mod tests {
             "Web search results are not kept after the turn. Sources: junction.co.ke, \
              nairobimalls.example."
         );
-        let missed = result_from("anything", &[hit("", "https://empty.example/", "")], &[None]);
+        let missed = result_from(
+            "anything",
+            &[hit("", "https://empty.example/", "")],
+            &[None],
+        );
         assert_eq!(
             stub_of(&missed).as_deref(),
             Some("Web search results are not kept after the turn. Sources: empty.example."),
@@ -3308,7 +3367,10 @@ mod tests {
         board.record("test-key-123", WebSearchStatus::Unverified);
         let result = context_against(port, board, None).await;
         let copy = text_of(&result, 0);
-        assert!(copy.contains("open every day from 6:00 AM to 6:00 PM"), "{copy}");
+        assert!(
+            copy.contains("open every day from 6:00 AM to 6:00 PM"),
+            "{copy}"
+        );
         assert!(stub_of(&result).is_some());
         assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok);
         requests.recv().unwrap();
@@ -3319,7 +3381,9 @@ mod tests {
     }
 
     /// The fallback's search answers from Brave's snippets alone (no page client).
-    fn fallback_routes(context: (u16, &'static str, String)) -> Vec<(&'static str, u16, &'static str, String)> {
+    fn fallback_routes(
+        context: (u16, &'static str, String),
+    ) -> Vec<(&'static str, u16, &'static str, String)> {
         vec![
             (CONTEXT_PATH, context.0, context.1, context.2),
             (
@@ -3356,19 +3420,30 @@ mod tests {
             let result = context_against(port, board, None).await;
             let copy = text_of(&result, 0);
             assert!(copy.contains("said the web search"), "{label}: {copy}");
-            assert!(stub_of(&result).is_some(), "{label}: the fallback is transient too");
+            assert!(
+                stub_of(&result).is_some(),
+                "{label}: the fallback is transient too"
+            );
             let first = requests.recv().unwrap();
             let second = requests.recv().unwrap();
             assert!(first.starts_with("GET /res/v1/llm/context?"), "{label}");
             assert!(second.starts_with("GET /res/v1/web/search?"), "{label}");
-            assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Ok, "{label}");
+            assert_eq!(
+                board.status_for(Some("test-key-123")),
+                WebSearchStatus::Ok,
+                "{label}"
+            );
         }
     }
 
     #[tokio::test]
     async fn a_key_verdict_from_llm_context_is_final() {
         for (status, told, verdict) in [
-            (401, "The web search key was rejected.", WebSearchStatus::Rejected),
+            (
+                401,
+                "The web search key was rejected.",
+                WebSearchStatus::Rejected,
+            ),
             (429, "allowance is used up", WebSearchStatus::Quota),
         ] {
             let (port, requests) = stub(
@@ -3380,7 +3455,10 @@ mod tests {
             let copy = text_of(&result, 0);
             assert!(copy.contains(told), "{status}: {copy}");
             assert_eq!(result.content.len(), 1, "{status}: a miss carries no card");
-            assert!(stub_of(&result).is_none(), "{status}: a miss quotes nothing of Brave's");
+            assert!(
+                stub_of(&result).is_none(),
+                "{status}: a miss quotes nothing of Brave's"
+            );
             assert_eq!(board.status_for(Some("test-key-123")), verdict, "{status}");
             requests.recv().unwrap();
             assert!(
@@ -3402,7 +3480,10 @@ mod tests {
         let board = fresh_board();
         let copy = text_of(&context_against(port, board, None).await, 0);
         assert!(copy.contains("The web search key was rejected."), "{copy}");
-        assert_eq!(board.status_for(Some("test-key-123")), WebSearchStatus::Rejected);
+        assert_eq!(
+            board.status_for(Some("test-key-123")),
+            WebSearchStatus::Rejected
+        );
     }
 
     #[tokio::test]
@@ -3416,7 +3497,10 @@ mod tests {
         let copy = text_of(&result, 0);
         assert!(copy.contains("said the web search"), "{copy}");
         requests.recv().unwrap();
-        assert!(requests.recv().unwrap().starts_with("GET /res/v1/web/search?"));
+        assert!(requests
+            .recv()
+            .unwrap()
+            .starts_with("GET /res/v1/web/search?"));
     }
 
     // ── The MCP surface ───────────────────────────────────────────────────

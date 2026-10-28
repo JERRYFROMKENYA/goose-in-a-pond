@@ -1405,3 +1405,26 @@ saved, as an idle lane job, not on its first step.
   the prime; the lane job.
 - **P12 — the household's controls.** Approvals, the task panel in both UIs, phone milestones.
 - **P13 — on the Orin.** One task longer than any window, run end to end with the pond serving.
+
+### 8.7 P11's seams
+
+- **Two extensions.** `giap-tasks` is the prime's (`task_start`, `task_status`, `task_cancel`),
+  withheld from guests and from subagents, so a helper cannot start a task. `giap-task-work` is
+  the helpers' (`plan_write`, `artifact_list`, `artifact_read`, `artifact_write`, `step_report`),
+  withheld from guests and subtracted from every top-level turn's allow set and entitlement. Only
+  the runner's root authority grants it.
+- **Who is calling.** A helper's call carries its own engine session id.
+  `process_child_sessions().parent_of(id)` gives the runner's root session for that step, and
+  `process_step_bindings().binding_for(root)` gives the task, the step and the owner's scope. A
+  call that resolves to nothing is refused in one sentence.
+- **What the tools write.** `artifact_write` and `plan_write` go straight to the ledger
+  (`plan_write` validates first and replaces only open steps). `step_report` is recorded on the
+  binding, and the runner applies it after the run, so state transitions have one author.
+- **The runner.** A lane loop modeled on `run_proactive_reviewer`: it claims `LongTaskStep`, takes
+  the slot only when a task is runnable, runs one helper per slot, and cancels on household
+  activity. Which helper to run next is a pure function in `pond-core`: the planner for a task
+  in `Planning` or with blocked steps, else the next ready step's role, then the verifier when
+  that step has an acceptance check.
+- **Outward effects.** Subagents are already denied device control, notifications, scheduling,
+  rides and cameras (`groups_denied_to_subagents`), so in P11 no step can act outward at all. P12
+  adds the approval path that lets one do so.

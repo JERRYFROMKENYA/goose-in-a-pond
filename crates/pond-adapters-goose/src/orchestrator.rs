@@ -879,7 +879,10 @@ async fn drive_run(
     let plan_child_session_id = plan.child_session_id.clone();
     // Invariant 3. A child of a turn holding the device takes the hold's one permit: acquiring the
     // process permits deadlocks on its own parent, and `needed = 0` lets siblings overlap.
-    let (device, needed) = match ledger.inherited_child_permits(&parent_session_id) {
+    let inherited = ledger.inherited_child_permits(&parent_session_id);
+    // Inheriting the hold means a live parent turn is waiting on this child.
+    let prime_waiting = inherited.is_some();
+    let (device, needed) = match inherited {
         Some(siblings) => (siblings, 1),
         None => (permits, subagent_permits(&provider_name)),
     };
@@ -920,8 +923,11 @@ async fn drive_run(
     let _bound = pond_core::shared::services::child_sessions::process_child_sessions()
         .bind(&plan_child_session_id, &parent_session_id);
     // A child's engine calls take the model's one context rather than a second beside the parent's.
-    let outcome =
-        goose_providers::request_context::as_helper(runner.run(plan, cancel.clone())).await;
+    let outcome = goose_providers::request_context::as_helper(
+        prime_waiting,
+        runner.run(plan, cancel.clone()),
+    )
+    .await;
     runner.release(&plan_child_session_id).await;
 
     let (status, result, error) = match outcome {

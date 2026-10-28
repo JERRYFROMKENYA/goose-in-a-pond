@@ -3060,6 +3060,19 @@ impl GooseAdapter {
             }
         });
 
+        // A long task's work tools belong to its helpers alone: a turn has no step to work on.
+        let allowed_tools: HashSet<String> =
+            pond_core::mcp::services::tool_selection::subtract_helper_only_tools(
+                allowed_tools.iter(),
+            )
+            .into_iter()
+            .collect();
+        let entitled_tools = entitled_tools.map(|tools| {
+            pond_core::mcp::services::tool_selection::subtract_helper_only_tools(tools.iter())
+                .into_iter()
+                .collect()
+        });
+
         // A recipe's YAML `extensions:` narrow this turn to those groups, in every mode.
         let allowed_tools = if let Some(allowlist) = &request.tool_group_allowlist {
             let before = allowed_tools.len();

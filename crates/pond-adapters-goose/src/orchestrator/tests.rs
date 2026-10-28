@@ -148,8 +148,9 @@ struct FakeRunnerState {
     session_seq: AtomicUsize,
     /// The parent's reserved fraction, read inside the run: the only moment the claim exists.
     reserved_during_run: Mutex<Vec<f32>>,
-    /// Whether the run's engine calls were helper calls, read where the engine would read it.
-    helper_during_run: Mutex<Vec<bool>>,
+    /// Whether the run's engine calls were helper calls, and whether a turn waited on them, read
+    /// where the engine would read them.
+    helper_during_run: Mutex<Vec<(bool, bool)>>,
     /// The parent the child's session resolved to during the run, as a tool server sees it.
     parent_during_run: Mutex<Vec<Option<String>>>,
 }
@@ -225,7 +226,10 @@ impl ChildRunner for FakeRunner {
             .helper_during_run
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(goose_providers::request_context::is_helper());
+            .push((
+                goose_providers::request_context::is_helper(),
+                goose_providers::request_context::prime_is_waiting(),
+            ));
         self.state
             .parent_during_run
             .lock()
@@ -487,9 +491,9 @@ async fn a_childs_engine_calls_are_helper_calls() {
             .helper_during_run
             .lock()
             .unwrap_or_else(|e| e.into_inner()),
-        vec![true],
+        vec![(true, false)],
         "a child ran outside the helper scope, so the engine would put it beside the parent's \
-         context instead of in it"
+         context instead of in it; and with no turn holding the device, nobody waits on it"
     );
     assert!(
         !goose_providers::request_context::is_helper(),
@@ -510,6 +514,38 @@ async fn a_childs_engine_calls_are_helper_calls() {
             .parent_of(&child)
             .is_none(),
         "a finished child must stop resolving to {parent}"
+    );
+}
+
+/// A turn holding the device waits on its child, so the engine may set that turn's cache aside.
+#[tokio::test]
+async fn a_child_of_a_live_turn_says_the_turn_is_waiting() {
+    let _serial = ONE_RUN_AT_A_TIME.lock().await;
+    let parent = "waiting-parent";
+    let role = role("researcher", &["giap-weather"]);
+    let env = env_with(
+        "ollama",
+        parent_tools(&[("giap-weather", &["get_weather"])]),
+    );
+    let runner = Arc::new(FakeRunner::new(env));
+    let state = runner.state.clone();
+    let (orchestrator, _turn, token) = live_turn_for(parent, runner);
+    let claim = claim_device_for_turn(parent, "ollama", &token).await;
+    assert!(claim.is_some(), "an on-device turn took no device claim");
+
+    orchestrator
+        .spawn(spec_for_parent(&role, &["giap-weather"], parent))
+        .await
+        .unwrap();
+    drop(claim);
+
+    assert_eq!(
+        *state
+            .helper_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+        vec![(true, true)],
+        "a child its turn waits on must say so, or the engine rebuilds the turn afterwards"
     );
 }
 

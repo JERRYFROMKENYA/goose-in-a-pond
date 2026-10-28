@@ -13,6 +13,7 @@ import {
   type CompactionReport,
   type ContextIndexHealth,
   type ContextIndexRebuild,
+  type DeepResearchAvailability,
   type LaneRunResult,
   type LaneStatus,
   type AccountSyncSummary,
@@ -1675,6 +1676,26 @@ export class PondApiClient {
     return Array.isArray(r) ? r : [];
   }
 
+  /**
+   * Whether the pond can run deep research for this caller. `null` from an older pond, which has no
+   * such route (or answers a page that is not JSON), so the caller hides the item rather than guess.
+   */
+  async getDeepResearchAvailability(): Promise<DeepResearchAvailability | null> {
+    let answer: unknown;
+    try {
+      answer = await this.get<unknown>("/api/v1/long-tasks/deep-research");
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 404 || e.status === 405 || e.status === 501)) return null;
+      throw e;
+    }
+    if (typeof answer !== "object" || answer === null) return null;
+    const { available, reason } = answer as { available?: unknown; reason?: unknown };
+    if (available === true) return { available: true };
+    // Any reason but "unidentified", including one a newer pond adds, hides the item.
+    if (available === false) return { available: false, reason: reason === "unidentified" ? "unidentified" : "off" };
+    return null;
+  }
+
   /** One task, its steps and its artifacts. 404 for a task the caller does not reach. */
   getLongTask(id: string): Promise<LongTask> {
     return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}`);
@@ -1742,6 +1763,7 @@ export class PondApiClient {
     canvasMode?: boolean,
     images?: ImageAttachment[],
     resumable?: boolean,
+    deepResearch?: boolean,
   ): AsyncGenerator<ChatEvent> {
     const reqBody: ChatStreamRequest = {
       message,
@@ -1751,6 +1773,7 @@ export class PondApiClient {
       ...(images && images.length > 0 ? { images } : {}),
       // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
+      ...(deepResearch ? { deep_research: true } : {}),
     };
     yield* this.streamSse("/api/v1/chat/stream", reqBody, token);
   }

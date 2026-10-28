@@ -31,6 +31,16 @@ export function startedTaskIdOfRow(row: Pick<SessionMessage, "role" | "content">
   return startedTaskId(row.content);
 }
 
+/** A task that does not say what it is for (an older pond) is a general one. */
+export function isResearch(task: Pick<LongTask, "kind">): boolean {
+  return task.kind === "research";
+}
+
+/** What the card calls itself for assistive tech: a research task by its name, any other by what it is. */
+export function taskKindLabel(task: Pick<LongTask, "kind">): string {
+  return isResearch(task) ? "Deep research" : "Long task";
+}
+
 export function isEnded(state: LongTaskState): boolean {
   return state === "completed" || state === "failed" || state === "cancelled";
 }

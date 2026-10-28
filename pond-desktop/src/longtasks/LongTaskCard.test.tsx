@@ -97,6 +97,40 @@ describe("a long task under way", () => {
   });
 });
 
+describe("a deep research task", () => {
+  it("is labelled Deep research where a general task says it is a long task", () => {
+    show(taskOf({ kind: "research", goal: "What changed in Kenya's tax rules?" }));
+    expect(screen.getByRole("group", { name: "Deep research: What changed in Kenya's tax rules?" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: /^Long task:/ })).toBeNull();
+    expect(document.querySelector(".lt")?.getAttribute("data-kind")).toBe("research");
+  });
+
+  it("says Deep research on the card, above what it is for", () => {
+    show(taskOf({ kind: "research" }));
+    const kicker = document.querySelector(".lt__kind");
+    expect(kicker?.textContent).toBe("Deep research");
+    expect(kicker?.nextElementSibling?.className).toBe("lt__head");
+  });
+
+  it("keeps the same steps, state line and Stop as any other task", () => {
+    show(taskOf({ kind: "research" }));
+    expect(screen.getByText("Working: step 2 of 4")).toBeTruthy();
+    expect(stopButton()).not.toBeNull();
+  });
+
+  it("is drawn the same on the hub", () => {
+    show(taskOf({ kind: "research" }), {}, "hub");
+    expect(document.querySelector(".lt.lt--hub .lt__kind")).not.toBeNull();
+  });
+
+  it.each([{ kind: "general" as const }, {}])("says nothing extra for a task of kind %o", (over) => {
+    show(taskOf(over));
+    expect(document.querySelector(".lt__kind")).toBeNull();
+    expect(screen.getByRole("group", { name: "Long task: Plan a trip to Lamu" })).toBeTruthy();
+    expect(document.querySelector(".lt")?.getAttribute("data-kind")).toBe("general");
+  });
+});
+
 describe("stopping a task", () => {
   it("asks first, in words that say what happens to a step under way", async () => {
     const longTasks = show(taskOf());
@@ -280,6 +314,21 @@ describe("the cards of a conversation", () => {
     expect(screen.getByRole("region", { name: "Long tasks in this conversation" })).toBeTruthy();
     expect(screen.getByText("Book the ferry")).toBeTruthy();
     expect(screen.queryByText("Plan a trip to Lamu")).toBeNull();
+  });
+
+  it("names the group for deep research when that is all it holds", () => {
+    const longTasks = fakeLongTasks({ tasks: { [TASK_ID]: taskOf({ kind: "research" }) } });
+    render(<LongTaskStrays anchored={new Set()} longTasks={longTasks} variant="classic" />);
+    expect(screen.getByRole("region", { name: "Deep research in this conversation" })).toBeTruthy();
+    expect(screen.queryByText("Long tasks in this conversation")).toBeNull();
+  });
+
+  it("keeps the long-task name for a group that mixes kinds", () => {
+    const longTasks = fakeLongTasks({
+      tasks: { [TASK_ID]: taskOf({ kind: "research" }), [OTHER_ID]: doneTask({ id: OTHER_ID, goal: "Book the ferry" }) },
+    });
+    render(<LongTaskStrays anchored={new Set()} longTasks={longTasks} variant="classic" />);
+    expect(screen.getByRole("region", { name: "Long tasks in this conversation" })).toBeTruthy();
   });
 
   it("draws no group when every task is anchored, or on a pond that has none", () => {

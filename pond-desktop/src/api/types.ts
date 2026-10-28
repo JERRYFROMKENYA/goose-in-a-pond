@@ -1000,11 +1000,16 @@ export interface LongTaskArtifact {
   created_at: string;
 }
 
+/** What a task is for; spellings are pond-core's `LongTaskKind`. */
+export type LongTaskKind = "general" | "research";
+
 /** A long task as the chat card shows it. */
 export interface LongTask {
   id: string;
   goal: string;
   state: LongTaskState;
+  /** Absent from an older pond, which only has general tasks. */
+  kind?: LongTaskKind;
   origin_session_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1046,7 +1051,17 @@ export interface ChatStreamRequest {
   images?: ImageAttachment[];
   /** Ask the server to keep this turn running if the connection drops. */
   resumable?: boolean;
+  /** The message is a research question: the pond starts deep research on it. */
+  deep_research?: boolean;
 }
+
+/**
+ * Answer of `GET /long-tasks/deep-research`. `off` means the household switched long tasks or the
+ * orchestrator off; `unidentified` means the pond cannot tell who is asking.
+ */
+export type DeepResearchAvailability =
+  | { available: true }
+  | { available: false; reason: "off" | "unidentified" };
 
 /** What the server is still driving for a session, from `GET .../active-run`. */
 export interface ActiveRun {

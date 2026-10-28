@@ -75,6 +75,7 @@ function friendlyToolStatus(rawName: string): string {
     get_user_profile: "Looking up your profile…",
     list_skills: "Checking my skills…",
     search_web: "Searching the web…",
+    task_start: "Getting that started…",
   };
   if (map[bare]) return map[bare];
   return `Working on: ${bare.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}…`;
@@ -203,8 +204,13 @@ export interface RefusedDraft {
   attachments: PreparedImage[];
   /** The server's `error` sentence; a composer appends its own clause. */
   message: string;
-  /** The server's `code`, e.g. "vision_not_ready"; absent when the error had no structured body. */
+  /**
+   * The server's `code` (e.g. "vision_not_ready"), else the `reason` of a refusal that names one
+   * (deep research's); absent when the error had no structured body.
+   */
   code?: string;
+  /** The refused turn was a research question, so a composer can put its mode back. */
+  deepResearch?: boolean;
 }
 
 /** App state and dispatch from `AppContextProvider`; the module-scope driver has neither. */
@@ -385,6 +391,15 @@ export interface SendTurn {
    * and ignored if passed: a refused turn must hand back something the tray can re-render.
    */
   attachments?: PreparedImage[];
+  /** The text is a research question: the pond starts deep research on it. Never queued. */
+  deepResearch?: boolean;
+}
+
+/** `code` where the body has one, else its `reason`: deep research's refusals name theirs that way. */
+function refusalCode(e: ApiError): string | undefined {
+  if (e.code) return e.code;
+  const reason = (e.body as { reason?: unknown } | null | undefined)?.reason;
+  return typeof reason === "string" ? reason : undefined;
 }
 
 /** Takes and clears the refused draft, so a double effect or a second composer can't restore it twice. */
@@ -400,7 +415,8 @@ export function takeRefusedDraft(): RefusedDraft | null {
 /** Send, or queue while a reply streams. Attachments never queue: they belong to their turn. */
 export function sendTurn(turn: SendTurn): void {
   if (state.busy) {
-    if (!turn.text) return;
+    // The queue holds text only, so a research question queued would run as an ordinary message.
+    if (!turn.text || turn.deepResearch) return;
     state.queued = [...state.queued, turn.text];
     commit();
     return;
@@ -707,6 +723,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
         images,
         // Resumable: the run outlives this window, which the reattach path depends on.
         true,
+        turn.deepResearch ? true : undefined,
       ),
       ctx,
     );
@@ -721,7 +738,13 @@ async function runTurn(turn: SendTurn): Promise<void> {
       );
       // Handed back, not revoked: the composer's tray renders them again.
       for (const url of previewUrls) state.ownedPreviews.delete(url);
-      state.refusedDraft = { text, attachments, message: e.message, code: e.code };
+      state.refusedDraft = {
+        text,
+        attachments,
+        message: e.message,
+        code: refusalCode(e),
+        ...(turn.deepResearch ? { deepResearch: true } : {}),
+      };
     } else {
       // Also logged: with no surface mounted, the bubble isn't read until someone comes back.
       console.warn("Chat turn failed:", e);

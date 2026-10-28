@@ -178,6 +178,11 @@ export async function mockAllApiRoutes(page: Page): Promise<void> {
     }),
   );
 
+  // Asked by both chat composers on mount; unmocked it reaches the network and fails console checks.
+  await page.route("**/api/v1/long-tasks/deep-research", (route) =>
+    route.fulfill({ json: { available: true } }),
+  );
+
   await page.route("**/api/v1/devices", (route) =>
     route.fulfill({
       json: {

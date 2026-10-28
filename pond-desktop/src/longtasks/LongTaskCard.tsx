@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { AlertCircle, AlertTriangle, Check, CircleSlash, Clock, Loader2, Pause } from "lucide-react";
+import { AlertCircle, AlertTriangle, Check, CircleSlash, Clock, Loader2, Pause, Telescope } from "lucide-react";
 import "./longTasks.css";
 import { api } from "../api/PondApiClient";
 import type { LongTask, LongTaskArtifactBody, LongTaskState } from "../api/types";
 import { MarkdownText } from "../components/MarkdownText";
 import { useConfirm } from "../components/shared";
-import { isEnded, resultLine, resultOf, stepAgent, stepWords, taskWords } from "./longTaskWords";
+import { isEnded, isResearch, resultLine, resultOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
 import type { LongTasksState } from "./useLongTasks";
 
 function StateIcon({ state }: { state: LongTaskState }) {
@@ -96,7 +96,20 @@ export function LongTaskCard({ id, longTasks, variant }: Props) {
 
   return (
     // The thread is a polite live region; only the state line speaks, so step and summary churn stays quiet.
-    <div className={`lt lt--${variant}`} role="group" aria-label={`Long task: ${task.goal}`} aria-live="off" data-state={task.state}>
+    <div
+      className={`lt lt--${variant}`}
+      role="group"
+      aria-label={`${taskKindLabel(task)}: ${task.goal}`}
+      aria-live="off"
+      data-state={task.state}
+      data-kind={isResearch(task) ? "research" : "general"}
+    >
+      {isResearch(task) ? (
+        <p className="lt__kind" aria-hidden="true">
+          <Telescope size={12} aria-hidden="true" />
+          Deep research
+        </p>
+      ) : null}
       <div className="lt__head">
         <StateIcon state={task.state} />
         <p className="lt__goal">{task.goal}</p>

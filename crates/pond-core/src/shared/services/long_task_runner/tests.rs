@@ -224,40 +224,54 @@ fn run(status: TaskStatus, result: Option<&str>) -> TaskRun {
 #[test]
 fn a_run_settles_to_exactly_one_hand_back() {
     let reported = StepOutcome::new(OutcomeKind::Completed, "found two quotes", Vec::new(), None);
+    let done = |text: &str| run(TaskStatus::Completed, Some(text));
     assert_eq!(
         settle_run(
             Some(reported.clone()),
-            &run(TaskStatus::Completed, Some("prose"))
+            &["saved".to_string()],
+            &done("prose")
         ),
         RunEnd::Reported(reported),
-        "a reported outcome wins over the helper's last words"
+        "a reported outcome wins over saved work and the helper's last words"
     );
+    match settle_run(None, &["day-1".to_string()], &done("Here is day one.")) {
+        RunEnd::Reported(o) => {
+            assert_eq!(
+                o.outcome(),
+                OutcomeKind::Completed,
+                "saved work counts as done"
+            );
+            assert_eq!(o.artifacts(), ["day-1".to_string()]);
+            assert_eq!(o.summary(), "Here is day one.");
+        }
+        other => panic!("expected the saved work, got {other:?}"),
+    }
     match settle_run(
         None,
-        &run(
-            TaskStatus::Completed,
-            Some(r#"{"outcome": "completed", "summary": "done from text"}"#),
-        ),
+        &[],
+        &done(r#"{"outcome": "completed", "summary": "done from text"}"#),
     ) {
         RunEnd::Reported(o) => assert_eq!(o.summary(), "done from text"),
         other => panic!("expected a parsed report, got {other:?}"),
     }
-    match settle_run(
-        None,
-        &run(TaskStatus::Completed, Some("I think it went fine")),
-    ) {
+    match settle_run(None, &[], &done("I think it went fine")) {
         RunEnd::Reported(o) => assert_eq!(
             o.outcome(),
             OutcomeKind::Failed,
-            "prose without a report must never count as done"
+            "prose with no report and nothing saved must never count as done"
         ),
         other => panic!("expected a failure, got {other:?}"),
     }
     assert_eq!(
-        settle_run(None, &run(TaskStatus::Cancelled, None)),
-        RunEnd::Preempted
+        settle_run(
+            None,
+            &["saved".to_string()],
+            &run(TaskStatus::Cancelled, None)
+        ),
+        RunEnd::Preempted,
+        "a stopped run reruns, even if it saved something"
     );
-    match settle_run(None, &run(TaskStatus::TurnBudgetExhausted, None)) {
+    match settle_run(None, &[], &run(TaskStatus::TurnBudgetExhausted, None)) {
         RunEnd::Reported(o) => assert_eq!(o.outcome(), OutcomeKind::Failed),
         other => panic!("expected a failure, got {other:?}"),
     }

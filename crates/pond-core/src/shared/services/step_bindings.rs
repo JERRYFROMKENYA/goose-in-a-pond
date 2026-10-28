@@ -39,6 +39,8 @@ pub struct StepBinding {
 struct Entry {
     binding: StepBinding,
     report: Option<StepOutcome>,
+    /// What the run saved, so a helper that did its work but never reported is not failed.
+    written: Vec<String>,
 }
 
 #[derive(Default)]
@@ -61,6 +63,7 @@ impl StepBindings {
                 Entry {
                     binding,
                     report: None,
+                    written: Vec::new(),
                 },
             );
         StepBindingLease {
@@ -105,6 +108,20 @@ impl StepBindings {
     }
 }
 
+impl StepBindings {
+    /// Records an artifact the bound run saved; ignored once the run has ended.
+    pub fn note_artifact(&self, root_session_id: &str, artifact_id: &str) {
+        if let Some(entry) = self
+            .entries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(root_session_id)
+        {
+            entry.written.push(artifact_id.to_string());
+        }
+    }
+}
+
 /// Holds one run's binding; dropping it unbinds the run.
 pub struct StepBindingLease {
     bindings: Weak<StepBindings>,
@@ -122,6 +139,23 @@ impl StepBindingLease {
                 .get_mut(&self.root)
                 .and_then(|entry| entry.report.take())
         })
+    }
+}
+
+impl StepBindingLease {
+    /// The artifacts the run saved, taken once.
+    pub fn take_written(&self) -> Vec<String> {
+        self.bindings
+            .upgrade()
+            .and_then(|bindings| {
+                bindings
+                    .entries
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get_mut(&self.root)
+                    .map(|entry| std::mem::take(&mut entry.written))
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -186,6 +220,19 @@ mod tests {
         );
         drop(lease);
         assert_eq!(bindings.binding_for("sched-long-task-1"), None);
+    }
+
+    #[test]
+    fn what_a_run_saved_is_kept_for_the_runner_only_while_bound() {
+        let bindings = Arc::new(StepBindings::new());
+        let lease = bindings.bind("root", binding());
+        bindings.note_artifact("root", "a1");
+        bindings.note_artifact("other", "a2");
+        assert_eq!(lease.take_written(), vec!["a1".to_string()]);
+        assert!(lease.take_written().is_empty(), "taken once");
+        drop(lease);
+        bindings.note_artifact("root", "late");
+        assert_eq!(bindings.binding_for("root"), None);
     }
 
     #[test]

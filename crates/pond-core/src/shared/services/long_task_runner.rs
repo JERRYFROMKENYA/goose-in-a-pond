@@ -293,18 +293,33 @@ pub enum RunEnd {
     Preempted,
 }
 
-/// One hand-back per run: the reported one, else one read from the helper's last text, else a
-/// failure that says why there is none.
-pub fn settle_run(reported: Option<StepOutcome>, run: &TaskRun) -> RunEnd {
-    match run.status {
-        TaskStatus::Cancelled => return RunEnd::Preempted,
-        TaskStatus::TurnBudgetExhausted if reported.is_none() => {
-            return RunEnd::Reported(failed("the helper ran out of turns before reporting"))
-        }
-        _ => {}
+/// One hand-back per run: the reported one; else, when the helper saved work, that work; else one
+/// read from its last text; else a failure that says why there is none.
+pub fn settle_run(reported: Option<StepOutcome>, written: &[String], run: &TaskRun) -> RunEnd {
+    if run.status == TaskStatus::Cancelled {
+        return RunEnd::Preempted;
     }
     if let Some(outcome) = reported {
         return RunEnd::Reported(outcome);
+    }
+    // Small models often save their work and stop without reporting; the work is the evidence.
+    if !written.is_empty() {
+        let summary = run
+            .result
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Saved {} artifact(s).", written.len()));
+        return RunEnd::Reported(StepOutcome::new(
+            OutcomeKind::Completed,
+            &summary,
+            written.to_vec(),
+            None,
+        ));
+    }
+    if run.status == TaskStatus::TurnBudgetExhausted {
+        return RunEnd::Reported(failed("the helper ran out of turns before reporting"));
     }
     match run.result_for_parent().map(StepOutcome::parse) {
         Some(Ok(outcome)) => RunEnd::Reported(outcome),

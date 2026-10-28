@@ -132,6 +132,10 @@ pub enum Refusal {
     UnknownArtifact(String),
     UnknownArtifacts(Vec<String>),
     NotThePlanner,
+    /// The planner and the checker save nothing of their own; only a step's worker does.
+    NotAWorker,
+    /// The planner's hand-back is its plan.
+    PlannerDoesNotReport,
     /// The run ended between resolving the binding and recording the report.
     ReportTooLate,
     /// A domain refusal, whose text is already written for the model.
@@ -174,6 +178,12 @@ impl Refusal {
             Refusal::NotThePlanner => "Only the planner may change this task's plan. Do your own \
                  step, then call step_report."
                 .to_string(),
+            Refusal::NotAWorker => "Only a step's worker saves artifacts. If you are planning, \
+                 write the steps with plan_write; if you are checking, call step_report."
+                .to_string(),
+            Refusal::PlannerDoesNotReport => "The planner does not report a step. Write the plan \
+                 with plan_write; that is your whole job."
+                .to_string(),
             Refusal::ReportTooLate => {
                 "This step has already ended, so the report was not kept.".to_string()
             }
@@ -198,6 +208,8 @@ impl Refusal {
             Refusal::UnknownArtifact(_) => "unknown_artifact",
             Refusal::UnknownArtifacts(_) => "unknown_artifacts",
             Refusal::NotThePlanner => "not_the_planner",
+            Refusal::NotAWorker => "not_a_worker",
+            Refusal::PlannerDoesNotReport => "planner_does_not_report",
             Refusal::ReportTooLate => "report_too_late",
             Refusal::Rejected(_) => "rejected",
             Refusal::Store(_) => "store_failed",
@@ -344,7 +356,7 @@ impl TasksMcpServer {
     #[tool(description = "\
 Start a long task: work too big for one reply, such as researching and comparing options or \
 going through a long document. The pond plans it and works on it step by step while the house is \
-quiet, then reports back here. `goal` = what the finished work should give the person. Not for \
+quiet, then tells the person on their phone. `goal` = what the finished work should give the person. Not for \
 anything you can answer now.")]
     async fn task_start(
         &self,
@@ -462,8 +474,8 @@ impl TasksMcpServer {
             max_steps = task.budget().max_steps(),
         );
         Ok(format!(
-            "Started task {}. The pond works on it while the household is quiet and reports back \
-             in this conversation when it is done. Tell the person it has started; task_status \
+            "Started task {}. The pond works on it while the household is quiet and tells the \
+             person on their phone when it is done. Tell the person it has started; task_status \
              with this id says how far it has got.",
             task.id()
         ))
@@ -839,6 +851,7 @@ impl Default for TaskWorkMcpServer {
 #[tool_router]
 impl TaskWorkMcpServer {
     /// All tools, without constructing the server; the generated `tool_router()` is private.
+    #[cfg(test)]
     pub(crate) fn tool_defs() -> Vec<rmcp::model::Tool> {
         Self::tool_router().list_all()
     }
@@ -1047,6 +1060,9 @@ impl TaskWorkMcpServer {
         mut params: ArtifactWriteParams,
     ) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
+        if !matches!(helper.binding.work, StepWork::Do(_)) {
+            return Err(Refusal::NotAWorker);
+        }
         let kind = match non_blank(params.kind.take()) {
             None => ArtifactKind::Note,
             Some(raw) => ArtifactKind::parse(&raw).ok_or_else(|| {
@@ -1087,6 +1103,7 @@ impl TaskWorkMcpServer {
             .insert_artifact(&artifact)
             .await
             .map_err(store)?;
+        self.bindings.note_artifact(&helper.root, artifact.id());
         Ok(format!(
             "Saved artifact `{}` ({} tokens). Name it in step_report's artifacts so later steps \
              can find it.",
@@ -1097,6 +1114,9 @@ impl TaskWorkMcpServer {
 
     async fn run_report(&self, meta: &Meta, params: StepReportParams) -> Result<String, Refusal> {
         let helper = self.helper(meta)?;
+        if helper.binding.work == StepWork::Plan {
+            return Err(Refusal::PlannerDoesNotReport);
+        }
         let outcome = StepOutcome::from_json(&report_object(params))
             .map_err(|e| Refusal::Rejected(e.to_string()))?;
         if !outcome.artifacts().is_empty() {

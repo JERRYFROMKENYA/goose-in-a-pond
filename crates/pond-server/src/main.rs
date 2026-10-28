@@ -3871,7 +3871,8 @@ async fn run_server(
     if pond_mcp_server::installed_orchestrator_deps().is_some() {
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
-        if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.hand_bell())) {
+        // The nudge, not the hand bell: a task started mid-turn must still wait for quiet.
+        if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.nudge_bell())) {
             tokio::spawn(run_long_task_runner(
                 settings_repo.clone(),
                 session_storage.clone(),
@@ -7232,7 +7233,8 @@ impl LongTaskHelpers {
         watcher.abort();
         drop(lease);
         let reported = binding.take_report();
-        Ok(runner::settle_run(reported, &run?))
+        let written = binding.take_written();
+        Ok(runner::settle_run(reported, &written, &run?))
     }
 }
 

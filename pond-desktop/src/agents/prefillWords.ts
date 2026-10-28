@@ -5,6 +5,7 @@ const BUILT_IN_LABELS: Record<string, string> = {
   "long-task-planner": "Long-task planner",
   "long-task-worker": "Long-task worker",
   "long-task-verifier": "Long-task verifier",
+  "long-task-composer": "Long-task composer",
 };
 
 /** A built-in by its job; anything else by the name it was saved under. */

@@ -54,6 +54,13 @@ vi.mock("../api/PondApiClient", () => ({
 
 const appState = vi.hoisted(() => ({ sessionId: null as string | null }));
 
+// The research card's Stop confirms; the app's Root provides the dialog, these tests do not.
+const confirmMock = vi.hoisted(() => vi.fn());
+vi.mock("../components/shared", async () => {
+  const actual = (await vi.importActual("../components/shared")) as Record<string, unknown>;
+  return { ...actual, useConfirm: () => confirmMock };
+});
+
 vi.mock("../state/useAppContext", () => ({
   useAppState: () => ({
     serverOnline: true,

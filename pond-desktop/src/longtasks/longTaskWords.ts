@@ -1,5 +1,5 @@
 // A long task in the words a household would use, and how the chat finds one in what the prime said.
-import type { LongTask, LongTaskArtifact, LongTaskState, LongTaskStep, LongTaskStepState, SessionMessage } from "../api/types";
+import type { LongTask, LongTaskAhead, LongTaskArtifact, LongTaskState, LongTaskStep, LongTaskStepState, SessionMessage } from "../api/types";
 import { agentLabel } from "../agents/prefillWords";
 
 const STARTED = /Started task ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
@@ -65,7 +65,48 @@ export function currentStep(steps: readonly LongTaskStep[]): number {
   return Math.min(finished + 1, steps.length);
 }
 
-export function taskWords(task: Pick<LongTask, "state" | "steps">): string {
+/** "1st", "2nd", "3rd", "11th", "22nd". */
+export function ordinal(n: number): string {
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1:
+      return `${n}st`;
+    case 2:
+      return `${n}nd`;
+    case 3:
+      return `${n}rd`;
+    default:
+      return `${n}th`;
+  }
+}
+
+/** An open task with another ahead of it in the one line the pond works through. */
+export function isWaiting(task: Pick<LongTask, "state" | "queue">): boolean {
+  return !isEnded(task.state) && (task.queue?.position ?? 1) > 1;
+}
+
+/** Where a task stands in the line: the one under way, or its place. */
+export function placeWords(position: number): string {
+  return position <= 1 ? "Working now" : `${ordinal(position)} in line`;
+}
+
+export function isOwnAhead(ahead: LongTaskAhead): ahead is Extract<LongTaskAhead, { id: string }> {
+  return "id" in ahead;
+}
+
+/** Who is ahead, without naming another member's task: "Ahead of this one: 2 of your tasks and 1 for another member." */
+export function aheadWords(ahead: readonly LongTaskAhead[]): string {
+  const yours = ahead.filter(isOwnAhead).length;
+  const others = ahead.length - yours;
+  const parts: string[] = [];
+  if (yours > 0) parts.push(yours === 1 ? "1 of your tasks" : `${yours} of your tasks`);
+  if (others > 0) parts.push(others === 1 ? "1 for another member" : `${others} for other members`);
+  return `Ahead of this one: ${parts.join(" and ")}.`;
+}
+
+export function taskWords(task: Pick<LongTask, "state" | "steps"> & Partial<Pick<LongTask, "queue">>): string {
+  if (isWaiting({ state: task.state, queue: task.queue })) return `Waiting its turn: ${placeWords(task.queue?.position ?? 1)}`;
   switch (task.state) {
     case "planning":
       return "Planning";

@@ -1,7 +1,7 @@
 //! Deep research a member asks for from the chat: the research task it starts, the `task_start`
 //! call the turn's stream opens with, and what the prime is told about it.
 use crate::mcp::domain::tool_group::TASKS_EXTENSION;
-use crate::shared::domain::agent::AgentStreamEvent;
+use crate::shared::domain::agent::{AgentStreamEvent, DeepResearchTurn};
 use crate::shared::domain::long_task::{LongTask, LongTaskBudget, LongTaskError, LongTaskKind};
 use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
@@ -57,13 +57,19 @@ pub fn opening_events(question: &str, task_id: &str) -> [AgentStreamEvent; 2] {
 
 /// What the prime is told on a turn whose question the pond already handed to deep research, so
 /// its reply is a short acknowledgement and never a second, unresearched answer.
-pub fn turn_note(task_id: &str) -> String {
+pub fn turn_note(turn: &DeepResearchTurn) -> String {
+    let waiting = turn
+        .waiting
+        .as_deref()
+        .map(|line| format!(" {line}"))
+        .unwrap_or_default();
     format!(
         "<deep-research>\nThe person asked for deep research on their message, and the pond has \
-         started task {task_id} on it: helpers will search, compare sources and write a report, \
-         and the person is told on their phone when it is done. Reply in one or two sentences \
-         saying what will be looked into. Do not answer the question yourself, and do not call \
-         task_start.\n</deep-research>"
+         started task {} on it: helpers will search, compare sources and write a report, \
+         and the person is told on their phone when it is done.{waiting} Reply in one or two \
+         sentences saying what will be looked into. Do not answer the question yourself, and do \
+         not call task_start.\n</deep-research>",
+        turn.task_id
     )
 }
 
@@ -122,7 +128,10 @@ mod tests {
 
     #[test]
     fn the_turn_note_names_its_task_and_keeps_the_prime_from_answering() {
-        let note = turn_note("task-7");
+        let note = turn_note(&DeepResearchTurn {
+            task_id: "task-7".to_string(),
+            waiting: None,
+        });
         assert!(note.contains("task-7"));
         assert!(note.contains("Do not answer the question yourself"));
         assert!(
@@ -130,5 +139,15 @@ mod tests {
             "a second task_start would start it twice"
         );
         assert!(note.starts_with("<deep-research>") && note.ends_with("</deep-research>"));
+        assert!(!note.contains("in line"));
+
+        let queued = turn_note(&DeepResearchTurn {
+            task_id: "task-7".to_string(),
+            waiting: Some("It is number 2 in line.".to_string()),
+        });
+        assert!(
+            queued.contains("done. It is number 2 in line. Reply"),
+            "{queued}"
+        );
     }
 }

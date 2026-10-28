@@ -3986,3 +3986,21 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   `pond-*`/`goose*` fingerprints fixed it.
 - **Not verified.** Printing to PDF in the built Electron app. The phone's report and share
   screens (goose-on-the-go #200 and its follow-up) on a device.
+
+**2026-10-29 — PAI-6: the line long tasks wait in (section 8.9).**
+
+- **Why.** On the Orin a member's deep research waited an hour behind an older task, with its card
+  saying "Planning", and they asked twice more. The runner's pick by `updated_at` was meant to let
+  tasks take turns. A step never touches `updated_at`, so in practice the oldest task always won.
+- **What landed.** `long_task_queue::run_order` is the one order: the order tasks were asked for.
+  The runner, every task's view (`queue: {position, of, ahead}`) and `GET /long-tasks/queue` read
+  it. A deep-research turn and `task_start`'s result tell the prime where the new task waits. The
+  desktop card says "Waiting its turn: 3rd in line" and offers Keep going or Stop for each of the
+  member's own tasks in line.
+- **PAI-1.** Another member's task is only a place in the line, never its goal: in the views, the
+  line route, the prime's note and the card. Nobody identified gets 403 from the line route.
+- **PAI-3.** The prime's preamble is unchanged: the waiting line rides the deep-research note in the
+  turn's `<system-context>`, and `task_start`'s result is a tool result.
+- **PAI-7.** Stopping is the member's own choice on their card. Nothing is stopped for them.
+- **Not verified on the Orin yet.** The nano was running three of a member's research tasks while
+  this was written, and a deploy restarts the pond, so it waits until they finish.

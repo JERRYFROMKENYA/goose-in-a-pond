@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
+  aheadWords,
   currentStep,
+  isWaiting,
+  ordinal,
+  placeWords,
   isEnded,
   isMoving,
   isResearch,
@@ -170,5 +174,36 @@ describe("tasks no message points at", () => {
       third: taskOf({ id: "third", created_at: "2026-10-28T08:00:00Z" }),
     };
     expect(strayTasks(tasks, new Set(["third"])).map((t) => t.id)).toEqual([OTHER_ID, TASK_ID]);
+  });
+});
+
+describe("a task waiting its turn", () => {
+  const second = { position: 2, of: 3, ahead: [{ id: "a", goal: "Plan the trip", state: "running" as const }] };
+
+  it("says where it is in line instead of saying it is planning", () => {
+    expect(taskWords(taskOf({ state: "planning", steps: [], queue: second }))).toBe("Waiting its turn: 2nd in line");
+    expect(isWaiting(taskOf({ state: "planning", queue: second }))).toBe(true);
+  });
+
+  it("keeps its own words at the front of the line, once ended, and on an older pond", () => {
+    const front = { position: 1, of: 2, ahead: [] };
+    expect(taskWords(taskOf({ state: "planning", steps: [], queue: front }))).toBe("Planning");
+    expect(isWaiting(taskOf({ state: "cancelled", queue: second }))).toBe(false);
+    expect(isWaiting(taskOf({ state: "planning", queue: undefined }))).toBe(false);
+  });
+
+  it("counts places as people say them", () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101].map(ordinal)).toEqual([
+      "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "101st",
+    ]);
+    expect(placeWords(1)).toBe("Working now");
+    expect(placeWords(3)).toBe("3rd in line");
+  });
+
+  it("says who is ahead without naming another member's task", () => {
+    const mine = { id: "a", goal: "Plan the trip", state: "running" as const };
+    expect(aheadWords([mine])).toBe("Ahead of this one: 1 of your tasks.");
+    expect(aheadWords([mine, { another_member: true }, mine])).toBe("Ahead of this one: 2 of your tasks and 1 for another member.");
+    expect(aheadWords([{ another_member: true }, { another_member: true }])).toBe("Ahead of this one: 2 for other members.");
   });
 });

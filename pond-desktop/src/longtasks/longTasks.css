@@ -182,8 +182,118 @@
   margin-top: 2px;
 }
 
+/* The line a waiting task stands in. Each of the member's tasks is a two-way choice; the chosen side
+   rises on the compact offset and the other lies flat, so the choice reads without colour. */
+.lt__queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.lt__queuehead,
+.lt__queuehint,
+.lt__queuedone {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.lt__queuehint {
+  color: var(--color-text-secondary);
+}
+
+.lt__queuelist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lt__queuechoice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.lt__queuegoal {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  float: left;
+  width: 100%;
+  padding: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.lt__queuewhere {
+  color: var(--color-text-secondary);
+}
+
+.lt__queueopt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--lt-control-h);
+  padding: 0 var(--space-3);
+  border: 2px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-bold);
+  cursor: pointer;
+  transition: border-color 0.16s, box-shadow 0.16s, color 0.16s;
+}
+
+.lt__queueopt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.lt__queueopt:hover {
+  border-color: var(--color-text);
+}
+
+.lt__queueopt[data-on="true"] {
+  border-color: var(--color-text);
+  color: var(--color-text);
+  box-shadow: 2px 2px 0 var(--border-ink);
+}
+
+.lt__queueopt:has(input:focus-visible) {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.lt__queuechoice:disabled .lt__queueopt {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.lt__queueapply {
+  align-self: flex-start;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .lt .animate-spin {
     animation: none;
+  }
+
+  .lt__queueopt {
+    transition: none;
   }
 }

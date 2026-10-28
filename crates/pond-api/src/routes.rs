@@ -529,6 +529,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/long-tasks", get(list_long_tasks))
         .route("/long-tasks/deep-research", get(deep_research_availability))
+        .route("/long-tasks/queue", get(long_task_queue))
         .route("/long-tasks/{id}", get(get_long_task))
         .route("/long-tasks/{id}/cancel", post(cancel_long_task))
         .route(
@@ -2909,7 +2910,7 @@ async fn drive_turn(
     let deep_research_task = match req.deep_research_for.as_deref() {
         None => None,
         Some(member) => match start_deep_research(state, member, &req.message, &session_id).await {
-            Ok(task_id) => Some(task_id),
+            Ok(research) => Some(research),
             Err(e) => {
                 let data =
                     json!({"error": format!("Could not start deep research: {e}")}).to_string();
@@ -2942,10 +2943,11 @@ async fn drive_turn(
     } else {
         crate::thought_filter::ThoughtFilter::new()
     });
-    if let Some(task_id) = &deep_research_task {
-        for event in
-            pond_core::shared::services::deep_research::opening_events(&req.message, task_id)
-        {
+    if let Some(research) = &deep_research_task {
+        for event in pond_core::shared::services::deep_research::opening_events(
+            &req.message,
+            &research.task_id,
+        ) {
             if let StreamStep::Frame(data) = turn.absorb(event) {
                 run.push(data, false);
             }
@@ -15378,7 +15380,40 @@ async fn long_task_caller(
 
 /// A member reaches their own tasks and the household's unowned ones, like their other data.
 fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::LongTask) -> bool {
-    task.owner_profile_id().is_none_or(|owner| owner == member)
+    pond_core::shared::services::long_task_queue::reaches(Some(member), task)
+}
+
+/// Every open task, in the order the runner takes them, read once for a request.
+async fn open_long_tasks(
+    repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
+) -> anyhow::Result<Vec<pond_core::shared::domain::long_task::LongTask>> {
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    repo.list_tasks(LongTaskOwnerFilter::Everyone, false).await
+}
+
+/// Where one task waits, as `member` may see it; `null` once it is not in the line.
+fn long_task_queue_view(
+    open: &[pond_core::shared::domain::long_task::LongTask],
+    task_id: &str,
+    member: &str,
+) -> Value {
+    use pond_core::shared::services::long_task_queue::{place_of, run_order, Ahead};
+    let order = run_order(open);
+    let Some(place) = place_of(&order, task_id, Some(member)) else {
+        return Value::Null;
+    };
+    json!({
+        "position": place.position,
+        "of": place.of,
+        "ahead": place.ahead.iter().map(|ahead| match ahead {
+            Ahead::Reachable(task) => json!({
+                "id": task.id(),
+                "goal": task.goal(),
+                "state": task.state(),
+            }),
+            Ahead::AnotherMember => json!({"another_member": true}),
+        }).collect::<Vec<_>>(),
+    })
 }
 
 fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::SqliteLongTaskRepository {
@@ -15390,6 +15425,7 @@ fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::Sqlite
 async fn long_task_view(
     repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
     task: &pond_core::shared::domain::long_task::LongTask,
+    queue: Value,
 ) -> anyhow::Result<Value> {
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
     let steps = repo.list_steps(task.id()).await?;
@@ -15415,6 +15451,7 @@ async fn long_task_view(
         })).collect::<Vec<_>>(),
         "artifacts": artifacts,
         "result_artifact_id": result,
+        "queue": queue,
     }))
 }
 
@@ -15506,24 +15543,34 @@ async fn start_deep_research(
     member: &str,
     question: &str,
     session_id: &str,
-) -> anyhow::Result<String> {
-    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+    let repo = long_task_repo(state);
     let task = pond_core::shared::services::deep_research::research_task(
         member,
         question,
         session_id,
         chrono::Utc::now(),
     )?;
-    long_task_repo(state).create_task(&task).await?;
+    repo.create_task(&task).await?;
+    let open = repo
+        .list_tasks(LongTaskOwnerFilter::Everyone, false)
+        .await?;
+    let place = place_of(&run_order(&open), task.id(), Some(member));
     tracing::info!(
         target: "giap::trace",
         kind = "long_task_started",
         task_id = %task.id(),
         origin_session_id = %session_id,
         research = true,
+        position = place.as_ref().map(|p| p.position),
         "a member asked for deep research"
     );
-    Ok(task.id().to_string())
+    Ok(pond_core::shared::domain::agent::DeepResearchTurn {
+        task_id: task.id().to_string(),
+        waiting: place.as_ref().and_then(waiting_line),
+    })
 }
 
 /// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
@@ -15575,9 +15622,20 @@ async fn list_long_tasks(
             .is_none_or(|session| task.origin_session_id() == Some(session))
     });
     tasks.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
+    let open = match open_long_tasks(&repo).await {
+        Ok(open) => open,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
     let mut views = Vec::with_capacity(tasks.len());
     for task in &tasks {
-        match long_task_view(&repo, task).await {
+        let queue = long_task_queue_view(&open, task.id(), &member);
+        match long_task_view(&repo, task, queue).await {
             Ok(view) => views.push(view),
             Err(e) => {
                 tracing::warn!(task = %task.id(), error = %e, "a long task could not be read")
@@ -15607,6 +15665,75 @@ async fn reachable_long_task(
         )
             .into_response()),
     }
+}
+
+/// `GET /api/v1/long-tasks/queue` -- every open task in the order the pond will work on them. The
+/// caller's own and the household's carry their goal and progress, so a member can choose which to
+/// stop; another member's is only a place in the line.
+async fn long_task_queue(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::StepState;
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    use pond_core::shared::services::long_task_queue::run_order;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let repo = long_task_repo(&state);
+    let open = match open_long_tasks(&repo).await {
+        Ok(open) => open,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let mut line = Vec::new();
+    for (index, task) in run_order(&open).into_iter().enumerate() {
+        let position = index + 1;
+        if !long_task_reaches(&member, task) {
+            line.push(json!({"position": position, "another_member": true}));
+            continue;
+        }
+        let steps = repo.list_steps(task.id()).await.unwrap_or_default();
+        let done = steps
+            .iter()
+            .filter(|s| matches!(s.state(), StepState::Completed | StepState::Skipped))
+            .count();
+        line.push(json!({
+            "position": position,
+            "id": task.id(),
+            "goal": task.goal(),
+            "kind": task.kind(),
+            "state": task.state(),
+            "origin_session_id": task.origin_session_id(),
+            "created_at": task.created_at(),
+            "steps_done": done,
+            "steps_total": steps.len(),
+        }));
+    }
+    Json(json!({"line": line})).into_response()
 }
 
 /// `GET /api/v1/long-tasks/{id}` -- one task, its steps and its artifacts.
@@ -15640,7 +15767,18 @@ async fn get_long_task(
         Ok(task) => task,
         Err(response) => return response,
     };
-    match long_task_view(&long_task_repo(&state), &task).await {
+    let repo = long_task_repo(&state);
+    let queue = match open_long_tasks(&repo).await {
+        Ok(open) => long_task_queue_view(&open, task.id(), &member),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    match long_task_view(&repo, &task, queue).await {
         Ok(view) => Json(view).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

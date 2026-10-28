@@ -7068,7 +7068,7 @@ async fn run_long_task_runner(
     before_hooks: Arc<pond_server::agent_activations::BeforeHookSources>,
     prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry>,
 ) {
-    use pond_core::shared::domain::long_task::{LongTaskState, StepState};
+    use pond_core::shared::domain::long_task::StepState;
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
     use pond_core::shared::services::long_task_roles as roles;
     use pond_core::shared::services::long_task_runner as runner;
@@ -7127,11 +7127,10 @@ async fn run_long_task_runner(
             .list_tasks(LongTaskOwnerFilter::Everyone, false)
             .await
             .unwrap_or_default();
-        // The task waited on longest goes next, so two tasks take turns.
-        let candidate = open
-            .into_iter()
-            .filter(|t| matches!(t.state(), LongTaskState::Planning | LongTaskState::Running))
-            .min_by_key(|t| t.updated_at());
+        // The same line the chat card and the phone show, so where a task waits is never a guess.
+        let candidate = pond_core::shared::services::long_task_queue::run_order(&open)
+            .first()
+            .map(|t| (*t).clone());
 
         let household = recipes.list().await.unwrap_or_default();
         let offered = runner::step_roles(&household);

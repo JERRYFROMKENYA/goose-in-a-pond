@@ -3196,9 +3196,9 @@ impl GooseAdapter {
                 msg.push_str(&sc.render_envelope());
                 msg.push('\n');
             }
-            if let Some(ref task_id) = request.deep_research_task {
+            if let Some(ref research) = request.deep_research_task {
                 msg.push_str(&pond_core::shared::services::deep_research::turn_note(
-                    task_id,
+                    research,
                 ));
                 msg.push('\n');
             }

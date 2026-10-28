@@ -25,6 +25,7 @@ use device_handshake::DeviceHandshake;
 struct Pond {
     router: axum::Router,
     member: String,
+    profiles: Arc<dyn pond_core::user_data::ports::profile::ProfileRepository>,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
     settings: Arc<SqliteSettingsRepository>,
     agent: Arc<pond_core::shared::mocks::mock_agent::MockAgent>,
@@ -82,6 +83,7 @@ async fn pond(paired: bool, primary: bool) -> Pond {
         pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone()),
     );
     Pond {
+        profiles: state.profile_repo.clone(),
         tasks,
         settings,
         agent,
@@ -521,6 +523,151 @@ async fn a_member_sees_and_stops_their_long_task_and_nobody_else_does() {
     );
 }
 
+/// Open tasks wait in the order they were asked for. A member sees where theirs stands and the
+/// goals of their own tasks ahead of it, and can stop one to move up; another member's task is only
+/// a place in the line. Deep research asked for behind them tells the turn where it waits.
+#[tokio::test]
+async fn a_member_sees_where_their_task_waits_and_nothing_of_another_members() {
+    use pond_core::shared::domain::long_task::{LongTask, LongTaskBudget};
+    use pond_core::user_data::domain::profile::ProfileScope;
+
+    let pond = pond(true, false).await;
+    let sam = pond
+        .profiles
+        .create(CreateProfileRequest {
+            display_name: "Sam".into(),
+            avatar_emoji: "fish".into(),
+        })
+        .await
+        .unwrap()
+        .id;
+    let start = chrono::Utc::now() - chrono::Duration::minutes(10);
+    let asked = |scope: ProfileScope, goal: &str, minutes: i64| {
+        LongTask::start(
+            scope,
+            None,
+            goal,
+            None,
+            LongTaskBudget::new(12, None).unwrap(),
+            start + chrono::Duration::minutes(minutes),
+        )
+        .unwrap()
+    };
+    let first = asked(ProfileScope::Owner(pond.member.clone()), "plan the trip", 0);
+    let sams = asked(ProfileScope::Owner(sam), "find a plumber", 1);
+    let mine = asked(
+        ProfileScope::Owner(pond.member.clone()),
+        "a packing list",
+        2,
+    );
+    for task in [&first, &sams, &mine] {
+        pond.tasks.create_task(task).await.unwrap();
+    }
+
+    let view_of = |id: &str| {
+        call(
+            Method::GET,
+            &format!("/api/v1/long-tasks/{id}"),
+            None,
+            false,
+        )
+    };
+    let (status, view) = send(&pond, view_of(mine.id())).await;
+    assert_eq!(status, StatusCode::OK, "{view}");
+    assert_eq!(view["queue"]["position"], 3, "{view}");
+    assert_eq!(view["queue"]["of"], 3, "{view}");
+    assert_eq!(
+        view["queue"]["ahead"],
+        serde_json::json!([
+            {"id": first.id(), "goal": "plan the trip", "state": "planning"},
+            {"another_member": true},
+        ])
+    );
+    let (_, front) = send(&pond, view_of(first.id())).await;
+    assert_eq!(front["queue"]["position"], 1);
+    assert_eq!(front["queue"]["ahead"], serde_json::json!([]));
+
+    let (status, line) = send(
+        &pond,
+        call(Method::GET, "/api/v1/long-tasks/queue", None, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{line}");
+    let line = line["line"].as_array().unwrap().clone();
+    assert_eq!(line.len(), 3);
+    assert_eq!(line[0]["id"], first.id());
+    assert_eq!(line[0]["steps_total"], 0);
+    assert_eq!(
+        line[1],
+        serde_json::json!({"position": 2, "another_member": true})
+    );
+    assert_eq!(line[2]["goal"], "a packing list");
+    let listed = send(&pond, call(Method::GET, "/api/v1/long-tasks", None, false))
+        .await
+        .1
+        .to_string();
+    for seen in [
+        view.to_string(),
+        serde_json::json!(line).to_string(),
+        listed,
+    ] {
+        assert!(
+            !seen.contains("plumber"),
+            "another member's goal is theirs: {seen}"
+        );
+    }
+
+    turn_long_tasks_on(&pond).await;
+    let ask = serde_json::json!({"message": "Which tents suit the rains?", "deep_research": true});
+    let (status, frames) = stream(
+        &pond,
+        call(Method::POST, "/api/v1/chat/stream", Some(ask), false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{frames:?}");
+    let waiting = pond
+        .agent
+        .last_request()
+        .unwrap()
+        .deep_research_task
+        .and_then(|r| r.waiting)
+        .expect("a task asked for behind others is told where it waits");
+    assert!(waiting.starts_with("It is number 4 in line"), "{waiting}");
+    assert!(waiting.contains("\"plan the trip\""), "{waiting}");
+    assert!(!waiting.contains("plumber"), "{waiting}");
+
+    let stop = format!("/api/v1/long-tasks/{}/cancel", first.id());
+    let (status, _) = send(&pond, call(Method::POST, &stop, None, false)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, view) = send(&pond, view_of(mine.id())).await;
+    assert_eq!(
+        view["queue"]["position"], 2,
+        "stopping the task ahead moves it up: {view}"
+    );
+    assert_eq!(
+        view["queue"]["ahead"],
+        serde_json::json!([{"another_member": true}])
+    );
+    let (_, stopped) = send(&pond, view_of(first.id())).await;
+    assert_eq!(
+        stopped["queue"],
+        serde_json::Value::Null,
+        "a stopped task is out of the line"
+    );
+
+    let stranger = pond_with_no_member().await;
+    let (status, _) = send(
+        &stranger,
+        call(Method::GET, "/api/v1/long-tasks/queue", None, false),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "nobody identified sees no line"
+    );
+}
+
 async fn pond_with_no_member() -> Pond {
     pond(false, false).await
 }
@@ -647,14 +794,16 @@ async fn deep_research_starts_a_research_task_the_chat_card_can_follow() {
         first_text.is_none_or(|text| call_frame < text),
         "the call comes before the reply"
     );
+    let research = pond.agent.last_request().unwrap().deep_research_task;
     assert_eq!(
-        pond.agent
-            .last_request()
-            .unwrap()
-            .deep_research_task
-            .as_deref(),
+        research.as_ref().map(|r| r.task_id.as_str()),
         Some(task.id()),
         "the turn is told which task it started"
+    );
+    assert_eq!(
+        research.and_then(|r| r.waiting),
+        None,
+        "nothing waits ahead of it"
     );
 
     let (status, history) = send(

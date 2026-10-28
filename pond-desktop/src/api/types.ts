@@ -227,6 +227,8 @@ export interface Settings {
 
   // API keys are not here: see listSecretKeys / setSecret / deleteSecret (values are write-only).
   searxng_url?: string | null;
+  /** Off by default. On, each web search sends the town from `weather_location_name` to Brave. */
+  web_search_local_results?: boolean;
 
   // Data retention
   retention_event_log_days?: number;
@@ -1008,6 +1010,8 @@ export interface ChatEvent {
     card_type?: string;
     data?: Record<string, unknown>;
   };
+  /** On "tool_result": shown for this turn only; history keeps a stub, so the card is never stored. */
+  transient?: boolean;
   /** Turn budget that was exhausted — present on "turn_limit_reached" events. */
   max_turns?: number;
   /** On "subagent_progress": the run; group tree nodes by it, not `role` (a role can repeat). */
@@ -1180,6 +1184,8 @@ export interface SessionMessage {
   images?: SessionMessageImage[];
   /** Reasoning passages in order, if `persist_thinking` was on; absent (not `[]`) if unrecorded. */
   thinking?: string[];
+  /** On a role="tool" row whose result is not kept: `content` holds only a stub naming the sources. */
+  transient?: boolean;
   /** Training-feedback vote: true keeps it as training data, false excludes it, null = no vote. */
   liked?: boolean | null;
 }
@@ -1428,6 +1434,8 @@ export interface WebSearchState {
   provider: "brave";
   configured: boolean;
   status: WebSearchStatus;
+  /** Absent from a pond older than local places. `town` is what a search would send. */
+  local_results?: { enabled: boolean; town: string | null };
 }
 
 /** `PUT /api/v1/web-search/key` when the key was stored. A key Brave refused is a 422 instead. */
@@ -1446,6 +1454,14 @@ export interface WebSearchHit {
   title: string;
   url: string;
   domain: string;
+  snippet: string;
+}
+
+/** One place of a `search` card's optional `places`, present only when local places answered. */
+export interface WebSearchPlace {
+  name: string;
+  /** May be empty. */
+  url: string;
   snippet: string;
 }
 

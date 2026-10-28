@@ -3840,3 +3840,45 @@ not a PAI milestone).**
   conversation's first turn still prefills all of its prompt. The engine's unit tests on the Orin
   (`cargo test --release -p goose-local-inference --features cuda --lib`): 197 passed, 0 failed,
   9 ignored.
+
+**2026-10-28 — `search_web` on Brave LLM Context, and its results kept out of history (touches
+PAI-2, PAI-3 and PAI-4; not a PAI milestone).** Design and store audit:
+[small-model-tools.md §8.10](../small-model-tools.md).
+
+- **PAI-2: what leaves the pond, and what stays.**
+  - Every `search_web` answer carries `{"giap/transient": {"keep": "<stub>"}}` in its `_meta`. Once
+    the turn is over, `pond_system.db` (`ChatService::persist_assistant_turn`) and goose's
+    `sessions.db` (the adapter's `TurnSweep`, plus a sweep at every turn's start) keep only a stub
+    naming the sources' domains. Brave's terms, §3(b)(i), allow its Search Results only transient
+    storage.
+  - The SSE `tool_result` frame is marked `transient` for clients.
+  - Every other store was audited (§8.10.6). Two remain open: Goose on the Go's card cache keeps
+    search cards, and the LiteRT backend's KV snapshot can park a conversation that read one.
+  - The desktop keeps nothing of a result beyond the live view (`localStorage` holds only the run
+    pointer; there is no card cache, IndexedDB or export). A reloaded conversation shows a quiet
+    line naming the sources in place of a card, and the web search panel has the "Nearby places"
+    switch (§8.10.5), whose text names the town that would leave.
+  - Local places are opt-in (`web_search_local_results`, default off). When on, only the town
+    from `weather_location_name` goes out, as `X-Loc-City`: no coordinates, no country.
+  - Egress is unchanged: the same Brave host, traced and gated on the `pond-net` clients.
+- **PAI-3.** The copy's budgets are unchanged (1,800 or 2,400 bytes), and the places part is
+  charged to them. A conversation that searched carries about 400 to 550 fewer tokens per search
+  on every later turn.
+- **PAI-4.**
+  - Tool schemas, descriptions and the system prompt are unchanged, so the preamble and its
+    snapshot are untouched.
+  - The turn after a search re-prefills from the edited tool response: the call, the stub and
+    the answer.
+  - `replace_conversation` runs once per turn that searched, under a per-conversation lock that a
+    late (cancelled-turn) sweep shares with the next turn's start.
+- **Invariants.** No migration: the new setting's row reads its default when absent. No new tool
+  and no new egress host. No turn blocks on an LLM call.
+- **Verified on the Orin** (2026-10-28, release `0c9c3833`):
+  - the fast crates' tests pass. The one pond-core failure is a pre-existing race between two
+    `device_budget` tests over the process-global vision allowlist;
+  - live, with the household's key, three searches were answered by LLM Context, with local
+    places on and off;
+  - `pond_system.db` and goose's `sessions.db` held only the stub after each turn.
+
+  NOT VERIFIED: pond-adapters-goose's own tests (compiled by CI's `cargo check`, never run) and
+  the amended `live_checks.py` web search checks.

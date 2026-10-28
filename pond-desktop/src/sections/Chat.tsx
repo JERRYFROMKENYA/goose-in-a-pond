@@ -18,6 +18,7 @@ import {
 } from "../state/chatRunStore";
 import type { Message } from "../state/chatRunStore";
 import { ToolCallChip } from "../components/ToolCallChip";
+import { KeptResultNote } from "../components/KeptResultNote";
 import { ChatHistory, type OpenOrigin } from "./ChatHistory";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
@@ -684,6 +685,9 @@ export function Chat() {
                     ))}
                   </div>
                 )}
+                {msg.role === "agent" && msg.keptResults?.map((kept, i) => (
+                  <KeptResultNote key={`${kept.callId}-${i}`} result={kept} />
+                ))}
                 {/* Thinking block */}
                 {msg.role === "agent" && msg.thinkingBlocks && msg.thinkingBlocks.length > 0 && (
                   <ThinkingDisclosure

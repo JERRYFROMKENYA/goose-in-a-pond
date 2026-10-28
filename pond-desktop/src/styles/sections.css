@@ -4398,6 +4398,20 @@
   white-space: nowrap;
 }
 
+/* A result the pond did not keep, as a reloaded conversation shows it. --color-text-secondary is 5.97:1 on
+   the light ground and 5.45:1 or better on the dark one, so it stays quiet without dropping under AA. */
+.kept-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+.kept-note svg { flex-shrink: 0; margin-top: 2px; }
+.kept-note span { overflow-wrap: anywhere; user-select: text; }
+
 /* Chip variant: interactive, shows expand chevron */
 .tool-call--chip {
   cursor: pointer;
@@ -4621,6 +4635,9 @@
   text-decoration: none;
 }
 .ui-search__title > span:first-child { overflow-wrap: anywhere; }
+/* In dark, --border-ink is the accent lifted only to the 3:1 an edge needs (3.11:1 on the card), too
+   faint for a link. --purple-200 is 9.1:1 on --color-surface. */
+:root[data-theme="dark"] a.ui-search__title { color: var(--purple-200); }
 .ui-search__title:hover { text-decoration: underline; }
 .ui-search__title:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; border-radius: 2px; }
 .ui-search__title--plain { color: var(--grey-900, var(--grey-700)); }
@@ -4637,6 +4654,21 @@
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* The label over a group of nearby places; grey-500 is 4.63:1 light, 6.91:1 dark, like the domain. */
+.ui-search__label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  font-size: 10.5px;
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--grey-500);
+}
+.ui-search__label svg { flex-shrink: 0; }
+.ui-search__group { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ui-search__group + .ui-search__group { margin-top: 4px; }
 .ui-search__sr {
   position: absolute;
   width: 1px;

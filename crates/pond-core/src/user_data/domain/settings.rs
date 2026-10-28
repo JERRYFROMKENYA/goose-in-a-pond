@@ -693,6 +693,11 @@ pub struct Settings {
     #[serde(default)]
     pub searxng_url: Option<String>,
 
+    /// Send the town from `weather_location_name` with each web search, so the results can
+    /// include nearby places. Off by default: it tells the search provider where the household is.
+    #[serde(default)]
+    pub web_search_local_results: bool,
+
     // ── Extension toggles ───────────────────────────────────────────────
     // Builtin MCP tool modules registered at startup.
     /// Enable the memory tools module (recall, save, forget).
@@ -912,6 +917,7 @@ impl Default for Settings {
             tool_call_validation: Self::default_tool_call_validation(),
             tool_request_detection: Self::default_tool_request_detection(),
             searxng_url: None,
+            web_search_local_results: false,
             ext_memory_enabled: true,
             ext_schedule_enabled: true,
             ext_weather_enabled: true,
@@ -2153,6 +2159,9 @@ mod tests {
             "weather_longitude",
             // No UI row while its only reader, `search_web`, is unregistered; the value persists.
             "searxng_url",
+            // The local-places switch on the web search panel in both apps, under
+            // `GET /api/v1/web-search`'s `local_results`.
+            "web_search_local_results",
         ];
 
         let value = serde_json::to_value(Settings::default()).expect("serialize Settings");

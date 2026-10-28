@@ -12,6 +12,7 @@ import type {
 } from "./reducer";
 import { filterThinking } from "../lib/thinkFilter";
 import { applySubagentProgress, type SubagentRun } from "../components/subagentRuns";
+import { keptResultOf, type KeptResult } from "./keptResults";
 import { ApiError } from "../api/types";
 import type {
   ChatEvent,
@@ -43,6 +44,8 @@ export interface Message {
   turnStats?: TurnStats;
   error?: boolean;
   historyToolNames?: string[];
+  /** Replayed history only: results the pond did not keep, which a reload shows as a line, not a card. */
+  keptResults?: KeptResult[];
   /** Set when the agent stopped on its turn budget — renders a Continue action. */
   turnLimit?: number;
   /** From the turn's `context_warning` frame; renders the pressure line and "Compact now". */
@@ -88,8 +91,16 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
 } {
   const out: Message[] = [];
   const pending: HistoryImages[] = [];
+  // A turn's tool rows are stored just before its assistant row, so they wait for it.
+  let kept: KeptResult[] = [];
   for (const m of raw) {
-    if (m.role === "tool") continue;
+    if (m.role === "tool") {
+      const result = keptResultOf(m);
+      if (result) kept.push(result);
+      continue;
+    }
+    const keptResults = kept.length > 0 ? kept : undefined;
+    kept = [];
     if (m.role === "assistant") {
       const hasContent = m.content.trim().length > 0;
       const hasToolCalls = (m.tool_calls?.length ?? 0) > 0;
@@ -105,6 +116,7 @@ function sessionMessagesToMessages(raw: readonly SessionMessage[]): {
         role: "agent",
         text: m.content,
         historyToolNames,
+        keptResults,
         thinkingBlocks,
         backendId: m.id,
         liked: m.liked ?? null,

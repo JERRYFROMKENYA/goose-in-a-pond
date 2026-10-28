@@ -390,6 +390,14 @@ impl SettingsRepository for SqliteSettingsRepository {
         );
         // API keys live in `SecretRepository`; `searxng_url` is an endpoint, not a credential.
         upsert!("searxng_url", settings.searxng_url.as_deref().unwrap_or(""));
+        upsert!(
+            "web_search_local_results",
+            if settings.web_search_local_results {
+                "true"
+            } else {
+                "false"
+            }
+        );
         // Embedding
         upsert!("active_embedding_model", &settings.active_embedding_model);
         upsert!("embedding_provider", &settings.embedding_provider);
@@ -1188,6 +1196,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 Some(value.to_string())
             };
         }
+        "web_search_local_results" => s.web_search_local_results = value == "true",
         // Extension toggles
         "ext_memory_enabled" => s.ext_memory_enabled = value == "true",
         "ext_schedule_enabled" => s.ext_schedule_enabled = value == "true",

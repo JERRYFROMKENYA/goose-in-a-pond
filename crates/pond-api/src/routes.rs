@@ -2440,6 +2440,10 @@ enum StreamStep {
 
 /// The one `tool_result` SSE frame shape; the MCP-UI renderer keys off the optional `ui`.
 fn tool_result_frame(tool: &str, id: &str, content: &str, ui_hint: Option<Value>) -> String {
+    tool_result_event(tool, id, content, ui_hint).to_string()
+}
+
+fn tool_result_event(tool: &str, id: &str, content: &str, ui_hint: Option<Value>) -> Value {
     let mut ev = json!({
         "type": "tool_result",
         "tool": tool,
@@ -2449,7 +2453,7 @@ fn tool_result_frame(tool: &str, id: &str, content: &str, ui_hint: Option<Value>
     if let Some(ui) = ui_hint {
         ev["ui"] = ui;
     }
-    ev.to_string()
+    ev
 }
 
 /// The one `turn_stats` SSE frame shape. `reasoning_tokens` is never deducted from
@@ -2549,24 +2553,32 @@ impl TurnAccumulator {
                 id,
                 content,
                 card,
+                keep,
             } => {
                 if let Some(start) = self.tool_call_start.take() {
                     self.last_tool_latency_ms = Some(start.elapsed().as_millis() as u64);
                 }
                 let (clean_content, ui_hint) = tool_result_parts(&content, card.as_deref());
-                self.tool_results.push(
-                    json!({
-                        "tool_call_id": id,
-                        "tool": tool,
-                        "content": clean_content,
-                        "arguments": self
-                            .tool_call_inputs
-                            .remove(&id)
-                            .unwrap_or_else(|| "{}".to_string()),
-                    })
-                    .to_string(),
-                );
-                StreamStep::Frame(tool_result_frame(&tool, &id, &clean_content, ui_hint))
+                let mut row = json!({
+                    "tool_call_id": id,
+                    "tool": tool,
+                    "content": clean_content,
+                    "arguments": self
+                        .tool_call_inputs
+                        .remove(&id)
+                        .unwrap_or_else(|| "{}".to_string()),
+                });
+                // ChatService stores the stub in place of the content (`persist_assistant_turn`).
+                if let Some(keep) = &keep {
+                    row["keep"] = json!(keep);
+                }
+                self.tool_results.push(row.to_string());
+                let mut frame = tool_result_event(&tool, &id, &clean_content, ui_hint);
+                // Shown during the turn; a client must not keep it, as history keeps only the stub.
+                if keep.is_some() {
+                    frame["transient"] = json!(true);
+                }
+                StreamStep::Frame(frame.to_string())
             }
             AgentStreamEvent::Text { content } => {
                 let visible = self.thought.push(&content);
@@ -19055,6 +19067,7 @@ mod tests {
             id: "call-1".to_string(),
             content: "24C and clear".to_string(),
             card: None,
+            keep: None,
         }));
         assert_eq!(
             result,
@@ -19105,6 +19118,7 @@ mod tests {
             id: "call-1".to_string(),
             content: "[[[mcp-ui:weather:{\"temp\":24}]]]\n24C and clear".to_string(),
             card: None,
+            keep: None,
         }));
 
         assert_eq!(
@@ -19137,6 +19151,7 @@ mod tests {
             id: "call-2".to_string(),
             content: "Web results for: q\nPassage.".to_string(),
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
+            keep: None,
         }));
         assert_eq!(frame["content"], "Web results for: q\nPassage.");
         assert_eq!(
@@ -19145,6 +19160,31 @@ mod tests {
         );
         let persisted: Value = serde_json::from_str(&turn.tool_results[0]).unwrap();
         assert_eq!(persisted["content"], "Web results for: q\nPassage.");
+        assert!(frame.get("transient").is_none(), "{frame}");
+    }
+
+    /// A transient result streams whole, marked for clients not to keep, and hands ChatService
+    /// the stub it stores instead.
+    #[test]
+    fn a_transient_result_streams_whole_and_hands_on_its_stub() {
+        let mut turn = accumulator();
+        let stub = "Web search results are not kept after the turn. Sources: kws.go.ke.";
+        let frame = frame_of(turn.absorb(AgentStreamEvent::ToolResult {
+            tool: "giap-knowledge__search_web".to_string(),
+            id: "call-3".to_string(),
+            content: "Web results for: q\nThe park closes at 6:00 PM.".to_string(),
+            card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
+            keep: Some(stub.to_string()),
+        }));
+        assert_eq!(
+            frame["content"],
+            "Web results for: q\nThe park closes at 6:00 PM."
+        );
+        assert_eq!(frame["transient"], true);
+        assert_eq!(frame["ui"]["card_type"], "search");
+        let row: Value = serde_json::from_str(&turn.tool_results[0]).unwrap();
+        assert_eq!(row["keep"], stub);
+        assert_eq!(row["tool_call_id"], "call-3");
     }
 
     /// The handler's `ChatService` owns the `persist_thinking` gate; the translator never records.

@@ -422,6 +422,8 @@ pub struct GooseAdapter {
     group_embeddings: tokio::sync::OnceCell<Vec<(String, Vec<f32>)>>,
     /// In-process picture support: the one state every vision path shares.
     pictures: Arc<crate::vision_encoder::PictureSupport>,
+    /// Keeps transient tool results out of goose's store once their turn is over.
+    transient_sweeps: crate::transient_history::TransientSweeps,
 }
 
 /// Byte cap on a buffered reasoning passage (memory bound); crossing it splits, never drops.
@@ -539,6 +541,7 @@ impl GooseAdapter {
             session_permitted_groups: tokio::sync::RwLock::new(HashMap::new()),
             group_embeddings: tokio::sync::OnceCell::new(),
             pictures: Arc::new(crate::vision_encoder::PictureSupport::new()),
+            transient_sweeps: crate::transient_history::TransientSweeps::default(),
         })
     }
 
@@ -2197,25 +2200,35 @@ impl GooseAdapter {
             .collect()
     }
 
-    /// Caps history images that keep pixels; the pending turn's image isn't in history yet.
-    /// Writes nothing when within the cap: `replace_conversation` rewrites every row to eMMC.
-    async fn cap_history_images(&self, goose_sid: &str) {
+    /// Before the turn's first reply: reduces any transient tool result an earlier turn left
+    /// (a crash, a cancel the sweep missed) to its stub, and caps history images that keep
+    /// pixels; the pending turn's image isn't in history yet. One write for both, and none when
+    /// nothing changes: `replace_conversation` rewrites every row to eMMC.
+    async fn rewrite_history_at_turn_start(
+        &self,
+        goose_sid: &str,
+        sweep: &crate::transient_history::TurnSweep,
+    ) {
         use pond_core::models::services::context::image_history::history_image_placeholder;
 
+        let _held = sweep.lock().await;
         let Ok(session) = self.session_manager.get_session(goose_sid, true).await else {
             return;
         };
         let Some(conversation) = session.conversation else {
             return;
         };
-        let source: Vec<Message> = conversation.messages().clone();
+        let (source, redacted) = match crate::transient_history::redact(conversation.messages()) {
+            Some((messages, redacted)) => (messages, redacted),
+            None => (conversation.messages().clone(), 0),
+        };
         if source.is_empty() {
             return;
         }
 
         // Tool-part messages are never rewritten: providers reject re-keyed tool responses.
         let (had, keep, dropped) = plan_image_cap(&source);
-        if dropped == 0 {
+        if dropped == 0 && redacted == 0 {
             return;
         }
 
@@ -2237,17 +2250,23 @@ impl GooseAdapter {
             .replace_conversation(goose_sid, &capped)
             .await
         {
-            // Non-fatal: a failed cap costs encoder time, never the turn.
-            tracing::warn!("image cap: replacing the conversation failed: {e}");
+            // Non-fatal: a failed cap costs encoder time, and a missed stub is retried at the
+            // next turn's start; neither costs this turn.
+            tracing::warn!("history rewrite: replacing the conversation failed: {e}");
             return;
         }
-        tracing::info!(
-            target: "giap::trace",
-            kind = "image_cap",
-            goose_sid = %goose_sid,
-            dropped,
-            "capped historical images"
-        );
+        if redacted > 0 {
+            crate::transient_history::note_redacted(goose_sid, "turn_start", redacted);
+        }
+        if dropped > 0 {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "image_cap",
+                goose_sid = %goose_sid,
+                dropped,
+                "capped historical images"
+            );
+        }
     }
 
     /// Engine → GIAP session id: goose's `agent-session-id` is all an MCP tool can trust.
@@ -3199,10 +3218,15 @@ impl GooseAdapter {
         // Live handle for the tool-call guard inside the 'static stream closure.
         let guard_controls = session_controls.clone();
 
-        // ── History image cap ────────────────────────────────────────────
+        // ── History rewrite ──────────────────────────────────────────────
         // Goose owns compaction; the image cap stays because each replayed image re-runs the
-        // mmproj encoder (0.7-2.7 s), a cost goose can't see.
-        self.cap_history_images(&goose_sid).await;
+        // mmproj encoder (0.7-2.7 s), a cost goose can't see. The sweep travels with the stream
+        // and clears this turn's transient results however the turn ends.
+        let turn_sweep = self
+            .transient_sweeps
+            .begin(&goose_sid, self.session_manager.clone());
+        self.rewrite_history_at_turn_start(&goose_sid, &turn_sweep)
+            .await;
 
         let user_msg_len = request.message.len();
         let turn_start = std::time::Instant::now();
@@ -3265,6 +3289,7 @@ impl GooseAdapter {
         let stream = async_stream::stream! {
             // Hold the guard — dropped when the stream is dropped → cancels token.
             let _guard = cancel_guard;
+            let mut turn_sweep = turn_sweep;
             // Dropped with the stream, revoking this turn's authority to delegate.
             let _authority_lease = authority_lease;
 
@@ -3562,6 +3587,16 @@ impl GooseAdapter {
                                             }
                                         }
                                         goose::conversation::message::MessageContent::ToolResponse(tr) => {
+                                            // Before the suppression below: goose stored the result either way.
+                                            if tr
+                                                .tool_result
+                                                .as_ref()
+                                                .ok()
+                                                .and_then(crate::transient_history::keep_of)
+                                                .is_some()
+                                            {
+                                                turn_sweep.note_transient();
+                                            }
                                             // A suppressed call's result must never be streamed.
                                             if suppressed_tool_ids.remove(&tr.id) {
                                                 tracing::warn!(
@@ -3575,14 +3610,19 @@ impl GooseAdapter {
                                                 continue;
                                             }
                                             // Surface errors too: the model sees them anyway.
-                                            let (content_text, card, failed) = match &tr.tool_result {
+                                            let (content_text, card, failed, keep) = match &tr.tool_result {
                                                 Ok(tool_result) => {
                                                     let (text, card) = split_tool_result(&tool_result.content);
                                                     // RMCP 2.1 reports a tool's own failures, bad
                                                     // arguments included, as a result marked is_error.
-                                                    (text, card, tool_result.is_error == Some(true))
+                                                    (
+                                                        text,
+                                                        card,
+                                                        tool_result.is_error == Some(true),
+                                                        crate::transient_history::keep_of(tool_result),
+                                                    )
                                                 }
-                                                Err(e) => (format!("Error: {e}"), None, true),
+                                                Err(e) => (format!("Error: {e}"), None, true, None),
                                             };
 
                                             let tool_name = tool_id_to_name
@@ -3616,6 +3656,7 @@ impl GooseAdapter {
                                                 tool: tool_name,
                                                 content: content_text,
                                                 card,
+                                                keep,
                                             });
                                         }
                                         _ => {}
@@ -3982,6 +4023,8 @@ impl GooseAdapter {
                 inference_count = turn_stats.inference_count,
             );
             let stats = saw_usage.then_some(turn_stats);
+            // Before Done: a client that stops reading at Done drops this stream.
+            turn_sweep.finish().await;
             yield Ok(AgentStreamEvent::Done { session_id, model_role, usage: Some(usage), stats });
         };
 

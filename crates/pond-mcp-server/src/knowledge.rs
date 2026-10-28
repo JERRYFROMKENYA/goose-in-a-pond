@@ -490,18 +490,33 @@ impl KnowledgeMcpServer {
 
 // ── Static deps + spawn function for Goose builtin registry ──────────────
 
-use std::sync::OnceLock;
+use pond_core::user_data::ports::settings::SettingsRepository;
+use std::sync::{Arc, OnceLock};
 use tokio::io::DuplexStream;
 
 struct KnowledgeDeps {
     http_client: reqwest::Client,
+    /// Read by `search_web` for the household's local-places choice and its town.
+    settings_repo: Option<Arc<dyn SettingsRepository + Send + Sync>>,
 }
 
 static KNOWLEDGE_DEPS: OnceLock<KnowledgeDeps> = OnceLock::new();
 
-/// Initialize knowledge server dependencies. Call once at startup.
-pub fn init_knowledge_deps(http_client: reqwest::Client) {
-    let _ = KNOWLEDGE_DEPS.set(KnowledgeDeps { http_client });
+/// Initialize knowledge server dependencies. Call once at startup. Without `settings_repo`, web
+/// search never sends a location.
+pub fn init_knowledge_deps(
+    http_client: reqwest::Client,
+    settings_repo: Option<Arc<dyn SettingsRepository + Send + Sync>>,
+) {
+    let _ = KNOWLEDGE_DEPS.set(KnowledgeDeps {
+        http_client,
+        settings_repo,
+    });
+}
+
+/// The settings store `search_web` reads, if this binary installed one.
+pub(crate) fn knowledge_settings() -> Option<Arc<dyn SettingsRepository + Send + Sync>> {
+    KNOWLEDGE_DEPS.get()?.settings_repo.clone()
 }
 
 /// Spawn function compatible with Goose's `SpawnServerFn` type.

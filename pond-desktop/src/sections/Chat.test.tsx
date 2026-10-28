@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, cleanup, act } from "@testing-library/react";
 import { Chat } from "./Chat";
 import { api } from "../api/PondApiClient";
-import { __resetChatRunForTests, setChatRunBridge } from "../state/chatRunStore";
+import { __resetChatRunForTests, openSession, setChatRunBridge } from "../state/chatRunStore";
+import { assistantRow, keptToolRow, userRow } from "../test-support/keptRows";
 import { ApiError } from "../api/types";
 import type { ChatEvent, VisionStatus } from "../api/types";
 import { ATTACH_BLOCKED_COPY, NOT_DECLARED_COPY } from "../components/imageSupportCopy";
@@ -1090,5 +1091,36 @@ describe("Chat — the header's controls", () => {
     await screen.findByRole("button", { name: "New chat" });
     expect(screen.queryByRole("button", { name: /Rename conversation:/ })).toBeNull();
     expect(screen.getAllByRole("button", { name: /new chat/i })).toHaveLength(1);
+  });
+});
+
+// Brave's terms let a search result live only for its turn, so a reload has a stub to show, not a card.
+describe("Chat history, a result the pond did not keep", () => {
+  it("shows one quiet line that names the sources, in place of a card or a broken chip", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([userRow(), keptToolRow(), assistantRow()] as never);
+    await openSession("sess-1");
+    render(<Chat />);
+
+    const note = await screen.findByText(
+      "Web search: results aren't kept after the turn. Sources: kenyapower.co.ke, nation.africa.",
+    );
+    expect(note.closest(".kept-note")).toBeTruthy();
+    expect(screen.getByText("Power should be back by 6 pm.")).toBeTruthy();
+    // The tool still shows by name, as every replayed tool does, and nothing opens to an empty card.
+    expect(screen.getByText("search web")).toBeTruthy();
+    expect(document.querySelector(".tool-call-card, .ui-search")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Web search/ })).toBeNull();
+  });
+
+  it("adds nothing to a conversation that kept every result", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue([
+      userRow(),
+      keptToolRow({}, { transient: undefined, content: "24 degrees" }),
+      assistantRow(),
+    ] as never);
+    await openSession("sess-1");
+    render(<Chat />);
+    await screen.findByText("Power should be back by 6 pm.");
+    expect(document.querySelector(".kept-note")).toBeNull();
   });
 });

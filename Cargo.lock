@@ -11839,6 +11839,7 @@ dependencies = [
  "pond-infra",
  "pond-net",
  "pond-voice",
+ "pulldown-cmark",
  "rand 0.8.6",
  "reqwest 0.13.3",
  "serde",

@@ -4,7 +4,9 @@
 
 use crate::shared::domain::agent_prefill::PrefillRecord;
 use crate::shared::domain::orchestration::AgentRole;
-use crate::shared::services::long_task_roles::{PLANNER_ROLE, VERIFIER_ROLE, WORKER_ROLE};
+use crate::shared::services::long_task_roles::{
+    COMPOSER_ROLE, PLANNER_ROLE, VERIFIER_ROLE, WORKER_ROLE,
+};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
@@ -15,7 +17,7 @@ pub const MIN_AGENT_PREFILL_RETENTION_DAYS: u32 = 1;
 
 /// The shipped agents every long task runs on; their prefills are compiled on every start.
 pub fn is_default_agent(name: &str) -> bool {
-    [PLANNER_ROLE, WORKER_ROLE, VERIFIER_ROLE].contains(&name)
+    [PLANNER_ROLE, WORKER_ROLE, VERIFIER_ROLE, COMPOSER_ROLE].contains(&name)
 }
 
 /// 64-bit FNV-1a: stable across builds and releases, unlike `DefaultHasher`, since the hash is

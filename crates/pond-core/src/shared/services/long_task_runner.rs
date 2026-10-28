@@ -1,8 +1,8 @@
 //! What a long task runs next, and what each helper is told. Pure: the lane loop in `pond-server`
 //! does the I/O, so every decision here is tested without a model.
 use crate::shared::domain::long_task::{
-    blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskState, OutcomeKind,
-    PlanStep, StepKey, StepOutcome, StepState,
+    blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskKind, LongTaskState,
+    OutcomeKind, PlanStep, StepKey, StepOutcome, StepState,
 };
 use crate::shared::domain::orchestration::{AgentRole, TaskRun, TaskStatus};
 use crate::shared::services::long_task_roles::{self as roles, TASK_WORK_EXTENSION};
@@ -22,7 +22,10 @@ pub const LONG_TASK_ROOT_GROUPS: &[&str] = &[
 /// The roles the planner may give a step: the shipped worker first, then the household's own
 /// active roles. The planner and verifier are not offered: neither does a step's work.
 pub fn step_roles(household: &[AgentRecipe]) -> Vec<AgentRole> {
-    let mut offered: Vec<AgentRole> = roles::worker_role().into_iter().collect();
+    let mut offered: Vec<AgentRole> = roles::worker_role()
+        .into_iter()
+        .chain(roles::composer_role())
+        .collect();
     for recipe in household.iter().filter(|r| r.active) {
         if [
             roles::PLANNER_ROLE,
@@ -155,6 +158,31 @@ fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
         .collect()
 }
 
+/// A research report is as long as its plan: the pond joins the sections steps drafted, so no
+/// single reply has to hold it.
+const RESEARCH_PLAN: &str = "This is deep research the person asked for, and the report can be \
+     as long as the question needs: a page for a quick question, many for a trip or a big \
+     decision. Plan it in three parts. First, steps that each look into one part of the question \
+     with search_web or get_wikipedia_article, or recall what the household has said with the \
+     memory tools, and save their findings with their sources. Then one step per section of the \
+     report, each writing its section from the findings it is given and saving it as a draft \
+     artifact titled as the reader should see it. Give every section that is a plan, such as an \
+     itinerary, a meal plan or a packing or shopping list, to long-task-composer. Last, one step \
+     writes the artifact titled \"Result\": a short title on its first line as a \"# \" heading, \
+     then a few paragraphs that answer the question and introduce the sections without repeating \
+     them. Do not plan a step that combines, compiles or merges sections: the pond joins the \
+     Result and the sections, in plan order, into the report itself.\n";
+
+/// A research step works from sources, not from what a small model remembers, and keeps the
+/// household's particulars out of what it sends to a search engine.
+const RESEARCH_STEP: &str = "This is deep research. Look things up with search_web or \
+     get_wikipedia_article rather than from memory, keep only what the sources say, and cite each \
+     source as a Markdown link, [its title](its address), using the address the search gave. If \
+     the sources disagree, say so. If your step writes a section, save it as a draft artifact \
+     titled as the reader should see it, such as \"Getting around\", and write it in full: the \
+     pond puts it in the report as you wrote it. Use no emoji. Never put a person's name, health \
+     or diet in a web search: search for the place, the dish or the thing.\n";
+
 fn date_line(now: DateTime<Utc>) -> String {
     format!("Today is {} (UTC).\n", now.format("%A %-d %B %Y, %H:%M"))
 }
@@ -170,6 +198,9 @@ pub fn planner_brief(
 ) -> String {
     let mut brief = date_line(now);
     brief.push_str(&format!("Goal: {}\n", task.goal()));
+    if task.kind() == LongTaskKind::Research {
+        brief.push_str(RESEARCH_PLAN);
+    }
     brief.push_str(&format!(
         "At most {} steps in all.\n\nRoles that can do a step:\n",
         task.budget().max_steps()
@@ -236,6 +267,9 @@ pub fn worker_brief(
         .collect();
     let mut brief = date_line(now);
     brief.push_str(&format!("The task's goal: {}\n", task.goal()));
+    if task.kind() == LongTaskKind::Research {
+        brief.push_str(RESEARCH_STEP);
+    }
     brief.push_str(&format!(
         "Your step ({}): {}\n",
         step.key(),

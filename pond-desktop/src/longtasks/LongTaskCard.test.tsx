@@ -1,14 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { api } from "../api/PondApiClient";
 import { LongTaskCard } from "./LongTaskCard";
 import { LongTaskCards, LongTaskStrays } from "./LongTaskCards";
 import { artifactOf, doneTask, fakeLongTasks, OTHER_ID, stepOf, TASK_ID, taskOf } from "./longTaskFixtures";
-import type { LongTask, LongTaskArtifactBody } from "../api/types";
+import { ApiError } from "../api/types";
+import type { LongTask, LongTaskReport } from "../api/types";
 
 vi.mock("../api/PondApiClient", () => ({
-  api: { getLongTaskArtifact: vi.fn() },
+  api: { getLongTaskArtifact: vi.fn(), getLongTaskReport: vi.fn(), getLongTaskExport: vi.fn() },
 }));
+
+vi.mock("../lib/saveFile", async (importOriginal) => ({ ...(await importOriginal<typeof import("../lib/saveFile")>()), saveBlob: vi.fn() }));
+vi.mock("../lib/printHtml", () => ({ printHtml: vi.fn() }));
 
 const confirmMock = vi.hoisted(() => vi.fn());
 vi.mock("../components/shared", async () => {
@@ -97,6 +101,40 @@ describe("a long task under way", () => {
   });
 });
 
+describe("a deep research task", () => {
+  it("is labelled Deep research where a general task says it is a long task", () => {
+    show(taskOf({ kind: "research", goal: "What changed in Kenya's tax rules?" }));
+    expect(screen.getByRole("group", { name: "Deep research: What changed in Kenya's tax rules?" })).toBeTruthy();
+    expect(screen.queryByRole("group", { name: /^Long task:/ })).toBeNull();
+    expect(document.querySelector(".lt")?.getAttribute("data-kind")).toBe("research");
+  });
+
+  it("says Deep research on the card, above what it is for", () => {
+    show(taskOf({ kind: "research" }));
+    const kicker = document.querySelector(".lt__kind");
+    expect(kicker?.textContent).toBe("Deep research");
+    expect(kicker?.nextElementSibling?.className).toBe("lt__head");
+  });
+
+  it("keeps the same steps, state line and Stop as any other task", () => {
+    show(taskOf({ kind: "research" }));
+    expect(screen.getByText("Working: step 2 of 4")).toBeTruthy();
+    expect(stopButton()).not.toBeNull();
+  });
+
+  it("is drawn the same on the hub", () => {
+    show(taskOf({ kind: "research" }), {}, "hub");
+    expect(document.querySelector(".lt.lt--hub .lt__kind")).not.toBeNull();
+  });
+
+  it.each([{ kind: "general" as const }, {}])("says nothing extra for a task of kind %o", (over) => {
+    show(taskOf(over));
+    expect(document.querySelector(".lt__kind")).toBeNull();
+    expect(screen.getByRole("group", { name: "Long task: Plan a trip to Lamu" })).toBeTruthy();
+    expect(document.querySelector(".lt")?.getAttribute("data-kind")).toBe("general");
+  });
+});
+
 describe("stopping a task", () => {
   it("asks first, in words that say what happens to a step under way", async () => {
     const longTasks = show(taskOf());
@@ -162,73 +200,132 @@ describe("a long task that has ended", () => {
   });
 });
 
-describe("reading a result", () => {
-  const BODY = "# Plan\n\n- ferry at **7:00**\n- [the map](https://example.com/map)\n\n```\nraw <b>text</b>\n```";
+const REPORT: LongTaskReport = {
+  id: TASK_ID,
+  title: "Kenya tax rules",
+  state: "completed",
+  kind: "research",
+  markdown:
+    "# Kenya tax rules\n\nA short summary.\n\n## Income tax\n\n| Band | Rate |\n|---|---|\n| First | 10% |\n\n## Packing\n\n- [ ] passport\n\n## Sources\n\n- [KRA](https://www.kra.go.ke/)\n",
+  sections: 2,
+  sources: [{ title: "KRA", url: "https://www.kra.go.ke/" }],
+  calendar_events: 0,
+};
 
+const readButton = () => screen.getByRole("button", { name: "Read the result" });
+
+describe("reading a result", () => {
   it("shows the result's summary, and reads nothing until asked", () => {
     show(doneTask());
     expect(screen.getByText("Three days in Lamu, with ferry times.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Read the result" })).toBeTruthy();
+    expect(readButton()).toBeTruthy();
+    expect(api.getLongTaskReport).not.toHaveBeenCalled();
     expect(api.getLongTaskArtifact).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
+});
 
-  it("falls back to the result's title when it has no summary", () => {
-    show(doneTask({ artifacts: [artifactOf({ summary: "" })] }));
-    expect(screen.getByText("Trip plan")).toBeTruthy();
-  });
-
-  it("fetches the body and draws it as markdown, never as html", async () => {
-    vi.mocked(api.getLongTaskArtifact).mockResolvedValue({
-      id: "art-1",
-      title: "Trip plan",
-      kind: "result",
-      summary: "",
-      body: BODY,
-    });
+describe("reading the whole report", () => {
+  it("opens it on its own sheet, titled, with its sections and what it cites", async () => {
+    vi.mocked(api.getLongTaskReport).mockResolvedValue(REPORT);
     show(doneTask());
-    fireEvent.click(screen.getByRole("button", { name: "Read the result" }));
-    const strong = await screen.findByText("7:00");
-    expect(api.getLongTaskArtifact).toHaveBeenCalledWith(TASK_ID, "art-1");
-    expect(strong.tagName).toBe("STRONG");
-    expect(screen.getByRole("link", { name: "the map" }).getAttribute("href")).toBe("https://example.com/map");
-    expect(screen.getByText("Plan").tagName).toBe("H4");
-    expect(document.querySelector(".lt__result pre")?.textContent).toBe("raw <b>text</b>");
-    expect(document.querySelector(".lt__result b")).toBeNull();
+    fireEvent.click(readButton());
+
+    const dialog = await screen.findByRole("dialog", { name: "Kenya tax rules" });
+    expect(api.getLongTaskReport).toHaveBeenCalledWith(TASK_ID);
+    expect(api.getLongTaskArtifact).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("heading", { name: "Income tax" }).tagName).toBe("H3");
+    expect(within(dialog).getByRole("table")).toBeTruthy();
+    expect(within(dialog).getByRole("checkbox", { name: "passport" }).getAttribute("aria-checked")).toBe("false");
+    expect(within(dialog).getByRole("link", { name: "KRA" }).getAttribute("target")).toBe("_blank");
+    expect(within(dialog).getByText("2 sections, 1 source")).toBeTruthy();
   });
 
-  it("hides it again, and keeps the button's name for the same action", async () => {
-    vi.mocked(api.getLongTaskArtifact).mockResolvedValue({ id: "art-1", title: "Trip plan", kind: "result", summary: "", body: "Hello" });
+  it("keeps the card's own preview to the one line", async () => {
+    vi.mocked(api.getLongTaskReport).mockResolvedValue(REPORT);
     show(doneTask());
-    fireEvent.click(screen.getByRole("button", { name: "Read the result" }));
-    await screen.findByText("Hello");
-    fireEvent.click(screen.getByRole("button", { name: "Hide the result" }));
-    expect(screen.queryByText("Hello")).toBeNull();
-    expect(screen.getByRole("button", { name: "Read the result" })).toBeTruthy();
+    fireEvent.click(readButton());
+    await screen.findByRole("dialog");
+    const card = document.querySelector(".lt") as HTMLElement;
+    expect(card.querySelector(".lt__result")).toBeNull();
+    expect(card.textContent).not.toContain("A short summary.");
+    expect(card.querySelector(".lt__resultline")?.textContent).toBe("Three days in Lamu, with ferry times.");
   });
 
-  it("shows Opening while the body is on its way", async () => {
-    let arrive: (v: LongTaskArtifactBody) => void = () => {};
-    vi.mocked(api.getLongTaskArtifact).mockReturnValue(new Promise<LongTaskArtifactBody>((resolve) => (arrive = resolve)));
+  it("shows Opening while the report is on its way", async () => {
+    let arrive: (r: LongTaskReport) => void = () => {};
+    vi.mocked(api.getLongTaskReport).mockReturnValue(new Promise<LongTaskReport>((resolve) => (arrive = resolve)));
     show(doneTask());
-    fireEvent.click(screen.getByRole("button", { name: "Read the result" }));
+    fireEvent.click(readButton());
     const opening = await screen.findByRole("button", { name: "Opening..." });
-    expect((opening as HTMLButtonElement).disabled).toBe(true);
-    arrive({ id: "art-1", title: "Trip plan", kind: "result", summary: "", body: "Arrived" });
-    await screen.findByText("Arrived");
+    // Not disabled, which would drop focus; a second press does nothing.
+    expect(opening.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(opening);
+    expect(api.getLongTaskReport).toHaveBeenCalledTimes(1);
+    arrive(REPORT);
+    await screen.findByRole("dialog");
   });
 
-  it("says when the body could not be fetched, and lets the person try again", async () => {
-    vi.mocked(api.getLongTaskArtifact).mockRejectedValueOnce(new Error("offline")).mockResolvedValue({
-      id: "art-1",
-      title: "Trip plan",
-      kind: "result",
-      summary: "",
-      body: "Second try",
-    });
+  it("closes on its Close button, and the card gets its focus back", async () => {
+    vi.mocked(api.getLongTaskReport).mockResolvedValue(REPORT);
     show(doneTask());
-    fireEvent.click(screen.getByRole("button", { name: "Read the result" }));
+    readButton().focus();
+    fireEvent.click(readButton());
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByRole("button", { name: "Close the report" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(readButton());
+  });
+
+  it("closes on Escape", async () => {
+    vi.mocked(api.getLongTaskReport).mockResolvedValue(REPORT);
+    show(doneTask());
+    fireEvent.click(readButton());
+    await screen.findByRole("dialog");
+    fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("says why it could not be opened, and the next press tries again", async () => {
+    vi.mocked(api.getLongTaskReport).mockRejectedValueOnce(new ApiError(403, "nobody identified")).mockResolvedValue(REPORT);
+    show(doneTask());
+    fireEvent.click(readButton());
+    expect((await screen.findByRole("alert")).textContent).toContain("Couldn't open the result. nobody identified");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(readButton());
+    await screen.findByRole("dialog");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("reading a result on a pond that has no report route", () => {
+  const BODY = "# Plan\n\n- ferry at **7:00**\n- [the map](https://example.com/map)\n\n```\nraw <b>text</b>\n```";
+
+  it("opens the Result itself on the same sheet, as markdown and never as html", async () => {
+    vi.mocked(api.getLongTaskReport).mockResolvedValue(null);
+    vi.mocked(api.getLongTaskArtifact).mockResolvedValue({ id: "art-1", title: "Trip plan", kind: "result", summary: "", body: BODY });
+    show(doneTask());
+    fireEvent.click(readButton());
+
+    const dialog = await screen.findByRole("dialog", { name: "Trip plan" });
+    expect(api.getLongTaskArtifact).toHaveBeenCalledWith(TASK_ID, "art-1");
+    const strong = within(dialog).getByText("7:00");
+    expect(strong.tagName).toBe("STRONG");
+    expect(within(dialog).getByRole("link", { name: "the map" }).getAttribute("href")).toBe("https://example.com/map");
+    expect(within(dialog).getByRole("heading", { name: "Plan" }).tagName).toBe("H3");
+    expect(dialog.querySelector("pre")?.textContent).toBe("raw <b>text</b>");
+    expect(dialog.querySelector("b")).toBeNull();
+  });
+
+  it("says when the Result could not be fetched, and lets the person try again", async () => {
+    vi.mocked(api.getLongTaskReport).mockResolvedValue(null);
+    vi.mocked(api.getLongTaskArtifact)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue({ id: "art-1", title: "Trip plan", kind: "result", summary: "", body: "Second try" });
+    show(doneTask());
+    fireEvent.click(readButton());
     expect((await screen.findByRole("alert")).textContent).toContain("Couldn't open the result. offline");
-    fireEvent.click(screen.getByRole("button", { name: "Read the result" }));
+    fireEvent.click(readButton());
     await screen.findByText("Second try");
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -280,6 +377,21 @@ describe("the cards of a conversation", () => {
     expect(screen.getByRole("region", { name: "Long tasks in this conversation" })).toBeTruthy();
     expect(screen.getByText("Book the ferry")).toBeTruthy();
     expect(screen.queryByText("Plan a trip to Lamu")).toBeNull();
+  });
+
+  it("names the group for deep research when that is all it holds", () => {
+    const longTasks = fakeLongTasks({ tasks: { [TASK_ID]: taskOf({ kind: "research" }) } });
+    render(<LongTaskStrays anchored={new Set()} longTasks={longTasks} variant="classic" />);
+    expect(screen.getByRole("region", { name: "Deep research in this conversation" })).toBeTruthy();
+    expect(screen.queryByText("Long tasks in this conversation")).toBeNull();
+  });
+
+  it("keeps the long-task name for a group that mixes kinds", () => {
+    const longTasks = fakeLongTasks({
+      tasks: { [TASK_ID]: taskOf({ kind: "research" }), [OTHER_ID]: doneTask({ id: OTHER_ID, goal: "Book the ferry" }) },
+    });
+    render(<LongTaskStrays anchored={new Set()} longTasks={longTasks} variant="classic" />);
+    expect(screen.getByRole("region", { name: "Long tasks in this conversation" })).toBeTruthy();
   });
 
   it("draws no group when every task is anchored, or on a pond that has none", () => {

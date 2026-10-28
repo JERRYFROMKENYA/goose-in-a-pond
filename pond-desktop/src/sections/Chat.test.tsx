@@ -621,14 +621,15 @@ describe("Chat — picture support", () => {
   });
 });
 
-/** The paperclip says why a model cannot take pictures, in the label the Models page shows. */
-describe("Chat — the paperclip's reason", () => {
+/** Add pictures says why a model cannot take pictures, in the label the Models page shows. */
+describe("Chat — Add pictures' reason", () => {
   it("names Pictures included when the model cannot look at pictures", async () => {
     vi.mocked(api.getVisionStatus).mockResolvedValue({
       model: "x", state: { kind: "not_declared" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
     render(<Chat />);
-    const clip = await screen.findByRole("button", { name: "Attach image" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add to message" }));
+    const clip = await screen.findByRole("menuitem", { name: "Add pictures" });
     await waitFor(() => expect(clip.getAttribute("title")).toBe(NOT_DECLARED_COPY));
     expect(clip.getAttribute("title")).not.toMatch(/Reads pictures/);
   });
@@ -638,7 +639,8 @@ describe("Chat — the paperclip's reason", () => {
       model: "x", state: { kind: "absent" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
     render(<Chat />);
-    const clip = await screen.findByRole("button", { name: "Attach image" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add to message" }));
+    const clip = await screen.findByRole("menuitem", { name: "Add pictures" });
     await waitFor(() => expect(clip.getAttribute("title")).toBe(ATTACH_BLOCKED_COPY));
   });
 });

@@ -528,12 +528,15 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             post(dismiss_agent_suggestion),
         )
         .route("/long-tasks", get(list_long_tasks))
+        .route("/long-tasks/deep-research", get(deep_research_availability))
         .route("/long-tasks/{id}", get(get_long_task))
         .route("/long-tasks/{id}/cancel", post(cancel_long_task))
         .route(
             "/long-tasks/{id}/artifacts/{artifact_id}",
             get(get_long_task_artifact),
         )
+        .route("/long-tasks/{id}/report", get(get_long_task_report))
+        .route("/long-tasks/{id}/export", get(export_long_task))
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -1701,6 +1704,12 @@ struct ChatRequest {
     /// Grounding context when this turn was initiated from a suggestion card.
     #[serde(default)]
     suggestion_context: Option<pond_core::user_data::domain::suggestion::SuggestionContext>,
+    /// The member asked for deep research: the pond starts a research task on the message.
+    #[serde(default)]
+    deep_research: bool,
+    /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
+    #[serde(skip)]
+    deep_research_for: Option<String>,
 }
 
 /// Non-streaming chat turn; creates the session when `session_id` is absent.
@@ -2093,6 +2102,12 @@ async fn tts_synthesise(
 async fn chat_stream(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
     body: Result<Json<ChatRequest>, JsonRejection>,
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)>
 {
@@ -2122,6 +2137,21 @@ async fn chat_stream(
     // Before the stream opens, so the client gets a real HTTP status, not an SSE error event.
     refuse_without_a_model(&state).await?;
     image_limit_response(&req.images)?;
+    req.deep_research_for = None;
+    if req.deep_research {
+        let member = long_task_caller(
+            &state,
+            principal.as_ref(),
+            peer,
+            insecure.is_some(),
+            tailnet.is_some(),
+        )
+        .await;
+        if let Some(refusal) = deep_research_refusal(&state, member.as_deref()).await {
+            return Err(refusal.response());
+        }
+        req.deep_research_for = member;
+    }
 
     // Picture support too, before the run permit and `spawn_run`, which saves the user message.
     req.images = prepare_turn_images(&state, std::mem::take(&mut req.images)).await?;
@@ -2500,6 +2530,8 @@ fn turn_stats_frame(s: &pond_core::shared::domain::turn_stats::TurnStats) -> Str
         "inference_count": s.inference_count,
         // Runs caused by thinking without answering, which `inference_count` lumps with tool runs.
         "reengagements": s.reengagements,
+        // Null when no MTP drafter ran: the only per-turn sign that speculative decoding did.
+        "draft_accept_rate": s.draft_accept_rate,
     })
     .to_string()
 }
@@ -2871,6 +2903,23 @@ async fn drive_turn(
 
     let model_name_for_done = settings.chat_model.clone();
 
+    // ── Deep research ───────────────────────────────────────────────────
+    // Started by the pond rather than left to the model, and folded through `absorb` below as
+    // the prime's own `task_start` call is, so the chat card finds it live and in history.
+    let deep_research_task = match req.deep_research_for.as_deref() {
+        None => None,
+        Some(member) => match start_deep_research(state, member, &req.message, &session_id).await {
+            Ok(task_id) => Some(task_id),
+            Err(e) => {
+                let data =
+                    json!({"error": format!("Could not start deep research: {e}")}).to_string();
+                run.push(data, true);
+                run.finish(crate::runs::RunState::Failed);
+                return;
+            }
+        },
+    };
+
     use pond_core::shared::domain::agent::AgentRequest;
 
     let agent_req = AgentRequest {
@@ -2885,6 +2934,7 @@ async fn drive_turn(
         tool_group_allowlist: req.tool_group_allowlist.clone(),
         warmup: false,
         suggestion_context: req.suggestion_context.clone(),
+        deep_research_task: deep_research_task.clone(),
     };
 
     let mut turn = TurnAccumulator::new(if settings.show_thinking && !req.voice_mode {
@@ -2892,6 +2942,15 @@ async fn drive_turn(
     } else {
         crate::thought_filter::ThoughtFilter::new()
     });
+    if let Some(task_id) = &deep_research_task {
+        for event in
+            pond_core::shared::services::deep_research::opening_events(&req.message, task_id)
+        {
+            if let StreamStep::Frame(data) = turn.absorb(event) {
+                run.push(data, false);
+            }
+        }
+    }
     let mut agent_stream = match state.agent.chat_stream(agent_req).await {
         Ok(s) => s,
         Err(e) => {
@@ -11535,6 +11594,7 @@ async fn agent_chat_stream(
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let mut agent_stream = match agent.chat_stream(request).await {
@@ -15339,6 +15399,7 @@ async fn long_task_view(
     Ok(json!({
         "id": task.id(),
         "goal": task.goal(),
+        "kind": task.kind(),
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
@@ -15360,6 +15421,109 @@ async fn long_task_view(
 #[derive(Debug, Deserialize)]
 struct LongTaskListQuery {
     session_id: Option<String>,
+}
+
+/// Why deep research cannot start for this caller. It is a long task, so the household's long
+/// tasks must be on and a member must own it: the caller the long-task routes answer, so the chat
+/// card can read what it starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepResearchRefusal {
+    Off,
+    Unidentified,
+}
+
+impl DeepResearchRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            DeepResearchRefusal::Off => "off",
+            DeepResearchRefusal::Unidentified => "unidentified",
+        }
+    }
+
+    fn response(self) -> (StatusCode, Json<Value>) {
+        let (status, error) = match self {
+            DeepResearchRefusal::Off => (
+                StatusCode::CONFLICT,
+                "Deep research is switched off on this pond.",
+            ),
+            DeepResearchRefusal::Unidentified => (
+                StatusCode::FORBIDDEN,
+                "Deep research needs to know who is asking, and this device is not linked to \
+                 anyone in the household.",
+            ),
+        };
+        // Both spellings: clients read refusals by `code`, and the composers' contract says `reason`.
+        let reason = format!("deep_research_{}", self.reason());
+        (
+            status,
+            Json(json!({"error": error, "code": reason, "reason": reason})),
+        )
+    }
+}
+
+async fn deep_research_refusal(
+    state: &Arc<AppState>,
+    member: Option<&str>,
+) -> Option<DeepResearchRefusal> {
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    if !(settings.ext_orchestrator_enabled && settings.long_tasks_enabled) {
+        return Some(DeepResearchRefusal::Off);
+    }
+    member
+        .is_none()
+        .then_some(DeepResearchRefusal::Unidentified)
+}
+
+/// `GET /api/v1/long-tasks/deep-research` -- whether this caller may start deep research now, so
+/// a composer offers it only where `chat_stream` would accept it.
+async fn deep_research_availability(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Json<Value> {
+    let member = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await;
+    match deep_research_refusal(&state, member.as_deref()).await {
+        None => Json(json!({"available": true})),
+        Some(refusal) => Json(json!({"available": false, "reason": refusal.reason()})),
+    }
+}
+
+/// A member's deep research, stored: a research task they own, reported back to this conversation.
+async fn start_deep_research(
+    state: &Arc<AppState>,
+    member: &str,
+    question: &str,
+    session_id: &str,
+) -> anyhow::Result<String> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let task = pond_core::shared::services::deep_research::research_task(
+        member,
+        question,
+        session_id,
+        chrono::Utc::now(),
+    )?;
+    long_task_repo(state).create_task(&task).await?;
+    tracing::info!(
+        target: "giap::trace",
+        kind = "long_task_started",
+        task_id = %task.id(),
+        origin_session_id = %session_id,
+        research = true,
+        "a member asked for deep research"
+    );
+    Ok(task.id().to_string())
 }
 
 /// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
@@ -15484,6 +15648,202 @@ async fn get_long_task(
         )
             .into_response(),
     }
+}
+
+/// A task's whole report: its summary and drafted sections joined in plan order, and the dated
+/// events its calendar artifacts hold.
+async fn long_task_report(
+    state: &Arc<AppState>,
+    task: &pond_core::shared::domain::long_task::LongTask,
+) -> anyhow::Result<(
+    String,
+    Vec<pond_core::shared::services::research_report::CalendarEvent>,
+    usize,
+)> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    use pond_core::shared::services::research_report as report;
+    let repo = long_task_repo(state);
+    let steps = repo.list_steps(task.id()).await?;
+    let artifacts = repo.list_artifacts(task.id()).await?;
+    let parts = report::report_parts(&steps, &artifacts);
+    let summary = match &parts.result {
+        Some(id) => repo
+            .get_artifact(task.id(), id)
+            .await?
+            .map(|a| a.body().to_string()),
+        None => None,
+    };
+    let mut sections = Vec::with_capacity(parts.sections.len());
+    for id in &parts.sections {
+        if let Some(artifact) = repo.get_artifact(task.id(), id).await? {
+            sections.push((artifact.title().to_string(), artifact.body().to_string()));
+        }
+    }
+    let mut events = Vec::new();
+    for id in &parts.calendars {
+        if let Some(artifact) = repo.get_artifact(task.id(), id).await? {
+            events.extend(report::calendar_events(artifact.body()));
+        }
+    }
+    let markdown = report::assemble(task.goal(), summary.as_deref(), &sections);
+    // A small model often skips the calendar save; the itinerary's own times still hold.
+    if events.is_empty() {
+        events = report::itinerary_events(&markdown, task.created_at().date_naive());
+    }
+    Ok((markdown, events, sections.len()))
+}
+
+/// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with
+/// what it cites and whether it has dated events a calendar can take.
+async fn get_long_task_report(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::services::research_report as report;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    match long_task_report(&state, &task).await {
+        Ok((markdown, events, sections)) => Json(json!({
+            "id": task.id(),
+            "title": report::assembled_title(&markdown),
+            "state": task.state(),
+            "kind": task.kind(),
+            "markdown": markdown,
+            "sections": sections,
+            "sources": report::sources(&markdown)
+                .into_iter()
+                .map(|s| json!({"title": s.title, "url": s.url}))
+                .collect::<Vec<_>>(),
+            "calendar_events": events.len(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LongTaskExportQuery {
+    format: Option<String>,
+}
+
+/// `GET /api/v1/long-tasks/{id}/export?format=markdown|html|ics` -- the report as a file to
+/// keep: Markdown, a page that prints or saves as a PDF, or its dated events for a calendar.
+async fn export_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LongTaskExportQuery>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::services::research_report as report;
+    let format = query.format.as_deref().unwrap_or("markdown");
+    if !matches!(format, "markdown" | "html" | "ics") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "format is markdown, html or ics"})),
+        )
+            .into_response();
+    }
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    let (markdown, events, _) = match long_task_report(&state, &task).await {
+        Ok(found) => found,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let title = report::assembled_title(&markdown);
+    let stem = crate::report_export::file_stem(&title);
+    let now = chrono::Utc::now();
+    let (content_type, extension, body) = match format {
+        "html" => (
+            "text/html; charset=utf-8",
+            "html",
+            crate::report_export::html_document(
+                &title,
+                &markdown,
+                &now.format("%-d %B %Y").to_string(),
+            ),
+        ),
+        "ics" if events.is_empty() => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "this report has no dated events for a calendar"})),
+            )
+                .into_response()
+        }
+        "ics" => (
+            "text/calendar; charset=utf-8",
+            "ics",
+            report::to_ics(task.id(), &events, now),
+        ),
+        _ => ("text/markdown; charset=utf-8", "md", markdown),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{stem}.{extension}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// `GET /api/v1/long-tasks/{id}/artifacts/{artifact_id}` -- an artifact's whole body, for
@@ -16181,6 +16541,8 @@ async fn run_recipe(
         canvas_mode: body.canvas_mode,
         tool_group_allowlist,
         suggestion_context: None,
+        deep_research: false,
+        deep_research_for: None,
     };
 
     Ok(chat_stream_inner(state, permit, chat_req, device))

@@ -3196,6 +3196,12 @@ impl GooseAdapter {
                 msg.push_str(&sc.render_envelope());
                 msg.push('\n');
             }
+            if let Some(ref task_id) = request.deep_research_task {
+                msg.push_str(&pond_core::shared::services::deep_research::turn_note(
+                    task_id,
+                ));
+                msg.push('\n');
+            }
             if !dynamic_suffix_for_user_msg.is_empty() {
                 msg.push_str(&dynamic_suffix_for_user_msg);
                 msg.push('\n');
@@ -4039,6 +4045,9 @@ impl GooseAdapter {
                 context_used_tokens = turn_stats.context_used_tokens,
                 context_limit_tokens = turn_stats.context_limit_tokens,
                 inference_count = turn_stats.inference_count,
+                // Always written, so `giap.sh doctor` can tell "no drafter ran" from an older server.
+                drafter = turn_stats.draft_accept_rate.is_some(),
+                draft_accept_rate = turn_stats.draft_accept_rate,
             );
             let stats = saw_usage.then_some(turn_stats);
             // Before Done: a client that stops reading at Done drops this stream.
@@ -4110,6 +4119,7 @@ impl AgentPort for GooseAdapter {
             // No completeness check: a whole extra round-trip for a ping nobody reads.
             warmup: true,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let shape = if voice_mode {
@@ -8000,6 +8010,7 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

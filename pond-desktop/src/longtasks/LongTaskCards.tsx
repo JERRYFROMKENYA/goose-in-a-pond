@@ -1,6 +1,6 @@
 import "./longTasks.css";
 import { LongTaskCard } from "./LongTaskCard";
-import { strayTasks } from "./longTaskWords";
+import { isResearch, strayTasks } from "./longTaskWords";
 import type { LongTasksState } from "./useLongTasks";
 
 interface CardsProps {
@@ -32,9 +32,10 @@ export function LongTaskStrays({ anchored, longTasks, variant }: StraysProps) {
   if (!longTasks.supported) return null;
   const strays = strayTasks(longTasks.tasks, anchored);
   if (strays.length === 0) return null;
+  const label = strays.every(isResearch) ? "Deep research in this conversation" : "Long tasks in this conversation";
   return (
-    <section className="lt__group" aria-label="Long tasks in this conversation">
-      <p className="lt__grouplabel">Long tasks in this conversation</p>
+    <section className="lt__group" aria-label={label}>
+      <p className="lt__grouplabel">{label}</p>
       {strays.map((task) => (
         <LongTaskCard key={task.id} id={task.id} longTasks={longTasks} variant={variant} />
       ))}

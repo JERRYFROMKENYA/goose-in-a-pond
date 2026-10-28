@@ -217,11 +217,10 @@ async fn snapshot_annotated_or_raw(path: &str, event: &CameraEvent) -> Option<Co
         if m.len() as usize <= MAX_IMAGE_BYTES {
             if let Ok(bytes) = tokio::fs::read(p).await {
                 let reg = LiveCameraRegistry::global();
-                let ann = FrameAnnotation::from_event(
-                    event,
-                    reg.measured_fps(&event.camera_id),
-                    |pid| reg.resolve_profile_name(pid),
-                );
+                let ann =
+                    FrameAnnotation::from_event(event, reg.measured_fps(&event.camera_id), |pid| {
+                        reg.resolve_profile_name(pid)
+                    });
                 if let Ok(compressed) = annotate_jpeg_for_model(&bytes, &ann, &reg.known_people()) {
                     return Some(ContentBlock::image(
                         base64::engine::general_purpose::STANDARD.encode(&compressed),
@@ -351,7 +350,11 @@ impl VisionMcpServer {
 
     async fn recent_face_context(&self, camera_id: &str, ann: Option<&FrameAnnotation>) -> String {
         if let Some(a) = ann {
-            if let Some(name) = a.identified_name.as_deref().or(a.identified_profile.as_deref()) {
+            if let Some(name) = a
+                .identified_name
+                .as_deref()
+                .or(a.identified_profile.as_deref())
+            {
                 let conf = a
                     .face_confidence
                     .map(|c| format!(" ({:.0}% confidence)", c * 100.0))
@@ -436,10 +439,16 @@ camera saw.")]
             .as_ref()
             .map(|a| a.summary_line())
             .unwrap_or_else(|| "status=live".to_string());
-        let live_face_ctx = self.recent_face_context(&camera_id, live_ann.as_ref()).await;
+        let live_face_ctx = self
+            .recent_face_context(&camera_id, live_ann.as_ref())
+            .await;
 
         let scan_limit = limit.max(250);
-        match self.camera_storage.list_events(&camera_id, scan_limit).await {
+        match self
+            .camera_storage
+            .list_events(&camera_id, scan_limit)
+            .await
+        {
             Ok(events) if events.is_empty() => {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
                     crate::format::format_no_results(
@@ -451,7 +460,8 @@ camera saw.")]
             Ok(events) => {
                 let mut sightings: Vec<(String, i64, String, Option<f32>, usize)> = Vec::new();
                 for e in &events {
-                    let ann = FrameAnnotation::from_event(e, None, |pid| reg.resolve_profile_name(pid));
+                    let ann =
+                        FrameAnnotation::from_event(e, None, |pid| reg.resolve_profile_name(pid));
                     if let Some(name) = ann.identified_name.or(ann.identified_profile) {
                         if let Some(existing) = sightings.iter_mut().find(|s| s.0 == name) {
                             existing.4 += 1;

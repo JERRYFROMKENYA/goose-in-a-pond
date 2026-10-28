@@ -466,6 +466,39 @@ jobs:
       - name: Tests
         run: bash scripts/lib/connect-setup.test.sh
 
+  # What giap.sh reads from the pond's log and a Jetson's GPU driver (scripts/lib/pond-health.sh):
+  # the engine and a failed load, MTP, KV snapshots and the nvmap cap, against fixture logs and fakes.
+  pond-health:
+    name: Pond health scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/pond-health.test.sh
+
+  # `giap.sh console` (scripts/lib/console.sh, console-collect.sh): charts, sample storage, keys,
+  # the log view and a drawn frame, against fixture samples; nothing evaluates a board's text.
+  console:
+    name: Live console scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/console.test.sh
+
+  # The installer's conversation-model step (scripts/lib/install-models.sh): GIAP's picks match
+  # curated.rs, nothing downloads unchosen, and Ollama stays an opt-in, against a fake pond-server.
+  install-models:
+    name: Installer model step - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/install-models.test.sh
+
   # `giap.sh check` (scripts/lib/local-checks.sh) reads its Rust crate lists from this file, so a
   # renamed step or a reshaped `-p` list fails here rather than in a contributor's terminal.
   local-checks:

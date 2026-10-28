@@ -3,6 +3,7 @@ import {
   currentStep,
   isEnded,
   isMoving,
+  isResearch,
   resultLine,
   resultOf,
   startedTaskId,
@@ -10,6 +11,7 @@ import {
   stepAgent,
   stepWords,
   strayTasks,
+  taskKindLabel,
   taskWords,
 } from "./longTaskWords";
 import { artifactOf, doneTask, OTHER_ID, STARTED_TEXT, stepOf, TASK_ID, taskOf } from "./longTaskFixtures";
@@ -53,6 +55,37 @@ describe("finding the task a tool result started", () => {
     const other = JSON.stringify({ tool: "giap-knowledge__search_web", content: STARTED_TEXT });
     expect(startedTaskIdOfRow({ role: "tool", content: other })).toBeNull();
     expect(startedTaskIdOfRow({ role: "assistant", content: STARTED_TEXT })).toBeNull();
+  });
+});
+
+describe("finding the task the pond itself started for deep research", () => {
+  const POND_TEXT = `Started task ${TASK_ID}. It runs in the background and will report here when it is done.`;
+  const POND_TOOL = "giap-tasks__task_start";
+
+  it("reads the text of a result the pond made, as it reads a model's", () => {
+    expect(startedTaskId(POND_TEXT, POND_TOOL)).toBe(TASK_ID);
+  });
+
+  it("reads a stored row whose call id is the pond's own, not a uuid the task is called by", () => {
+    const row = {
+      role: "tool" as const,
+      content: JSON.stringify({ tool_call_id: `deep-research-${OTHER_ID}`, tool: POND_TOOL, content: POND_TEXT }),
+    };
+    expect(startedTaskIdOfRow(row)).toBe(TASK_ID);
+  });
+});
+
+describe("what a task is for", () => {
+  it("calls a research task Deep research, for assistive tech", () => {
+    expect(isResearch(taskOf({ kind: "research" }))).toBe(true);
+    expect(taskKindLabel(taskOf({ kind: "research" }))).toBe("Deep research");
+  });
+
+  it("counts a general task, and one from a pond that does not say, as a long task", () => {
+    expect(isResearch(taskOf({ kind: "general" }))).toBe(false);
+    expect(isResearch(taskOf())).toBe(false);
+    expect(taskKindLabel(taskOf({ kind: "general" }))).toBe("Long task");
+    expect(taskKindLabel(taskOf())).toBe("Long task");
   });
 });
 

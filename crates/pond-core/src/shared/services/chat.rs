@@ -732,6 +732,7 @@ impl ChatService {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
         let response_text = self.agent.chat(request).await?.text;
 
@@ -1110,6 +1111,7 @@ impl ChatService {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         // Clear interrupts once per turn, not per sentence, so a barge-in stops the whole reply.

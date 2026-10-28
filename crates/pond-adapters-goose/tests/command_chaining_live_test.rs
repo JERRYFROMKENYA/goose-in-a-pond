@@ -273,6 +273,7 @@ async fn run_utterance(session_id: &str, utterance: &str) -> ChainRun {
         tool_group_allowlist: None,
         warmup: false,
         suggestion_context: None,
+        deep_research_task: None,
     };
 
     let started = Instant::now();

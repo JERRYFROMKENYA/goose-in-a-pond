@@ -719,6 +719,7 @@ mod tests {
                 tool_group_allowlist: None,
                 warmup: false,
                 suggestion_context: None,
+                deep_research_task: None,
             })
             .await
             .unwrap();
@@ -742,6 +743,7 @@ mod tests {
                 tool_group_allowlist: None,
                 warmup: false,
                 suggestion_context: None,
+                deep_research_task: None,
             })
             .await
             .unwrap();
@@ -823,6 +825,7 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
         let prompt = agent
             .build_system_prompt(&Settings::default(), &request)

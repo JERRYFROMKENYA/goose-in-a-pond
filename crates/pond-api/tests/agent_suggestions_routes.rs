@@ -26,6 +26,8 @@ struct Pond {
     router: axum::Router,
     member: String,
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
+    settings: Arc<SqliteSettingsRepository>,
+    agent: Arc<pond_core::shared::mocks::mock_agent::MockAgent>,
     _dir: tempfile::TempDir,
 }
 
@@ -35,7 +37,10 @@ async fn pond(paired: bool, primary: bool) -> Pond {
     let built = pond_api::test_support::app_state().await;
     let mut state = built.state;
     // The real store: the mock keeps no primary member.
-    state.settings_repo = Arc::new(SqliteSettingsRepository::new(state.db.system.clone()));
+    let settings = Arc::new(SqliteSettingsRepository::new(state.db.system.clone()));
+    state.settings_repo = settings.clone();
+    let agent = Arc::new(pond_core::shared::mocks::mock_agent::MockAgent::new());
+    state.agent = agent.clone();
     let member = state
         .profile_repo
         .create(CreateProfileRequest {
@@ -78,6 +83,8 @@ async fn pond(paired: bool, primary: bool) -> Pond {
     );
     Pond {
         tasks,
+        settings,
+        agent,
         router: build_router(
             Arc::new(state),
             std::path::PathBuf::from("pond-desktop/dist"),
@@ -516,4 +523,176 @@ async fn a_member_sees_and_stops_their_long_task_and_nobody_else_does() {
 
 async fn pond_with_no_member() -> Pond {
     pond(false, false).await
+}
+
+/// The SSE frames of one streamed turn, in order.
+async fn stream(pond: &Pond, request: Request<Body>) -> (StatusCode, Vec<serde_json::Value>) {
+    let response = pond.router.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    if !status.is_success() {
+        return (status, vec![serde_json::from_str(&text).unwrap()]);
+    }
+    let frames = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str(data).ok())
+        .collect();
+    (status, frames)
+}
+
+async fn turn_long_tasks_on(pond: &Pond) {
+    let mut settings = pond.settings.get().await.unwrap();
+    settings.ext_orchestrator_enabled = true;
+    settings.long_tasks_enabled = true;
+    pond.settings.update(&settings).await.unwrap();
+}
+
+/// Deep research is offered and accepted only where it can run, and for a member it starts a
+/// research task they own, opened in the stream and stored exactly as the prime's own
+/// `task_start` call, with the turn told about it so the reply does not answer in its place.
+#[tokio::test]
+async fn deep_research_starts_a_research_task_the_chat_card_can_follow() {
+    use pond_core::shared::domain::long_task::LongTaskKind;
+    use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
+
+    let ask = serde_json::json!({
+        "message": "Which heat pumps suit a cold one-bedroom flat?",
+        "deep_research": true,
+    });
+    let availability = |pond: &Pond| {
+        let request = call(Method::GET, "/api/v1/long-tasks/deep-research", None, false);
+        let router = pond.router.clone();
+        async move {
+            let response = router.oneshot(request).await.unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+
+    let pond = pond(true, false).await;
+    assert_eq!(
+        availability(&pond).await,
+        serde_json::json!({"available": false, "reason": "off"})
+    );
+    let (status, frames) = stream(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(ask.clone()),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{frames:?}");
+    assert_eq!(frames[0]["reason"], "deep_research_off");
+
+    turn_long_tasks_on(&pond).await;
+    assert_eq!(
+        availability(&pond).await,
+        serde_json::json!({"available": true})
+    );
+    let (status, frames) = stream(
+        &pond,
+        call(
+            Method::POST,
+            "/api/v1/chat/stream",
+            Some(ask.clone()),
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{frames:?}");
+
+    let tasks = pond
+        .tasks
+        .list_tasks(LongTaskOwnerFilter::Member(&pond.member), true)
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 1, "one research task for the member");
+    let task = &tasks[0];
+    assert_eq!(task.kind(), LongTaskKind::Research);
+    assert_eq!(
+        task.goal(),
+        "Which heat pumps suit a cold one-bedroom flat?"
+    );
+    let session = task
+        .origin_session_id()
+        .expect("it reports to this conversation")
+        .to_string();
+
+    let call_frame = frames
+        .iter()
+        .position(|f| f["type"] == "tool_call" && f["tool"] == "giap-tasks__task_start")
+        .expect("the stream opens with the task_start call");
+    let result = frames
+        .iter()
+        .find(|f| f["type"] == "tool_result" && f["tool"] == "giap-tasks__task_start")
+        .expect("and its result");
+    assert!(
+        result["content"]
+            .as_str()
+            .unwrap()
+            .starts_with(&format!("Started task {}.", task.id())),
+        "{result}"
+    );
+    let first_text = frames.iter().position(|f| f["type"] == "text");
+    assert!(
+        first_text.is_none_or(|text| call_frame < text),
+        "the call comes before the reply"
+    );
+    assert_eq!(
+        pond.agent
+            .last_request()
+            .unwrap()
+            .deep_research_task
+            .as_deref(),
+        Some(task.id()),
+        "the turn is told which task it started"
+    );
+
+    let (status, history) = send(
+        &pond,
+        call(
+            Method::GET,
+            &format!("/api/v1/sessions/{session}/messages"),
+            None,
+            false,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    let stored = history.to_string();
+    assert!(
+        stored.contains(&format!("Started task {}", task.id())) && stored.contains("task_start"),
+        "history keeps the call, so a reopened chat anchors the card: {stored}"
+    );
+
+    let uri = format!("/api/v1/long-tasks/{}", task.id());
+    let (_, view) = send(&pond, call(Method::GET, &uri, None, false)).await;
+    assert_eq!(view["kind"], "research");
+
+    let stranger = pond_with_no_member().await;
+    turn_long_tasks_on(&stranger).await;
+    assert_eq!(
+        availability(&stranger).await,
+        serde_json::json!({"available": false, "reason": "unidentified"})
+    );
+    let (status, frames) = stream(
+        &stranger,
+        call(Method::POST, "/api/v1/chat/stream", Some(ask), false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{frames:?}");
+    assert_eq!(frames[0]["reason"], "deep_research_unidentified");
+    assert!(
+        stranger.agent.last_request().is_none(),
+        "a refused turn never reaches the model"
+    );
 }

@@ -3196,6 +3196,12 @@ impl GooseAdapter {
                 msg.push_str(&sc.render_envelope());
                 msg.push('\n');
             }
+            if let Some(ref task_id) = request.deep_research_task {
+                msg.push_str(
+                    &pond_core::shared::services::long_task_roles::deep_research_turn_note(task_id),
+                );
+                msg.push('\n');
+            }
             if !dynamic_suffix_for_user_msg.is_empty() {
                 msg.push_str(&dynamic_suffix_for_user_msg);
                 msg.push('\n');
@@ -4110,6 +4116,7 @@ impl AgentPort for GooseAdapter {
             // No completeness check: a whole extra round-trip for a ping nobody reads.
             warmup: true,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let shape = if voice_mode {
@@ -8000,6 +8007,7 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

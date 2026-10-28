@@ -93,6 +93,18 @@ fn shipped(name: &str, recipe: &str) -> Result<AgentRole, RoleError> {
     })
 }
 
+/// What the prime is told on a turn whose question the pond already handed to deep research, so
+/// its reply is a short acknowledgement and never a second, unresearched answer.
+pub fn deep_research_turn_note(task_id: &str) -> String {
+    format!(
+        "<deep-research>\nThe person asked for deep research on their message, and the pond has \
+         started task {task_id} on it: helpers will search, compare sources and write a report, \
+         and the person is told on their phone when it is done. Reply in one or two sentences \
+         saying what will be looked into. Do not answer the question yourself, and do not call \
+         task_start.\n</deep-research>"
+    )
+}
+
 pub fn planner_role() -> Result<AgentRole, RoleError> {
     shipped(PLANNER_ROLE, PLANNER_ROLE_RECIPE)
 }
@@ -108,6 +120,18 @@ pub fn verifier_role() -> Result<AgentRole, RoleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_deep_research_note_names_its_task_and_keeps_the_prime_from_answering() {
+        let note = deep_research_turn_note("task-7");
+        assert!(note.contains("task-7"));
+        assert!(note.contains("Do not answer the question yourself"));
+        assert!(
+            note.contains("do not call"),
+            "a second task_start would start it twice"
+        );
+        assert!(note.starts_with("<deep-research>") && note.ends_with("</deep-research>"));
+    }
 
     #[test]
     fn every_shipped_role_parses_and_can_reach_the_ledger() {

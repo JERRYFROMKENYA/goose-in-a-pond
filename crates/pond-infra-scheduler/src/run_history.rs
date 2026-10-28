@@ -46,6 +46,25 @@ impl JsonRunHistory {
         self.start(schedule_id, Some(due_at)).await
     }
 
+    /// Record a missed run that did not happen, as one finished entry dated when it was due.
+    pub async fn record_skipped(&self, schedule_id: &str, due_at: DateTime<Utc>, why: &str) {
+        let run = ScheduleRun {
+            id: uuid::Uuid::new_v4().to_string(),
+            schedule_id: schedule_id.to_string(),
+            status: RunStatus::Skipped,
+            result: Some(why.to_string()),
+            error: None,
+            started_at: due_at,
+            finished_at: Some(Utc::now()),
+            duration_ms: None,
+            caught_up_from: None,
+        };
+        let mut guard = self.state.lock().await;
+        guard.push(run);
+        self.prune(&mut guard);
+        let _ = self.save_inner(&guard).await;
+    }
+
     async fn start(&self, schedule_id: &str, caught_up_from: Option<DateTime<Utc>>) -> String {
         let run_id = uuid::Uuid::new_v4().to_string();
         let run = ScheduleRun {
@@ -153,5 +172,26 @@ mod tests {
         let runs = reopened.get_runs("morning", 10).await;
         let late: Vec<_> = runs.iter().filter_map(|r| r.caught_up_from).collect();
         assert_eq!(late, [due]);
+    }
+
+    #[tokio::test]
+    async fn a_skipped_run_is_dated_when_it_was_due_and_says_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let history = JsonRunHistory::new(tmp.path().join("runs.json"), 10)
+            .await
+            .unwrap();
+        let due = Utc::now() - chrono::Duration::hours(3);
+        history
+            .record_skipped("morning", due, "Skipped by a household member")
+            .await;
+
+        let runs = history.get_runs("morning", 10).await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, RunStatus::Skipped);
+        assert_eq!(runs[0].started_at, due);
+        assert_eq!(
+            runs[0].result.as_deref(),
+            Some("Skipped by a household member")
+        );
     }
 }

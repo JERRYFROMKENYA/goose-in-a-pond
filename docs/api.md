@@ -1132,7 +1132,7 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
 | `POST /schedules/{id}/run-now` | | `202 {fired}` |
-| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms}]` |
+| `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
 | `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
 
 The task kind comes from `kind`, else `payload.webhook_url`, else `prompt` (or `payload.prompt`). A

@@ -7,6 +7,7 @@
 #   bash scripts/giap.sh install -y   # ... without the confirmation prompts
 #   bash scripts/giap.sh doctor       # non-interactive: health report, exit 1 on FAIL
 #   bash scripts/giap.sh status       # non-interactive: detection banner only
+#   bash scripts/giap.sh console [HOST] # live stats, charts and logs for this machine, the Jetson (nano) and HOST
 #   bash scripts/giap.sh build        # non-interactive: build UI + server for THIS host
 #   bash scripts/giap.sh update       # bring this pond to its branch's newest code: pull, Node, build, restart, grants, doctor
 #   bash scripts/giap.sh update -y    # ... answering yes to each step (downloads, a service stop for the build)
@@ -60,6 +61,10 @@ source "$HERE/lib/macos-sdk.sh"
 source "$HERE/lib/litert-setup.sh"
 # shellcheck source=lib/pond-health.sh
 source "$HERE/lib/pond-health.sh"
+# shellcheck source=lib/console-collect.sh
+source "$HERE/lib/console-collect.sh"
+# shellcheck source=lib/console.sh
+source "$HERE/lib/console.sh"
 # shellcheck source=lib/onnxruntime-setup.sh
 source "$HERE/lib/onnxruntime-setup.sh"
 # shellcheck source=lib/model-pairings.sh
@@ -1661,6 +1666,7 @@ show_menu() {
   say ""
   say "  ${C_B}Observe${C_RST}"
   say "  40) Logs"
+  say "  41) Live console: stats, charts and logs for this machine and the Jetson"
   [ "$D_IS_JETSON" = true ] && say "  50) Jetson power, thermals and over-current"
   say ""
   say "   r) Re-run detection    d) Toggle dry-run (now: $DRY_RUN)    0) Quit"
@@ -1697,6 +1703,7 @@ menu_loop() {
       31) action_build_desktop; pause ;;
       32) action_launch_gui; pause ;;
       40) action_logs; pause ;;
+      41) console_main "" "" ;;
       50) action_jetson_power; pause ;;
       r|R) detect_all; ok "detection refreshed" ;;
       d|D) [ "$DRY_RUN" = true ] && DRY_RUN=false || DRY_RUN=true ;;
@@ -1715,8 +1722,8 @@ usage() {
 
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
-# `onnxruntime` and `wifi-grant` (a subcommand) take more.
-CMD=""; CMD_SUB=""; CMD_ARG=""
+# `onnxruntime`, `wifi-grant` (a subcommand) and `console` (a host) take more.
+CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
@@ -1726,6 +1733,7 @@ while [ $# -gt 0 ]; do
     --install-deps) NODE_DEPS=true; shift ;;
     --method)  [ $# -ge 2 ] || { bad "--method needs a value"; exit 2; }; NODE_METHOD="$2"; shift 2 ;;
     --major)   [ $# -ge 2 ] || { bad "--major needs a value"; exit 2; }; NODE_MAJOR="$2"; shift 2 ;;
+    --once)    CONSOLE_ONCE=once; shift ;;
     -h|--help|help) usage; exit 0 ;;
     -*)        bad "unknown option: $1"; usage; exit 2 ;;
     provision) bad "provision takes only its own options and must come first: bash scripts/giap.sh provision --host HOST --key FILE"; exit 2 ;;
@@ -1739,7 +1747,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert) ;;
-  models|wifi-grant|onnxruntime) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  models|wifi-grant|onnxruntime|console) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1747,6 +1755,8 @@ esac
 # command runs on the right Node: if the shell's is outside the range, a recorded or already-installed
 # one is put first on PATH for this run, so the UI build and the tests use it whatever the shell says.
 if [ "$CMD" = node ]; then action_node; exit $?; fi
+# The console samples on its own, so it skips the full detection pass and opens at once.
+if [ "$CMD" = console ]; then console_main "$CMD_SUB" "$CONSOLE_ONCE"; exit $?; fi
 node_use_repo >/dev/null 2>&1
 D_NODE_NOTE="$NODE_USE_NOTE"; D_NODE_FROM="$NODE_USE_FROM"
 

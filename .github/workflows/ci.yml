@@ -477,6 +477,17 @@ jobs:
       - name: Tests
         run: bash scripts/lib/pond-health.test.sh
 
+  # `giap.sh console` (scripts/lib/console.sh, console-collect.sh): charts, sample storage, keys,
+  # the log view and a drawn frame, against fixture samples; nothing evaluates a board's text.
+  console:
+    name: Live console scripts - bash tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tests
+        run: bash scripts/lib/console.test.sh
+
   # The installer's conversation-model step (scripts/lib/install-models.sh): GIAP's picks match
   # curated.rs, nothing downloads unchosen, and Ollama stays an opt-in, against a fake pond-server.
   install-models:

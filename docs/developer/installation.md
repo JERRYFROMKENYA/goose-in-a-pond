@@ -15,6 +15,7 @@ that apply. Every verb also runs without the menu:
 | Command | Does |
 |---|---|
 | `giap.sh doctor` | health report; exits 1 on any FAIL. Run it after every install |
+| `giap.sh console [HOST]` | live stats, charts and logs: this machine, the Jetson the deploy scripts use (`nano`), and HOST over ssh. Keys: `tab` host, `l` logs, `d` doctor, `r` restart, `?` all |
 | `giap.sh status` | the detection banner only |
 | `giap.sh install` | first-time install through `scripts/install.sh`, with guardrails (below) |
 | `giap.sh build` | web UI, then a release `pond-server` with this host's features, then `pondnet` if Go is present |

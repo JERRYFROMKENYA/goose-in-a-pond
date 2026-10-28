@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, cleanup, within } from "@testing-library/react";
 import { Chat } from "./Chat";
 import { api } from "../api/PondApiClient";
 import { __resetChatRunForTests, openSession, setChatRunBridge } from "../state/chatRunStore";
@@ -38,6 +38,7 @@ vi.mock("../api/PondApiClient", () => ({
     listLongTasks: vi.fn(),
     getLongTask: vi.fn(),
     getLongTaskArtifact: vi.fn(),
+    getLongTaskReport: vi.fn(),
     cancelLongTask: vi.fn(),
   },
 }));
@@ -92,6 +93,9 @@ beforeEach(() => {
   vi.mocked(api.listLongTasks).mockResolvedValue([]);
   vi.mocked(api.getLongTask).mockResolvedValue(taskOf());
   vi.mocked(api.getLongTaskArtifact).mockReset();
+  // An older pond has no report route; a test that wants the whole report says so.
+  vi.mocked(api.getLongTaskReport).mockReset();
+  vi.mocked(api.getLongTaskReport).mockResolvedValue(null);
   vi.mocked(api.cancelLongTask).mockReset();
   confirmMock.mockReset();
   confirmMock.mockResolvedValue(true);
@@ -215,6 +219,32 @@ describe("Chat, a long task the prime starts", () => {
     const strong = await screen.findByText("7:00");
     expect(strong.tagName).toBe("STRONG");
     expect(api.getLongTaskArtifact).toHaveBeenCalledWith(TASK_ID, "art-1");
+  });
+
+  it("opens the whole report on its own sheet when the pond has one", async () => {
+    vi.mocked(api.getSessionMessages).mockResolvedValue(historyWithTask());
+    vi.mocked(api.getLongTask).mockResolvedValue(doneTask());
+    vi.mocked(api.getLongTaskReport).mockResolvedValue({
+      id: TASK_ID,
+      title: "Trip plan",
+      state: "completed",
+      kind: "general",
+      markdown: "# Trip plan\n\nThree days.\n\n## Ferry\n\nLeaves at **7:00**.\n\n## Sources\n\n- [Ferry co](https://example.com/ferry)\n",
+      sections: 1,
+      sources: [{ title: "Ferry co", url: "https://example.com/ferry" }],
+      calendar_events: 0,
+    });
+    await openSession("sess-1");
+    render(<Chat />);
+
+    await screen.findByText("Three days in Lamu, with ferry times.");
+    fireEvent.click(screen.getByRole("button", { name: "Read the result" }));
+    const dialog = await screen.findByRole("dialog", { name: "Trip plan" });
+    expect(within(dialog).getByRole("heading", { name: "Ferry" })).toBeTruthy();
+    expect(within(dialog).getByText("7:00").tagName).toBe("STRONG");
+    expect(within(dialog).getByRole("link", { name: "Ferry co" }).getAttribute("href")).toBe("https://example.com/ferry");
+    expect(api.getLongTaskReport).toHaveBeenCalledWith(TASK_ID);
+    expect(api.getLongTaskArtifact).not.toHaveBeenCalled();
   });
 
   it("stops a running task after asking, and shows how it ended", async () => {

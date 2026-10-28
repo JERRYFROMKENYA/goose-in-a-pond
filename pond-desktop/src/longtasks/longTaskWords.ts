@@ -41,6 +41,12 @@ export function taskKindLabel(task: Pick<LongTask, "kind">): string {
   return isResearch(task) ? "Deep research" : "Long task";
 }
 
+/** The report's own `# Title` line, taken off when the reading view already shows that title above the text. */
+export function withoutTitle(markdown: string, title: string): string {
+  const heading = /^\s*#\s+([^\n]*)\n+/.exec(markdown);
+  return heading && heading[1].trim() === title.trim() ? markdown.slice(heading[0].length) : markdown;
+}
+
 export function isEnded(state: LongTaskState): boolean {
   return state === "completed" || state === "failed" || state === "cancelled";
 }

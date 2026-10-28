@@ -89,3 +89,76 @@
   color: inherit;
   text-decoration: underline;
 }
+
+.md del {
+  text-decoration: line-through;
+  color: var(--color-text-secondary);
+}
+
+/* A read-only box, outlined in secondary text (5.97:1 on the ground) because a control's edge needs 3:1; ticked is a filled box, never a hue. */
+.md__task {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-left: calc(var(--space-5) * -1);
+  list-style: none;
+}
+
+.md__box {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 0.25em;
+  box-sizing: border-box;
+  border: 1.5px solid var(--color-text-secondary);
+  border-radius: var(--radius-xs);
+  color: var(--color-bg);
+}
+
+.md__box[aria-checked="true"] {
+  border-color: var(--color-text);
+  background: var(--color-text);
+}
+
+.md__taskText {
+  min-width: 0;
+}
+
+.md__tablewrap {
+  margin: 0 0 var(--space-3);
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.md__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+
+.md__cell {
+  min-width: 6rem;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--color-border);
+  overflow-wrap: break-word;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md__table thead .md__cell {
+  border-top: 0;
+  background: var(--color-hover);
+  font-weight: var(--weight-semibold);
+}
+
+.md__cell--center {
+  text-align: center;
+}
+
+.md__cell--right {
+  text-align: right;
+}

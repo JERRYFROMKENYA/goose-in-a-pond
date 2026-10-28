@@ -182,22 +182,6 @@
   margin-top: 2px;
 }
 
-.lt__result {
-  max-height: 360px;
-  overflow-y: auto;
-  padding: var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface);
-}
-
-.lt__resulttitle {
-  margin: 0 0 var(--space-2);
-  font-family: var(--font-heading);
-  font-size: var(--text-md);
-  font-weight: var(--weight-bold);
-}
-
 @media (prefers-reduced-motion: reduce) {
   .lt .animate-spin {
     animation: none;

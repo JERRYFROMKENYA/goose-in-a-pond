@@ -1019,6 +1019,28 @@ export interface LongTask {
   result_artifact_id: string | null;
 }
 
+/** One web page a report cites. */
+export interface LongTaskSource {
+  title: string;
+  url: string;
+}
+
+/** A task's whole report, from `GET /long-tasks/{id}/report`; `markdown` joins the summary and every section. */
+export interface LongTaskReport {
+  id: string;
+  title: string;
+  state: LongTaskState;
+  kind: LongTaskKind;
+  markdown: string;
+  /** How many drafted sections the report was joined from. */
+  sections: number;
+  sources: LongTaskSource[];
+  /** How many dated events it holds; a calendar file is offered only above 0. */
+  calendar_events: number;
+}
+
+export type LongTaskExportFormat = "markdown" | "html" | "ics";
+
 export interface LongTaskArtifactBody {
   id: string;
   title: string;

@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { AlertCircle, AlertTriangle, Check, CircleSlash, Clock, Loader2, Pause, Telescope } from "lucide-react";
 import "./longTasks.css";
-import { api } from "../api/PondApiClient";
-import type { LongTask, LongTaskArtifactBody, LongTaskState } from "../api/types";
-import { MarkdownText } from "../components/MarkdownText";
+import type { LongTask, LongTaskState } from "../api/types";
 import { useConfirm } from "../components/shared";
 import { isEnded, isResearch, resultLine, resultOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
 import type { LongTasksState } from "./useLongTasks";
+import { useLongTaskReport } from "./useLongTaskReport";
+import { ReportExport } from "./ReportExport";
+import { ReportSheet } from "./ReportSheet";
 
 function StateIcon({ state }: { state: LongTaskState }) {
   const props = { size: 14, "aria-hidden": true as const };
@@ -27,12 +28,6 @@ function StateIcon({ state }: { state: LongTaskState }) {
   }
 }
 
-type Reading =
-  | { status: "idle" }
-  | { status: "loading" }
-  | { status: "open"; artifact: LongTaskArtifactBody }
-  | { status: "failed"; message: string };
-
 interface Props {
   id: string;
   longTasks: LongTasksState;
@@ -42,30 +37,40 @@ interface Props {
 
 /** A working note on one long task: what it is for, how far it has got, who is on each step, and its result. */
 export function LongTaskCard({ id, longTasks, variant }: Props) {
-  const confirm = useConfirm();
-  const [reading, setReading] = useState<Reading>({ status: "idle" });
   const task: LongTask | undefined = longTasks.tasks[id];
+  if (!task) return <LongTaskGap id={id} longTasks={longTasks} variant={variant} />;
+  return <LongTaskBody task={task} longTasks={longTasks} variant={variant} />;
+}
 
-  if (!task) {
-    if (longTasks.gone[id]) {
-      return (
-        <div className={`lt lt--${variant} lt--quiet`}>
-          <p className="lt__note">This task is no longer on the pond.</p>
-        </div>
-      );
-    }
-    const why = longTasks.unreadable[id];
+/** A card for a task the chat points at but the pond has not (yet) shown: checking, gone, or unreadable. */
+function LongTaskGap({ id, longTasks, variant }: Props) {
+  if (longTasks.gone[id]) {
     return (
-      <div className={`lt lt--${variant} lt--quiet`} aria-busy={why === undefined}>
-        <p className="lt__note">{why === undefined ? "Checking on this task..." : "Couldn't check on this task just now."}</p>
-        {why !== undefined ? (
-          <button type="button" className="ink-btn ink-btn--quiet lt__btn" onClick={() => longTasks.retry(id)}>
-            Try again
-          </button>
-        ) : null}
+      <div className={`lt lt--${variant} lt--quiet`}>
+        <p className="lt__note">This task is no longer on the pond.</p>
       </div>
     );
   }
+  const why = longTasks.unreadable[id];
+  return (
+    <div className={`lt lt--${variant} lt--quiet`} aria-busy={why === undefined}>
+      <p className="lt__note">{why === undefined ? "Checking on this task..." : "Couldn't check on this task just now."}</p>
+      {why !== undefined ? (
+        <button type="button" className="ink-btn ink-btn--quiet lt__btn" onClick={() => longTasks.retry(id)}>
+          Try again
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks: LongTasksState; variant: "classic" | "hub" }) {
+  const id = task.id;
+  const confirm = useConfirm();
+  const report = useLongTaskReport(task);
+  const [opening, setOpening] = useState(false);
+  const [openFailed, setOpenFailed] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   const ended = isEnded(task.state);
   const stopping = longTasks.stopping[id] === true;
@@ -81,17 +86,14 @@ export function LongTaskCard({ id, longTasks, variant }: Props) {
     if (ok) await longTasks.stop(id);
   }
 
-  async function onRead(artifactId: string) {
-    if (reading.status === "open") {
-      setReading({ status: "idle" });
-      return;
-    }
-    setReading({ status: "loading" });
-    try {
-      setReading({ status: "open", artifact: await api.getLongTaskArtifact(id, artifactId) });
-    } catch (e) {
-      setReading({ status: "failed", message: e instanceof Error ? e.message : String(e) });
-    }
+  // The whole report opens on its own sheet; the card keeps only the short line about it.
+  async function onRead() {
+    setOpening(true);
+    setOpenFailed(false);
+    const loaded = await report.load();
+    setOpening(false);
+    if (loaded) setSheetOpen(true);
+    else setOpenFailed(true);
   }
 
   return (
@@ -138,14 +140,20 @@ export function LongTaskCard({ id, longTasks, variant }: Props) {
 
       <div className="lt__actions">
         {result ? (
-          <button
-            type="button"
-            className="ink-btn ink-btn--quiet lt__btn"
-            disabled={reading.status === "loading"}
-            onClick={() => void onRead(result.id)}
-          >
-            {reading.status === "open" ? "Hide the result" : reading.status === "loading" ? "Opening..." : "Read the result"}
-          </button>
+          <>
+            {/* Not disabled while opening: a disabled button drops focus, and the sheet would have nowhere to return it. */}
+            <button
+              type="button"
+              className="ink-btn ink-btn--quiet lt__btn"
+              aria-disabled={opening || undefined}
+              onClick={() => {
+                if (!opening) void onRead();
+              }}
+            >
+              {opening ? "Opening..." : "Read the result"}
+            </button>
+            <ReportExport task={task} handle={report} variant={variant} placement="inline" />
+          </>
         ) : null}
         {!ended ? (
           <button
@@ -166,17 +174,14 @@ export function LongTaskCard({ id, longTasks, variant }: Props) {
           <span>{stopError}</span>
         </p>
       ) : null}
-      {reading.status === "failed" ? (
+      {openFailed && report.state.status === "failed" ? (
         <p className="lt__error" role="alert">
           <AlertCircle size={14} aria-hidden="true" />
-          <span>Couldn't open the result. {reading.message}</span>
+          <span>Couldn't open the result. {report.state.message}</span>
         </p>
       ) : null}
-      {reading.status === "open" ? (
-        <div className="lt__result">
-          <h4 className="lt__resulttitle">{reading.artifact.title}</h4>
-          <MarkdownText source={reading.artifact.body} />
-        </div>
+      {sheetOpen && report.state.status === "ready" ? (
+        <ReportSheet task={task} report={report.state.report} handle={report} variant={variant} onClose={() => setSheetOpen(false)} />
       ) : null}
     </div>
   );

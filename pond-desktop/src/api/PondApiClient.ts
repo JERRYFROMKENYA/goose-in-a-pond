@@ -43,6 +43,9 @@ import {
   type MeshSelf,
   type LongTask,
   type LongTaskArtifactBody,
+  type LongTaskExportFormat,
+  type LongTaskReport,
+  type LongTaskSource,
   type ModelActiveRoles,
   type ModelEntry,
   type ModelEngine,
@@ -81,6 +84,7 @@ import {
   type ZoneChoice,
   type DetectedPlace,
 } from "./types";
+import { filenameFromDisposition } from "../lib/saveFile";
 import { voiceTitle } from "../voice/voiceCatalogue";
 import { parseSse, type SseFrame } from "../player/sse";
 import type { PlayerReply, PlayerState } from "../player/types";
@@ -130,6 +134,33 @@ const COMMISSION_TIMEOUT_MS = 190_000;
 /** A scan answers within 15s and a join within 45s; the margin lets the server's refusal arrive first. */
 const WIFI_SCAN_TIMEOUT_MS = 20_000;
 const WIFI_JOIN_TIMEOUT_MS = 60_000;
+
+/** Whether an error body carries the pond's own `error` sentence, which an unknown route's 404 does not. */
+function hasErrorSentence(body: unknown): boolean {
+  return typeof body === "object" && body !== null && typeof (body as { error?: unknown }).error === "string";
+}
+
+function isSource(value: unknown): value is LongTaskSource {
+  const v = value as Partial<LongTaskSource> | null;
+  return typeof v === "object" && v !== null && typeof v.url === "string" && typeof v.title === "string";
+}
+
+/** What the pond answered, in the report's shape, or `null` for an answer that is not a report. */
+function readReport(answer: unknown, id: string): LongTaskReport | null {
+  if (typeof answer !== "object" || answer === null) return null;
+  const r = answer as Record<string, unknown>;
+  if (typeof r.markdown !== "string") return null;
+  return {
+    id: typeof r.id === "string" ? r.id : id,
+    title: typeof r.title === "string" && r.title.trim() !== "" ? r.title : "Report",
+    state: r.state as LongTaskReport["state"],
+    kind: r.kind === "research" ? "research" : "general",
+    markdown: r.markdown,
+    sections: typeof r.sections === "number" ? r.sections : 0,
+    sources: Array.isArray(r.sources) ? r.sources.filter(isSource) : [],
+    calendar_events: typeof r.calendar_events === "number" ? r.calendar_events : 0,
+  };
+}
 
 export class PondApiClient {
   /** Mutable: the shell can correct this when the sidecar binds a fallback port. */
@@ -1699,6 +1730,31 @@ export class PondApiClient {
   /** One task, its steps and its artifacts. 404 for a task the caller does not reach. */
   getLongTask(id: string): Promise<LongTask> {
     return this.get(`/api/v1/long-tasks/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * A task's whole report, joined from its sections. `null` from an older pond, which has no such
+   * route (a 404 that says nothing in JSON, or a 405) or answers something that is not a report.
+   * A 403 or a 404 with the pond's own sentence is a refusal, and throws.
+   */
+  async getLongTaskReport(id: string): Promise<LongTaskReport | null> {
+    let answer: unknown;
+    try {
+      answer = await this.get<unknown>(`/api/v1/long-tasks/${encodeURIComponent(id)}/report`);
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 405 || (e.status === 404 && !hasErrorSentence(e.body)))) return null;
+      throw e;
+    }
+    return readReport(answer, id);
+  }
+
+  /**
+   * The report as a file. Fetched here because the route needs the bearer token, which a plain
+   * link can't send. `filename` is the pond's, when the browser lets the page read its header.
+   */
+  async getLongTaskExport(id: string, format: LongTaskExportFormat): Promise<{ blob: Blob; filename: string | null }> {
+    const res = await this.send("GET", `/api/v1/long-tasks/${encodeURIComponent(id)}/export?format=${format}`, undefined, 60_000);
+    return { blob: await res.blob(), filename: filenameFromDisposition(res.headers.get("content-disposition")) };
   }
 
   /** An artifact's whole body, for "Read the result". */

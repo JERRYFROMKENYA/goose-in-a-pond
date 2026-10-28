@@ -1434,3 +1434,90 @@ saved, as an idle lane job, not on its first step.
 - **Outward effects.** Subagents are already denied device control, notifications, scheduling,
   rides and cameras (`groups_denied_to_subagents`), so in P11 no step can act outward at all. P12
   adds the approval path that lets one do so.
+
+---
+
+## 9. Agents are recipes (designed 2026-10-28; P14-P18)
+
+A household's agents are `agent_recipes` rows: Goose recipe YAML with a `giap_role` block, which
+`AgentRole::from_recipe_yaml` already reads, run by the existing routes (`/recipes`,
+`/recipes/{name}/run`), the scheduler and the Recipes screen. The builder grows that block; it adds
+no second store and no second runner.
+
+### 9.1 The block
+
+```yaml
+giap_role:
+  tool_groups: [giap-knowledge, giap-weather, giap-task-work]
+  personal_data: inherit            # or deny: the agent sees no personal data
+  max_turns: 8
+  instructions: |
+    What the agent is for, in plain words.
+  context:                          # what goes into its preamble, and so into its snapshot
+    examples:                       # few-shot pairs: free after the prefill is compiled
+      - brief: ...
+        answer: ...
+  activations:                      # when it runs; none of these reads a user's words
+    - delegated                     # the prime may hand it work (default)
+    - task_step                     # a long task's planner may give it a step (default)
+    - schedule: { cron: "0 0 7 * * MON-FRI", brief: "..." }
+    - event: { on: presence.arrive, member: any, brief: "...", cooldown: 30m }
+    - agent: [trip-planner]         # these agents may hand it work
+  hooks:
+    before: [today, weather]        # context gatherers from a fixed catalog, never code
+    after: [notify_owner]           # or save_artifact, start_task, hand_to: <agent>
+  a2a:
+    expose: false                   # offer it to paired peers over the A2A protocol
+```
+
+### 9.2 Rules
+
+1. **Activations are structured, never keyword matches.** `delegated` and `task_step` are model
+   decisions; `schedule` and `event` are explicit triggers on the scheduler and the event bus
+   (sensor, camera, device, presence, time), each with a cooldown. Nothing reads a user's text.
+2. **Every run is a lane run.** A scheduled or event activation queues a single-step run on the
+   inference lane; it never interrupts a household turn and never runs beside it.
+3. **Hooks are a fixed catalog.** `before` hooks add context to the brief (the date, today's
+   schedule, the weather, the latest presence). `after` hooks act on the hand-back. An outward hook
+   (anything that sends, buys or moves something) waits for the member's approval on their phone,
+   as long-task steps do (P12); `notify_owner` reaches only the owner's own devices.
+4. **Agent to agent is mediated.** An agent's hand-back may ask for `hand_to: <agent>` with a
+   brief. The runner (code) runs that agent next with the first one's artifacts, so depth stays 1,
+   only agents named in `activations.agent` accept, a chain is capped at 4 hand-offs, and a cycle
+   is refused. Agents never message each other directly.
+5. **External A2A is off by default.** `a2a.expose` publishes an agent card and accepts A2A tasks
+   from paired devices and mesh peers only, through `auth_middleware`; every A2A task is a lane run
+   at the exposing member's scope, and its result leaves through `pond-net`.
+6. **A saved agent is compiled.** Saving a recipe compiles its prefill (9.3). The builder shows the
+   preamble's token count, whether its snapshot is valid, and what a cold start would cost.
+
+### 9.3 Compiling every agent's prefill
+
+On every start, and when a recipe is saved, the pond checks each agent's snapshot and rebuilds only
+the ones that are missing, unreadable, corrupt or stale. The shapes: the prime's typed and voice
+turns, and every role in the shape a lane run gives it (`LONG_TASK_ROOT_GROUPS`).
+
+The engine is the judge, because it is what a real turn trusts. A compile is two calls of one shape
+whose user messages differ from their first token, under `request_context::compiling_prefill`:
+
+- The first call runs cold and records whatever snapshot it restored.
+- The second call learns the stable preamble from the two prompts. The snapshot is **valid** when
+  it restored exactly that preamble and its checksum matches the one written beside it in the
+  index. Anything else is rebuilt: **missing** (none matched), **unreadable** (llama.cpp refused
+  it), **corrupt** (the checksum differs) or **stale** (it covers less than the preamble).
+- A compile call decodes one token at most and never resumes a chat's cache.
+
+The boot pass is a lane job, exempt from the activity gate, after the existing prewarm. The
+household's turns still come first.
+
+### 9.4 Phases
+
+- **P14 — prefill compile.** The engine primitive, checksums in the snapshot index, and the boot and
+  on-save compile passes.
+- **P15 — the block.** Parsing and validation of `context`, `activations`, `hooks` and `a2a`, plus a
+  validate route that names the field a small model or a person got wrong.
+- **P16 — activations and hooks.** Schedule and event activations as lane runs, the hook catalog,
+  and mediated hand-offs.
+- **P17 — the builder.** The Recipes screen in both UIs: a form over the block and a YAML view, a
+  test run, compile status and preamble cost.
+- **P18 — external A2A.** Agent cards and A2A tasks for exposed agents, off by default.

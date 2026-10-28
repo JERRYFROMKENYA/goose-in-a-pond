@@ -2,14 +2,15 @@
 //! call the turn's stream opens with, and what the prime is told about it.
 use crate::mcp::domain::tool_group::TASKS_EXTENSION;
 use crate::shared::domain::agent::AgentStreamEvent;
-use crate::shared::domain::long_task::{
-    LongTask, LongTaskBudget, LongTaskError, LongTaskKind, DEFAULT_LONG_TASK_STEPS,
-};
+use crate::shared::domain::long_task::{LongTask, LongTaskBudget, LongTaskError, LongTaskKind};
 use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 
 /// Longest research question kept as a goal; it reaches every step's brief.
 pub const GOAL_CHARS: usize = 2_000;
+
+/// Gathering, a step per section and the summary need more room than the usual twelve steps.
+pub const RESEARCH_STEPS: u32 = 24;
 
 /// A member's deep research: a research task they own, reported back to `session_id`.
 pub fn research_task(
@@ -24,7 +25,7 @@ pub fn research_task(
         None,
         &goal,
         Some(session_id.to_string()),
-        LongTaskBudget::new(DEFAULT_LONG_TASK_STEPS, None)?,
+        LongTaskBudget::new(RESEARCH_STEPS, None)?,
         now,
     )?
     .with_kind(LongTaskKind::Research))
@@ -81,6 +82,7 @@ mod tests {
         assert_eq!(task.owner_profile_id(), Some("liz"));
         assert_eq!(task.goal(), "compare heat pumps");
         assert_eq!(task.origin_session_id(), Some("s-1"));
+        assert_eq!(task.budget().max_steps(), RESEARCH_STEPS);
 
         let long = "q".repeat(GOAL_CHARS + 50);
         assert_eq!(

@@ -22,7 +22,10 @@ pub const LONG_TASK_ROOT_GROUPS: &[&str] = &[
 /// The roles the planner may give a step: the shipped worker first, then the household's own
 /// active roles. The planner and verifier are not offered: neither does a step's work.
 pub fn step_roles(household: &[AgentRecipe]) -> Vec<AgentRole> {
-    let mut offered: Vec<AgentRole> = roles::worker_role().into_iter().collect();
+    let mut offered: Vec<AgentRole> = roles::worker_role()
+        .into_iter()
+        .chain(roles::composer_role())
+        .collect();
     for recipe in household.iter().filter(|r| r.active) {
         if [
             roles::PLANNER_ROLE,
@@ -155,17 +158,28 @@ fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
         .collect()
 }
 
-/// A research task's plan gathers before it writes, so the report can cite what each step found.
-const RESEARCH_PLAN: &str = "This is deep research the person asked for. Plan steps that each \
-     look into one part of the question with search_web or get_wikipedia_article and save what \
-     they find with its sources. End with one step that writes the report as an artifact titled \
-     \"Result\": the short answer first, then the findings, each with the title and link of its \
-     source, and where the sources disagree.\n";
+/// A research report is as long as its plan: the pond joins the sections steps drafted, so no
+/// single reply has to hold it.
+const RESEARCH_PLAN: &str = "This is deep research the person asked for, and the report can be \
+     as long as the question needs: a page for a quick question, many for a trip or a big \
+     decision. Plan it in three parts. First, steps that each look into one part of the question \
+     with search_web or get_wikipedia_article, or recall what the household has said with the \
+     memory tools, and save their findings with their sources. Then one step per section of the \
+     report, each writing its section from the findings it is given and saving it as a draft \
+     artifact titled with the section's heading. Give a plan such as an itinerary, a meal plan or \
+     a packing list to long-task-composer, which writes timelines, tables and checklists. Last, \
+     one step writes the artifact titled \"Result\": a few paragraphs that answer the question \
+     and introduce the sections without repeating them. The pond joins the Result and the \
+     sections, in plan order, into the report.\n";
 
-/// A research step works from sources, not from what a small model remembers.
+/// A research step works from sources, not from what a small model remembers, and keeps the
+/// household's particulars out of what it sends to a search engine.
 const RESEARCH_STEP: &str = "This is deep research. Look things up with search_web or \
      get_wikipedia_article rather than from memory, keep only what the sources say, and put each \
-     source's title and link beside what it says. If the sources disagree, say so.\n";
+     source's title and link beside what it says. If the sources disagree, say so. If your step \
+     writes a section, save it as a draft artifact titled with its heading and write it in full: \
+     the pond puts it in the report as you wrote it. Never put a person's name, health or diet \
+     in a web search: search for the place, the dish or the thing.\n";
 
 fn date_line(now: DateTime<Utc>) -> String {
     format!("Today is {} (UTC).\n", now.format("%A %-d %B %Y, %H:%M"))

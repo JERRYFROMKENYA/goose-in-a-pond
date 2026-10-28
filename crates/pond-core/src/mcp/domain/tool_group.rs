@@ -26,6 +26,13 @@ pub const ORCHESTRATOR_EXTENSION: &str = "giap-orchestrator";
 /// Extension carrying the directions and ride-link tools; a const for the same reason.
 pub const TRAVEL_EXTENSION: &str = "giap-travel";
 
+/// Extension carrying `task_start`, `task_status` and `task_cancel`: the household's side of
+/// long tasks.
+pub const TASKS_EXTENSION: &str = "giap-tasks";
+
+/// Extension a long task's helpers work through; only the step runner's authority grants it.
+pub const TASK_WORK_EXTENSION: &str = "giap-task-work";
+
 /// Separator in a prefixed tool name (`giap-weather__get_forecast`); Goose's convention.
 pub const TOOL_NAME_SEPARATOR: &str = "__";
 
@@ -137,6 +144,20 @@ pub const TOOL_GROUPS: &[ToolGroup] = &[
                       and reports back: research a question in depth, work through a longer task \
                       under a saved role, or have a second agent do something while this \
                       conversation carries on.",
+        core: false,
+    },
+    ToolGroup {
+        extension: TASKS_EXTENSION,
+        description: "A big piece of work that takes more than one sitting, such as researching \
+                      and comparing options or going through a long document: start it so the \
+                      pond works on it while the house is quiet, ask how far it has got, or \
+                      stop it.",
+        core: false,
+    },
+    ToolGroup {
+        extension: TASK_WORK_EXTENSION,
+        description: "Working on one step of a long task: read what earlier steps saved, save \
+                      what this step found, write the task's plan, and report how the step went.",
         core: false,
     },
 ];
@@ -260,6 +281,10 @@ pub fn groups_denied_to_guests() -> &'static [&'static str] {
         ORCHESTRATOR_EXTENSION,
         // Rides on a member's own Uber account, and every place lookup leaves the pond.
         TRAVEL_EXTENSION,
+        // Like `delegate`, it starts unattended work on the household's one GPU.
+        TASKS_EXTENSION,
+        // A helper's ledger tools; no guest owns a task for a helper to work on.
+        TASK_WORK_EXTENSION,
     ]
 }
 
@@ -281,6 +306,8 @@ pub fn groups_denied_to_subagents() -> &'static [&'static str] {
         TRAVEL_EXTENSION,
         // Raw home camera feeds and live frame snapshots.
         "giap-vision",
+        // A helper that starts a task gets more helpers through the runner, past the depth cap.
+        TASKS_EXTENSION,
     ]
 }
 
@@ -639,6 +666,40 @@ mod guest_denylist_tests {
             "{TRAVEL_EXTENSION} must be withheld from guests: its rides go on a member's own Uber \
              account, and its place lookups leave the pond"
         );
+    }
+
+    /// Neither list backstops the other; the helpers' group is the control that must stay open.
+    #[test]
+    fn long_tasks_are_started_only_by_an_identified_top_level_turn() {
+        assert!(
+            groups_denied_to_guests().contains(&TASKS_EXTENSION),
+            "{TASKS_EXTENSION} must be withheld from guests: a task runs unattended for hours on \
+             the household's GPU at the starter's scope"
+        );
+        assert!(
+            groups_denied_to_subagents().contains(&TASKS_EXTENSION),
+            "{TASKS_EXTENSION} must be withheld from subagents: a helper that starts a task gets \
+             more helpers through the runner, which no depth cap counts"
+        );
+        assert!(
+            groups_denied_to_guests().contains(&TASK_WORK_EXTENSION),
+            "{TASK_WORK_EXTENSION} must be withheld from guests"
+        );
+        assert!(
+            !groups_denied_to_subagents().contains(&TASK_WORK_EXTENSION),
+            "{TASK_WORK_EXTENSION} is how a helper reads and reports on its step; denying it to \
+             subagents leaves every long task unable to run"
+        );
+        for extension in [TASKS_EXTENSION, TASK_WORK_EXTENSION] {
+            assert!(
+                is_catalog_extension(extension),
+                "{extension} is not catalogued"
+            );
+            assert!(
+                !find_group(extension).unwrap().core,
+                "{extension} must never be core"
+            );
+        }
     }
 
     /// Vacuity control: a denylist covering everything would amount to "no subagents".

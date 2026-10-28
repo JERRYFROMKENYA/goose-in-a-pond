@@ -1,10 +1,8 @@
 //! The roles a long task runs under. Shipped as `const` recipes, not `agent_recipes` rows, so
 //! nobody can widen their tool groups at run time; a household's own saved roles may also work a
 //! step, under the same subagent narrowing.
+pub use crate::mcp::domain::tool_group::TASK_WORK_EXTENSION;
 use crate::shared::domain::orchestration::{AgentRole, RoleError, ROLE_YAML_KEY};
-
-/// Tools a helper uses on a long task's ledger, withheld from every top-level turn.
-pub const TASK_WORK_EXTENSION: &str = "giap-task-work";
 
 pub const PLANNER_ROLE: &str = "long-task-planner";
 pub const WORKER_ROLE: &str = "long-task-worker";

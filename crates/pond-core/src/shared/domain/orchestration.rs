@@ -10,7 +10,9 @@ use crate::mcp::domain::tool_group::{
     group_of_tool, groups_denied_to_guests, groups_denied_to_subagents,
 };
 #[cfg(test)]
-use crate::mcp::domain::tool_group::{ORCHESTRATOR_EXTENSION, TOOLKIT_EXTENSION, TRAVEL_EXTENSION};
+use crate::mcp::domain::tool_group::{
+    ORCHESTRATOR_EXTENSION, TASKS_EXTENSION, TOOLKIT_EXTENSION, TRAVEL_EXTENSION,
+};
 use crate::models::services::context::model_class::{provider_locality, ProviderLocality};
 use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
@@ -782,7 +784,7 @@ impl TaskRun {
 /// The groups no subagent may hold, each with the control a subagent would bypass.
 /// Kept apart from [`groups_denied_to_subagents`] so a removal from that list fails a test.
 #[cfg(test)]
-const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 7] = [
+const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 8] = [
     (
         TOOLKIT_EXTENSION,
         "enable_tool_group WIDENS an allow-set keyed by the process-global current_session_id(), \
@@ -820,6 +822,11 @@ const GROUPS_NO_SUBAGENT_MAY_HOLD: [(&str, &str); 7] = [
         "it shows live pictures of the inside of the home, and configure_vision_bus and \
          create_vision_automation change settings and add rules with the household's authority, \
          with no approval path",
+    ),
+    (
+        TASKS_EXTENSION,
+        "task_start queues work the step runner later runs as fresh helpers, so a helper holding \
+         it could start helpers of its own that no delegation depth counts",
     ),
 ];
 

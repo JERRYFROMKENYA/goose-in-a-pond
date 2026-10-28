@@ -1366,6 +1366,30 @@ pond has free. The alternative hands the helper the one context, seeded from its
 and rebuilds the prime afterwards: from its preamble snapshot plus the history, or from a suspend
 file. `what_a_helper_turn_costs_the_prime` (goose `inference_engine.rs`) measures the three.
 
+Measured on the Orin Nano 2026-10-28 (E4B QAT UD-Q4_K_XL with its MTP drafter, `n_ctx` 16384, f16
+KV, flash attention, the pond stopped). The prime is a 3,000-token preamble plus history; the helper
+is a 1,100-token role preamble plus a 300-token task.
+
+| History | Prime cold | Side context | Helper from its snapshot | Prime rebuilt | Suspend file |
+|---|---|---|---|---|---|
+| 2,048 | 8.1 s | 2.2 s | 0.5 s | 3.7 s | 1.7 s write, 0.7 s read, 99 MiB |
+| 4,096 | 11.6 s | 2.0 s | 0.4 s | 7.2 s | 0.8 s write, 0.6 s read, 131 MiB |
+| 8,192 | 19.2 s | 2.0 s | 0.4 s | 14.8 s | 1.0 s write, 0.6 s read, 195 MiB |
+
+A rebuilt and a resumed prime predict the same next token as a cold one at every length. The side
+context's memory read 160-295 MiB from `MemAvailable`, which page cache makes noisy on unified
+memory; it is a bound to re-measure, not a constant.
+
+What it means:
+
+- **Long tasks pay almost nothing.** No prime is waiting between steps, so each step is a helper
+  seeded from its role snapshot (0.4-0.5 s), and the household's next turn rebuilds the prime once,
+  on the cold path that already exists.
+- **A delegation inside a live turn costs the rebuild,** which grows with the history: 15 s at 8K.
+  A suspend file holds that to about 2-3 s at any length, but it writes the conversation's KV to
+  disk for as long as the helper runs. The preamble snapshots' privacy argument is that they hold
+  no conversation, so the suspend file is the maintainer's decision, not this document's.
+
 Role preambles also need their own snapshots. The ladder keeps `MAX_SNAPSHOTS` = 6 per model and
 window, and the Orin's E4B family already holds six (typed chat, voice, extraction, titling, the
 reviewer, the summariser), so roles would evict them. A role's snapshot is written when the role is

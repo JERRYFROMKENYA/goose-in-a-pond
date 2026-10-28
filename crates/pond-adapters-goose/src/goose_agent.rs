@@ -4107,17 +4107,21 @@ impl AgentPort for GooseAdapter {
             suggestion_context: None,
         };
 
+        let shape = if voice_mode {
+            "prime-voice"
+        } else {
+            "prime-typed"
+        };
+        // Home shows that the pond is building caches while this runs.
+        let building = pond_core::shared::services::prefill_progress::process_prefill_progress();
+        building.begin(1);
+        building.working_on(shape);
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
             use futures::StreamExt;
             for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
                 .into_iter()
                 .enumerate()
             {
-                let shape = if voice_mode {
-                    "prime-voice"
-                } else {
-                    "prime-typed"
-                };
                 goose_providers::request_context::compiling_prefill(shape, async {
                     let mut stream = self.chat_stream(warm_up(turn, message)).await?;
                     while let Some(event) = stream.next().await {
@@ -4132,6 +4136,7 @@ impl AgentPort for GooseAdapter {
         })
         .await;
 
+        building.finished(shape, matches!(outcome, Ok(Ok(()))));
         let elapsed_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok(Ok(())) => {

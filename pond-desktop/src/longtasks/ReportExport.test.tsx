@@ -187,8 +187,9 @@ describe("saving a file from the pond", () => {
     expect(screen.getByRole("status").textContent).toBe("Getting the file...");
     expect(trigger().getAttribute("aria-busy")).toBe("true");
 
+    // Opened on its own first: inside one act the open menu has not rendered yet.
+    openMenu();
     await act(async () => {
-      openMenu();
       fireEvent.click(item("Save as a web page"));
       await new Promise((r) => setTimeout(r, 0));
     });

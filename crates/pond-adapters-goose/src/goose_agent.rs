@@ -3587,6 +3587,16 @@ impl GooseAdapter {
                                             }
                                         }
                                         goose::conversation::message::MessageContent::ToolResponse(tr) => {
+                                            // Before the suppression below: goose stored the result either way.
+                                            if tr
+                                                .tool_result
+                                                .as_ref()
+                                                .ok()
+                                                .and_then(crate::transient_history::keep_of)
+                                                .is_some()
+                                            {
+                                                turn_sweep.note_transient();
+                                            }
                                             // A suppressed call's result must never be streamed.
                                             if suppressed_tool_ids.remove(&tr.id) {
                                                 tracing::warn!(
@@ -3614,9 +3624,6 @@ impl GooseAdapter {
                                                 }
                                                 Err(e) => (format!("Error: {e}"), None, true, None),
                                             };
-                                            if keep.is_some() {
-                                                turn_sweep.note_transient();
-                                            }
 
                                             let tool_name = tool_id_to_name
                                                 .get(&tr.id)

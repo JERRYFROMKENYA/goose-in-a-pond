@@ -7076,6 +7076,8 @@ async fn run_long_task_runner(
     let started_at = std::time::Instant::now();
     let started_at_utc = chrono::Utc::now();
     let mut fruitless: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    // The roles last compiled; a start, a new recipe or an edited one makes a compile due.
+    let mut compiled: Option<u64> = None;
     tracing::info!("long-task runner active - off unless `long_tasks_enabled` and `ext_orchestrator_enabled`");
 
     loop {
@@ -7095,6 +7097,14 @@ async fn run_long_task_runner(
             .filter(|t| matches!(t.state(), LongTaskState::Planning | LongTaskState::Running))
             .min_by_key(|t| t.updated_at());
 
+        let household = recipes.list().await.unwrap_or_default();
+        let offered = runner::step_roles(&household);
+        let mut every_role = vec![planner.clone(), verifier.clone()];
+        every_role.extend(offered.iter().cloned());
+        let roles_print = roles_fingerprint(&every_role);
+        let compile_due = compiled != Some(roles_print)
+            && matches!(settings.chat_provider.as_str(), "local" | "gguf");
+
         let sessions = storage.list_sessions().await.unwrap_or_default();
         let now = chrono::Utc::now();
         let db_activity =
@@ -7109,7 +7119,8 @@ async fn run_long_task_runner(
         let Some(slot) = lane
             .acquire(
                 LaneJob::LongTaskStep,
-                settings.long_tasks_enabled && settings.ext_orchestrator_enabled && candidate.is_some(),
+                settings.ext_orchestrator_enabled
+                    && ((settings.long_tasks_enabled && candidate.is_some()) || compile_due),
                 cadence,
                 tick.waives(),
                 sched::saw_activity_since_start(started_at, in_process_at, started_at_utc, db_activity),
@@ -7119,17 +7130,20 @@ async fn run_long_task_runner(
         else {
             continue;
         };
-        let Some(task) = candidate else {
-            continue;
-        };
-
-        let household = recipes.list().await.unwrap_or_default();
-        let offered = runner::step_roles(&household);
         let helpers = LongTaskHelpers {
             orchestrator: orchestrator.clone(),
             authorities: authorities.clone(),
             storage: storage.clone(),
             last_user_activity: last_user_activity.clone(),
+        };
+        if compile_due {
+            compile_role_prefills(&helpers, &every_role).await;
+            compiled = Some(roles_print);
+            drop(slot);
+            continue;
+        }
+        let Some(task) = candidate else {
+            continue;
         };
         if let Err(e) = advance_long_task(
             &task,
@@ -7236,6 +7250,82 @@ impl LongTaskHelpers {
         let written = binding.take_written();
         Ok(runner::settle_run(reported, &written, &run?))
     }
+}
+
+impl LongTaskHelpers {
+    /// One compile run of `role` in the shape a lane run gives it: the engine checks the role's
+    /// snapshot and rebuilds it when it is missing or bad, and the child generates one token.
+    async fn compile(
+        &self,
+        role: &pond_core::shared::domain::orchestration::AgentRole,
+        brief: &str,
+    ) -> anyhow::Result<()> {
+        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::services::long_task_runner as runner;
+
+        let session_id = format!(
+            "{}prefill-compile-{}",
+            runner::LONG_TASK_SESSION_PREFIX,
+            uuid::Uuid::new_v4()
+        );
+        let authority = DelegationAuthority::root(
+            &session_id,
+            pond_core::user_data::domain::profile::ProfileScope::household(),
+            runner::LONG_TASK_ROOT_GROUPS.iter().map(|g| (*g).to_string()).collect(),
+        );
+        let spec = authority
+            .delegate(
+                role,
+                TaskRequest {
+                    role: role.name().to_string(),
+                    instructions: brief.to_string(),
+                    inputs: serde_json::json!({}),
+                    background: false,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("the compile run was refused: {e:?}"))?
+            .compiling_prefill();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let _lease = self.authorities.publish(&session_id, authority, cancel);
+        self.orchestrator.spawn(spec).await?;
+        Ok(())
+    }
+}
+
+/// Checks every role's prefill and rebuilds the missing or bad ones: two compile runs per role,
+/// whose briefs differ from their first word so the engine can tell the preamble from the brief.
+async fn compile_role_prefills(
+    helpers: &LongTaskHelpers,
+    roles: &[pond_core::shared::domain::orchestration::AgentRole],
+) {
+    let started = std::time::Instant::now();
+    for role in roles {
+        for brief in ["Alpha. Compile check.", "Begin. Compile check."] {
+            if let Err(e) = helpers.compile(role, brief).await {
+                tracing::warn!(role = %role.name(), error = %e, "a role's prefill compile failed");
+                break;
+            }
+        }
+    }
+    tracing::info!(
+        target: "giap::trace",
+        kind = "role_prefills_compiled",
+        roles = roles.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "every role's prefill checked; the engine rebuilt any that was missing or bad"
+    );
+}
+
+/// What a compile depends on: the roles' names, instructions and tool groups.
+fn roles_fingerprint(roles: &[pond_core::shared::domain::orchestration::AgentRole]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for role in roles {
+        role.name().hash(&mut hasher);
+        role.instructions().hash(&mut hasher);
+        role.requested_tool_groups().hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.

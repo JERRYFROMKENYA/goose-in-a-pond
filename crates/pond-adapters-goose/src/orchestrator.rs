@@ -499,6 +499,8 @@ pub struct ChildPlan {
     /// Which model this child runs on, already decided. [`ChildModel::assigned`] is the only
     /// predicate the runner may use.
     pub model: ChildModel,
+    /// A prefill compile run ([`TaskSpec::compiles_prefill`]).
+    pub compile_prefill: bool,
 }
 
 /// What came back from one child run, before it is classified.
@@ -744,6 +746,7 @@ pub fn build_child_plan(
         max_turns: spec.max_turns(),
         // Decided here, the only place with both the role's request and the parent's provider.
         model: ChildModel::resolve(spec.requested_model(), &env.provider_name),
+        compile_prefill: spec.compiles_prefill(),
     })
 }
 
@@ -923,10 +926,15 @@ async fn drive_run(
     let _bound = pond_core::shared::services::child_sessions::process_child_sessions()
         .bind(&plan_child_session_id, &parent_session_id);
     // A child's engine calls take the model's one context rather than a second beside the parent's.
-    let outcome = goose_providers::request_context::as_helper(
-        prime_waiting,
-        runner.run(plan, cancel.clone()),
-    )
+    let compile = plan.compile_prefill;
+    let outcome = goose_providers::request_context::as_helper(prime_waiting, async {
+        if compile {
+            goose_providers::request_context::compiling_prefill(runner.run(plan, cancel.clone()))
+                .await
+        } else {
+            runner.run(plan, cancel.clone()).await
+        }
+    })
     .await;
     runner.release(&plan_child_session_id).await;
 

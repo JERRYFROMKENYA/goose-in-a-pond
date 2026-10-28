@@ -4045,9 +4045,11 @@ impl AgentPort for GooseAdapter {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or_default();
-        let request = AgentRequest {
-            message: "Warm-up ping. Reply with only: ok".to_string(),
-            session_id: format!("prewarm-{stamp}"),
+        // Two compile calls whose messages differ from their first word: the engine learns the
+        // preamble from the pair and keeps its snapshot, or rebuilds one that is missing or bad.
+        let warm_up = |turn: usize, message: &str| AgentRequest {
+            message: message.to_string(),
+            session_id: format!("prewarm-{stamp}-{turn}"),
             model_role: "chat".to_string(),
             images: Vec::new(),
             voice_mode,
@@ -4063,11 +4065,20 @@ impl AgentPort for GooseAdapter {
         };
 
         let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-            let mut stream = self.chat_stream(request).await?;
             use futures::StreamExt;
-            while let Some(event) = stream.next().await {
-                // Only the prefill matters; the reply is discarded.
-                event?;
+            for (turn, message) in ["Alpha. Warm-up ping.", "Begin. Warm-up ping."]
+                .into_iter()
+                .enumerate()
+            {
+                goose_providers::request_context::compiling_prefill(async {
+                    let mut stream = self.chat_stream(warm_up(turn, message)).await?;
+                    while let Some(event) = stream.next().await {
+                        // Only the prefill matters; the reply is discarded.
+                        event?;
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await?;
             }
             Ok::<(), anyhow::Error>(())
         })

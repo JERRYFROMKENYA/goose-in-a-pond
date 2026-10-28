@@ -147,39 +147,40 @@ fn presence_matches_the_transition_and_the_member_it_names() {
     let liz = trigger("{ on: presence.arrive, member: liz, brief: b }");
     let arrive = presence("jerry", PresenceTransition::Arrived, t(0));
     let leave = presence("jerry", PresenceTransition::Departed, t(0));
-    let matched = match_event(&any, &arrive).expect("an arrival matches presence.arrive");
+    let matched = match_event(&any, &arrive, None).expect("an arrival matches presence.arrive");
     assert_eq!(matched.member.as_deref(), Some("jerry"));
     assert_eq!(
-        match_event(&any, &leave),
+        match_event(&any, &leave, None),
         None,
         "a departure is not an arrival"
     );
-    assert_eq!(match_event(&liz, &arrive), None, "jerry is not liz");
-    assert!(match_event(&trigger("{ on: presence.leave, brief: b }"), &leave).is_some());
+    assert_eq!(match_event(&liz, &arrive, None), None, "jerry is not liz");
+    assert!(match_event(&trigger("{ on: presence.leave, brief: b }"), &leave, None).is_some());
 }
 
 #[test]
 fn camera_sensor_and_device_events_match_their_own_kind_and_source() {
     let person = trigger("{ on: camera.person, camera: porch, brief: b }");
-    assert!(match_event(&person, &camera("porch", "person")).is_some());
-    assert!(match_event(&person, &camera("porch", "motion")).is_none());
-    assert!(match_event(&person, &camera("garage", "person")).is_none());
+    assert!(match_event(&person, &camera("porch", "person"), None).is_some());
+    assert!(match_event(&person, &camera("porch", "motion"), None).is_none());
+    assert!(match_event(&person, &camera("garage", "person"), None).is_none());
     assert!(match_event(
         &trigger("{ on: camera.motion, brief: b }"),
-        &camera("x", "MOTION")
+        &camera("x", "MOTION"),
+        None
     )
     .is_some());
 
     let hot = trigger("{ on: sensor.temperature, above: 30, brief: b }");
-    let reading_of = |v| match_event(&hot, &reading("kitchen", "Temperature", v));
+    let reading_of = |v| match_event(&hot, &reading("kitchen", "Temperature", v), None);
     assert_eq!(reading_of(31.0).and_then(|m| m.past_threshold), Some(true));
     assert_eq!(reading_of(29.0).and_then(|m| m.past_threshold), Some(false));
-    assert!(match_event(&hot, &reading("kitchen", "humidity", 99.0)).is_none());
+    assert!(match_event(&hot, &reading("kitchen", "humidity", 99.0), None).is_none());
 
     let power = trigger("{ on: device.power, device: lamp, brief: b }");
-    assert!(match_event(&power, &device("lamp", "power")).is_some());
-    assert!(match_event(&power, &device("lamp", "brightness")).is_none());
-    assert!(match_event(&power, &device("fan", "power")).is_none());
+    assert!(match_event(&power, &device("lamp", "power"), None).is_some());
+    assert!(match_event(&power, &device("lamp", "brightness"), None).is_none());
+    assert!(match_event(&power, &device("fan", "power"), None).is_none());
 }
 
 #[test]
@@ -190,7 +191,7 @@ fn nothing_on_the_bus_fires_a_time_of_day_trigger() {
         camera("porch", "person"),
         presence("m", PresenceTransition::Arrived, t(0)),
     ] {
-        assert_eq!(match_event(&daily, &event), None);
+        assert_eq!(match_event(&daily, &event, None), None);
     }
     // Vacuity control: the clock does fire it.
     let agents = [agent(
@@ -360,6 +361,7 @@ fn events_fire_the_activations_that_listen_for_them() {
     let fired = firings_for_event(
         &agents,
         &presence("m-2", PresenceTransition::Arrived, t(0)),
+        "UTC",
         &mut book,
         t(0),
     );
@@ -377,6 +379,7 @@ fn events_fire_the_activations_that_listen_for_them() {
     assert!(firings_for_event(
         &agents,
         &presence("m-2", PresenceTransition::Arrived, t(5)),
+        "UTC",
         &mut book,
         t(5)
     )
@@ -1101,5 +1104,77 @@ async fn an_activation_and_its_hand_off_go_through_the_ledger_as_planned() {
     assert!(
         matches!(next_run(&running, &steps, 0, t(4)), NextRun::Do(s) if s.role() == "planner"),
         "the runner's next run is the agent handed the work"
+    );
+}
+
+#[test]
+fn an_owner_subject_matches_the_agents_owner_and_nobody_without_one() {
+    let mine = trigger("{ on: presence.arrive, member: owner, brief: b }");
+    let jerry = presence("jerry", PresenceTransition::Arrived, t(0));
+    assert!(match_event(&mine, &jerry, Some("jerry")).is_some());
+    assert!(match_event(&mine, &jerry, Some("liz")).is_none());
+    assert!(match_event(&mine, &jerry, None).is_none());
+}
+
+#[test]
+fn an_event_outside_its_window_is_not_seen_and_spends_no_cooldown() {
+    let agents = [agent(
+        role(
+            "guard",
+            "  activations:\n    - event: { on: camera.person, between: \"22:00-06:00\", brief: Look. }\n",
+        ),
+        Some("m-1"),
+    )];
+    let mut book = ActivationBook::default();
+    // t(0) is 07:00 in Nairobi: outside the window.
+    assert!(firings_for_event(
+        &agents,
+        &camera("gate", "person"),
+        "Africa/Nairobi",
+        &mut book,
+        t(0)
+    )
+    .is_empty());
+    // 23:00 there is 20:00 UTC that day; the same book still fires, so nothing was spent.
+    let night = Utc.with_ymd_and_hms(2026, 10, 28, 20, 0, 0).unwrap();
+    assert_eq!(
+        firings_for_event(
+            &agents,
+            &camera("gate", "person"),
+            "Africa/Nairobi",
+            &mut book,
+            night
+        )
+        .len(),
+        1
+    );
+}
+
+#[test]
+fn a_card_says_when_its_agent_runs_in_words() {
+    let r = role(
+        "r",
+        "  activations:\n\
+         \x20   - delegated\n\
+         \x20   - schedule: { cron: \"0 30 6 * * *\", brief: b }\n\
+         \x20   - schedule: { cron: \"0 0 18 * * MON-FRI\", brief: b }\n\
+         \x20   - event: { on: presence.arrive, member: owner, brief: b }\n\
+         \x20   - event: { on: camera.person, between: \"22:00-06:00\", brief: b }\n\
+         \x20   - event: { on: sensor.water_level, below: 20, brief: b }\n\
+         \x20   - agent: [trip-planner]\n",
+    );
+    assert_eq!(
+        describe_activations(r.activations()),
+        "When your assistant hands it work; every day at 06:30; on weekdays at 18:00; when you \
+         come home; when any camera sees a person between 22:00 and 06:00; when the water level \
+         drops below 20; when trip-planner hands it work"
+    );
+    let odd = role(
+        "o",
+        "  activations:\n    - schedule: { cron: \"0 */15 * * * *\", brief: b }\n",
+    );
+    assert_eq!(
+        describe_activations(odd.activations()),
+        "On the schedule 0 */15 * * * *"
     );
 }

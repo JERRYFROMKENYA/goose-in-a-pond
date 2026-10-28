@@ -559,3 +559,61 @@ fn yaml_that_does_not_parse_or_has_no_block_says_so_at_the_root() {
     assert_eq!(paths("giap_role: [\n"), vec![String::new()]);
     assert_eq!(paths("title: a routine\n"), vec!["giap_role".to_string()]);
 }
+
+#[test]
+fn a_member_may_be_the_owner_and_only_a_member_may() {
+    let mine = role_yaml_with(
+        "  activations:\n    - event: { on: presence.arrive, member: owner, brief: b }\n",
+    );
+    assert!(matches!(
+        &mine.activations()[0],
+        Activation::Event(e) if e.trigger == (EventTrigger::PresenceArrive { member: Subject::Owner })
+    ));
+    // Vacuity control: on a camera `owner` is just a camera's name.
+    let camera = role_yaml_with(
+        "  activations:\n    - event: { on: camera.person, camera: owner, brief: b }\n",
+    );
+    assert!(matches!(
+        &camera.activations()[0],
+        Activation::Event(e)
+            if e.trigger == (EventTrigger::CameraPerson { camera: Subject::Named("owner".into()) })
+    ));
+}
+
+#[test]
+fn an_event_may_be_held_to_a_part_of_the_day() {
+    let night = role_yaml_with(
+        "  activations:\n    - event: { on: camera.person, between: \"22:00-06:00\", brief: b }\n",
+    );
+    let Activation::Event(e) = &night.activations()[0] else {
+        panic!("an event");
+    };
+    let window = e.window.expect("a window");
+    assert!(window.contains(23, 30) && window.contains(2, 0));
+    assert!(!window.contains(6, 0) && !window.contains(12, 0) && !window.contains(21, 59));
+    let day = ClockWindow::parse("09:00-17:00").unwrap();
+    assert!(day.contains(9, 0) && !day.contains(17, 0));
+    assert_eq!(window.to_string(), "22:00-06:00");
+    for (event, field) in [
+        (
+            "{ on: camera.person, between: \"22:00\", brief: b }",
+            "between",
+        ),
+        (
+            "{ on: camera.person, between: \"22:00-22:00\", brief: b }",
+            "between",
+        ),
+        ("{ on: camera.person, between: 22, brief: b }", "between"),
+        (
+            "{ on: time.daily, at: \"07:00\", between: \"06:00-08:00\", brief: b }",
+            "between",
+        ),
+    ] {
+        let yaml = block(&format!("  activations:\n    - event: {event}\n"));
+        assert_eq!(
+            paths(&yaml),
+            vec![format!("giap_role.activations[0].event.{field}")],
+            "for {event}"
+        );
+    }
+}

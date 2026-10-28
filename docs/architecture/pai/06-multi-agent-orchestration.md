@@ -1461,7 +1461,8 @@ giap_role:
     - delegated                     # the prime may hand it work (default)
     - task_step                     # a long task's planner may give it a step (default)
     - schedule: { cron: "0 0 7 * * MON-FRI", brief: "..." }
-    - event: { on: presence.arrive, member: any, brief: "...", cooldown: 30m }
+    - event: { on: presence.arrive, member: owner, brief: "...", cooldown: 30m }
+    - event: { on: camera.person, camera: any, between: "22:00-06:00", brief: "..." }
     - agent: [trip-planner]         # these agents may hand it work
   hooks:
     before: [today, weather]        # context gatherers from a fixed catalog, never code
@@ -1474,7 +1475,10 @@ giap_role:
 
 1. **Activations are structured, never keyword matches.** `delegated` and `task_step` are model
    decisions; `schedule` and `event` are explicit triggers on the scheduler and the event bus
-   (sensor, camera, device, presence, time), each with a cooldown. Nothing reads a user's text.
+   (sensor, camera, device, presence, time), each with a cooldown. `member: owner` is the recipe's
+   owner, so one member's agent never greets or notifies another; `between` holds an event to part
+   of the day on the household's clock, wrapping past midnight, and an event outside it spends no
+   cooldown. Nothing reads a user's text.
 2. **Every run is a lane run.** A scheduled or event activation queues a single-step run on the
    inference lane; it never interrupts a household turn and never runs beside it.
 3. **Hooks are a fixed catalog.** `before` hooks add context to the brief (the date, today's
@@ -1521,3 +1525,21 @@ household's turns still come first.
 - **P17 — the builder.** The Recipes screen in both UIs: a form over the block and a YAML view, a
   test run, compile status and preamble cost.
 - **P18 — external A2A.** Agent cards and A2A tasks for exposed agents, off by default.
+- **P19 — suggested agents.** Shipped templates offered as suggestions, never switched on (9.5).
+
+### 9.5 Suggested agents
+
+The pond ships agent templates and offers them; none runs until a member turns it on.
+
+| Piece | Design |
+|---|---|
+| Templates | Shipped recipes beside the planner, worker and verifier, read-only: a copy may narrow their tools, never widen them. |
+| Where they show | Suggestion cards on Home and the Recipes screen, from `GET /agents/suggestions`; enabling and dismissing are its two `POST` routes. |
+| When a card shows | Only when the pond can run it: welcome back needs presence and an identified member, camera follow-ups a camera, a tank alert that sensor. |
+| Turning one on | One tap copies it into `agent_recipes`, owned by that member, and compiles its prefill then, so its first run is warm. The builder edits the copy. |
+| Nothing automatic | A card never activates itself. Schedules and events start after the tap, and only with `ext_orchestrator_enabled` on; a schedule's first sighting only sets its baseline. Anything outward still waits for approval. |
+| Dismissing | A declined card stays hidden, recorded like the proactive reviewer's ledger. |
+| Cost | A compiled preamble is about 20-30 MB on disk, paid only for templates turned on. |
+
+The first set: morning brief, welcome back, late-night gate alert, low-tank alert, trip planner,
+document reader, study planner.

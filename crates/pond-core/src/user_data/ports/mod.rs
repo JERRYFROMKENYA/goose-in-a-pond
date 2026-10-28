@@ -1,4 +1,5 @@
 pub mod account_credentials;
+pub mod agent_suggestion;
 pub mod camera_storage;
 pub mod conversation_extractor;
 pub mod device_attribution;

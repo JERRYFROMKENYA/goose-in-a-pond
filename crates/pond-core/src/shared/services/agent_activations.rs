@@ -13,14 +13,14 @@ use crate::shared::domain::long_task::{
 };
 use crate::shared::domain::orchestration::AgentRole;
 use crate::shared::domain::role_block::{
-    Activation, AfterHook, BeforeHook, Cooldown, CronSchedule, EventTrigger, Threshold,
+    Activation, AfterHook, BeforeHook, Cooldown, CronSchedule, EventTrigger, Subject, Threshold,
 };
 use crate::shared::domain::session_activity::{PresenceTransition, ProfilePresence};
 use crate::shared::ports::event_bus::BusEvent;
 use crate::shared::services::long_task_runner::RESULT_TITLE;
 use crate::user_data::domain::device::DeviceStateValue;
 use crate::user_data::domain::profile::ProfileScope;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use thiserror::Error;
@@ -96,23 +96,29 @@ pub struct EventMatch {
     pub detail: String,
 }
 
-/// Whether `event` is one `trigger` listens for. Time-of-day triggers never match the bus.
-pub fn match_event(trigger: &EventTrigger, event: &BusEvent) -> Option<EventMatch> {
+/// Whether `event` is one `trigger` listens for, for an agent `owner` owns. Time-of-day triggers
+/// never match the bus.
+pub fn match_event(
+    trigger: &EventTrigger,
+    event: &BusEvent,
+    owner: Option<&str>,
+) -> Option<EventMatch> {
     match (trigger, event) {
         (EventTrigger::PresenceArrive { member }, BusEvent::Presence(p))
             if matches!(p.transition, PresenceTransition::Arrived)
-                && member.admits(&p.profile_id) =>
+                && member.admits(&p.profile_id, owner) =>
         {
             Some(presence_match(p, "arrived home"))
         }
         (EventTrigger::PresenceLeave { member }, BusEvent::Presence(p))
             if matches!(p.transition, PresenceTransition::Departed)
-                && member.admits(&p.profile_id) =>
+                && member.admits(&p.profile_id, owner) =>
         {
             Some(presence_match(p, "left home"))
         }
         (EventTrigger::CameraPerson { camera }, BusEvent::Camera(c))
-            if c.event_type.eq_ignore_ascii_case("person") && camera.admits(&c.camera_id) =>
+            if c.event_type.eq_ignore_ascii_case("person")
+                && camera.admits(&c.camera_id, owner) =>
         {
             Some(source_match(
                 &c.camera_id,
@@ -120,7 +126,8 @@ pub fn match_event(trigger: &EventTrigger, event: &BusEvent) -> Option<EventMatc
             ))
         }
         (EventTrigger::CameraMotion { camera }, BusEvent::Camera(c))
-            if c.event_type.eq_ignore_ascii_case("motion") && camera.admits(&c.camera_id) =>
+            if c.event_type.eq_ignore_ascii_case("motion")
+                && camera.admits(&c.camera_id, owner) =>
         {
             Some(source_match(
                 &c.camera_id,
@@ -134,7 +141,9 @@ pub fn match_event(trigger: &EventTrigger, event: &BusEvent) -> Option<EventMatc
                 threshold,
             },
             BusEvent::Sensor(r),
-        ) if r.sensor_type.eq_ignore_ascii_case(sensor_type) && device.admits(&r.device_id) => {
+        ) if r.sensor_type.eq_ignore_ascii_case(sensor_type)
+            && device.admits(&r.device_id, owner) =>
+        {
             let (word, limit) = match threshold {
                 Threshold::Above(x) => ("above", x),
                 Threshold::Below(x) => ("below", x),
@@ -150,7 +159,7 @@ pub fn match_event(trigger: &EventTrigger, event: &BusEvent) -> Option<EventMatc
             })
         }
         (EventTrigger::DeviceChange { key, device }, BusEvent::Device(d))
-            if d.key.eq_ignore_ascii_case(key) && device.admits(d.device_id.as_str()) =>
+            if d.key.eq_ignore_ascii_case(key) && device.admits(d.device_id.as_str(), owner) =>
         {
             let value = match &d.value {
                 DeviceStateValue::Bool(b) => b.to_string(),
@@ -309,20 +318,31 @@ pub struct Firing {
     pub reason: FiringReason,
 }
 
-/// Every activation, of every agent, that `event` fires now.
+/// Every activation, of every agent, that `event` fires now; a `between` window is read on
+/// `timezone`'s wall clock.
 pub fn firings_for_event(
     agents: &[ActivationAgent],
     event: &BusEvent,
+    timezone: &str,
     book: &mut ActivationBook,
     now: DateTime<Utc>,
 ) -> Vec<Firing> {
+    let local = now.with_timezone(&zone(timezone));
+    let (hour, minute) = (local.hour(), local.minute());
     let mut firings = Vec::new();
     for agent in agents {
         for (index, activation) in agent.role.activations().iter().enumerate() {
             let Activation::Event(e) = activation else {
                 continue;
             };
-            let Some(matched) = match_event(&e.trigger, event) else {
+            // Outside its window an event is not seen at all, so its cooldown is not spent.
+            if e.window
+                .is_some_and(|window| !window.contains(hour, minute))
+            {
+                continue;
+            }
+            let Some(matched) = match_event(&e.trigger, event, agent.owner_profile_id.as_deref())
+            else {
                 continue;
             };
             let key = ActivationKey::of(agent.role.name(), index, activation);
@@ -399,6 +419,101 @@ pub fn live_keys(agents: &[ActivationAgent]) -> HashSet<ActivationKey> {
                 .map(|(index, a)| ActivationKey::of(agent.role.name(), index, a))
         })
         .collect()
+}
+
+// ── What a member reads about it ────────────────────────────────────────────
+
+/// When an agent runs, in one line for its card: "Every day at 06:30; when you come home".
+pub fn describe_activations(activations: &[Activation]) -> String {
+    let text = activations
+        .iter()
+        .map(describe_activation)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => text,
+    }
+}
+
+fn describe_activation(activation: &Activation) -> String {
+    match activation {
+        Activation::Delegated => "when your assistant hands it work".to_string(),
+        Activation::TaskStep => "as a step of a long task".to_string(),
+        Activation::Schedule(s) => describe_cron(&s.cron),
+        Activation::Event(e) => {
+            let mut text = describe_trigger(&e.trigger);
+            if let Some(window) = e.window {
+                let ((fh, fm), (th, tm)) = window.bounds();
+                text.push_str(&format!(" between {fh:02}:{fm:02} and {th:02}:{tm:02}"));
+            }
+            text
+        }
+        Activation::Agent { from } => format!("when {} hands it work", from.join(" or ")),
+    }
+}
+
+/// The common shapes in words; anything else is shown as the cron itself.
+fn describe_cron(cron: &CronSchedule) -> String {
+    let fields: Vec<&str> = cron.as_str().split(' ').collect();
+    if let [second, minute, hour, "*", "*", weekday] = fields.as_slice() {
+        if let (Ok(0), Ok(minute), Ok(hour)) = (
+            second.parse::<u32>(),
+            minute.parse::<u32>(),
+            hour.parse::<u32>(),
+        ) {
+            let days = match weekday.to_ascii_uppercase().as_str() {
+                "*" => "every day".to_string(),
+                "MON-FRI" | "1-5" => "on weekdays".to_string(),
+                "SAT,SUN" | "SUN,SAT" | "SAT-SUN" | "0,6" | "6,0" => "at weekends".to_string(),
+                other => format!("on {other}"),
+            };
+            return format!("{days} at {hour:02}:{minute:02}");
+        }
+    }
+    format!("on the schedule {}", cron.as_str())
+}
+
+fn describe_trigger(trigger: &EventTrigger) -> String {
+    let member = |subject: &Subject, verb: &str| match subject {
+        Subject::Any => format!("when anyone {verb}s home"),
+        Subject::Owner => format!("when you {verb} home"),
+        Subject::Named(_) => format!("when a chosen member {verb}s home"),
+    };
+    let source = |subject: &Subject, kind: &str| match subject {
+        Subject::Named(id) => format!("{kind} {id}"),
+        Subject::Any | Subject::Owner => format!("any {kind}"),
+    };
+    match trigger {
+        EventTrigger::PresenceArrive { member: who } => member(who, "come"),
+        EventTrigger::PresenceLeave { member: who } => member(who, "leave"),
+        EventTrigger::CameraPerson { camera } => {
+            format!("when {} sees a person", source(camera, "camera"))
+        }
+        EventTrigger::CameraMotion { camera } => {
+            format!("when {} sees movement", source(camera, "camera"))
+        }
+        EventTrigger::Sensor {
+            sensor_type,
+            device,
+            threshold,
+        } => {
+            let what = sensor_type.replace('_', " ");
+            let (verb, limit) = match threshold {
+                Threshold::Above(x) => ("rises above", x),
+                Threshold::Below(x) => ("drops below", x),
+            };
+            match device {
+                Subject::Named(id) => format!("when the {what} on {id} {verb} {limit}"),
+                Subject::Any | Subject::Owner => format!("when the {what} {verb} {limit}"),
+            }
+        }
+        EventTrigger::DeviceChange { key, device } => {
+            format!("when the {key} of {} changes", source(device, "device"))
+        }
+        EventTrigger::TimeDaily { hour, minute } => format!("every day at {hour:02}:{minute:02}"),
+    }
 }
 
 // ── Whose run it is ─────────────────────────────────────────────────────────

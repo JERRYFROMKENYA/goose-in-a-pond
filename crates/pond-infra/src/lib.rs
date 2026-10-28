@@ -13,6 +13,7 @@ pub(crate) mod push_token_log;
 pub mod rule_redactor;
 pub mod secret_crypto;
 pub mod secret_migration;
+pub mod sqlite_agent_suggestion;
 pub mod sqlite_context;
 pub mod sqlite_credit_ledger;
 pub mod sqlite_device_attribution;

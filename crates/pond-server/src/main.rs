@@ -10408,6 +10408,7 @@ async fn run_recipes_cmd(action: RecipeAction) -> Result<()> {
                 active: true,
                 created_at: chrono::Utc::now().to_rfc3339(),
                 owner_profile_id: None,
+                template: None,
             };
             repo.upsert(&recipe).await?;
             println!("✓ Recipe '{name}' imported (id: {id})");

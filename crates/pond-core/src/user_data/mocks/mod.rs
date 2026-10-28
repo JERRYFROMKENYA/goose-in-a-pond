@@ -1,3 +1,4 @@
+pub mod mock_agent_suggestion;
 pub mod mock_device_control;
 pub mod mock_device_controller;
 pub mod mock_device_registry;

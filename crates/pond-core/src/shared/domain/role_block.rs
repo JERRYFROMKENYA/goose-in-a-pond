@@ -47,7 +47,7 @@ pub const ROLE_BLOCK_FIELDS: &[&str] = &[
 const ACTIVATION_KINDS: &[&str] = &["delegated", "task_step", "schedule", "event", "agent"];
 const SCHEDULE_FIELDS: &[&str] = &["cron", "brief", "cooldown"];
 const EVENT_FIELDS: &[&str] = &[
-    "on", "brief", "cooldown", "member", "camera", "device", "above", "below", "at",
+    "on", "brief", "cooldown", "member", "camera", "device", "above", "below", "at", "between",
 ];
 const EVENT_KINDS: &[&str] = &[
     "presence.arrive",
@@ -108,6 +108,74 @@ pub struct EventActivation {
     pub brief: String,
     #[serde(rename = "cooldown_secs")]
     pub cooldown: Cooldown,
+    /// Only events inside this part of the day run it, on the household's clock.
+    #[serde(rename = "between", skip_serializing_if = "Option::is_none")]
+    pub window: Option<ClockWindow>,
+}
+
+/// A part of the day, `22:00-06:00`; one whose end is before its start runs past midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClockWindow {
+    from: u32,
+    to: u32,
+}
+
+impl ClockWindow {
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let malformed =
+            || format!("`{raw}` is not a part of the day; write it as \"22:00-06:00\", 24-hour");
+        let (from, to) = raw.split_once('-').ok_or_else(malformed)?;
+        let (from, to) = (
+            parse_clock(from).ok_or_else(malformed)?,
+            parse_clock(to).ok_or_else(malformed)?,
+        );
+        let window = ClockWindow {
+            from: from.0 * 60 + from.1,
+            to: to.0 * 60 + to.1,
+        };
+        if window.from == window.to {
+            return Err(format!(
+                "`{raw}` starts and ends at the same time; leave `between` out to run at any hour"
+            ));
+        }
+        Ok(window)
+    }
+
+    /// `(start, end)` as `(hour, minute)` pairs.
+    pub fn bounds(self) -> ((u32, u32), (u32, u32)) {
+        (
+            (self.from / 60, self.from % 60),
+            (self.to / 60, self.to % 60),
+        )
+    }
+
+    pub fn contains(self, hour: u32, minute: u32) -> bool {
+        let at = hour * 60 + minute;
+        if self.from < self.to {
+            self.from <= at && at < self.to
+        } else {
+            at >= self.from || at < self.to
+        }
+    }
+}
+
+impl std::fmt::Display for ClockWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02}:{:02}-{:02}:{:02}",
+            self.from / 60,
+            self.from % 60,
+            self.to / 60,
+            self.to % 60
+        )
+    }
+}
+
+impl Serialize for ClockWindow {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
 }
 
 /// Which bus event, or which time of day, starts a run.
@@ -203,13 +271,17 @@ impl Serialize for EventTrigger {
 pub enum Subject {
     Any,
     Named(String),
+    /// The member who owns the recipe, so a shipped agent can mean "me" before it has an owner.
+    Owner,
 }
 
 impl Subject {
-    pub fn admits(&self, id: &str) -> bool {
+    /// An agent with no owner admits nobody as `Owner`: the event would be about no one.
+    pub fn admits(&self, id: &str, owner: Option<&str>) -> bool {
         match self {
             Subject::Any => true,
             Subject::Named(name) => name == id,
+            Subject::Owner => owner == Some(id),
         }
     }
 }
@@ -219,6 +291,7 @@ impl Serialize for Subject {
         match self {
             Subject::Any => serializer.serialize_str("any"),
             Subject::Named(name) => serializer.serialize_str(name),
+            Subject::Owner => serializer.serialize_str("owner"),
         }
     }
 }
@@ -946,9 +1019,14 @@ fn parse_on(raw: &str) -> Result<OnKind, String> {
     }
 }
 
-/// `any`, absent, or an id.
+/// `any`, absent, or an id; `owner` too when the subject is a member.
 fn subject_field(map: &Mapping, key: &str, path: &str, errors: &mut Vec<FieldError>) -> Subject {
     match map.get(key) {
+        Some(Value::String(text))
+            if key == "member" && text.trim().eq_ignore_ascii_case("owner") =>
+        {
+            Subject::Owner
+        }
         None | Some(Value::Null) => Subject::Any,
         Some(Value::String(text)) if text.trim().is_empty() => {
             push(
@@ -1031,6 +1109,7 @@ fn parse_event(value: &Value, path: &str, errors: &mut Vec<FieldError>) -> Optio
         ("above", &["sensor"][..]),
         ("below", &["sensor"][..]),
         ("at", &["time"][..]),
+        ("between", &["presence", "camera", "sensor", "device"][..]),
     ] {
         if map.contains_key(key) && !belongs.contains(&family) {
             push(
@@ -1149,10 +1228,32 @@ fn parse_event(value: &Value, path: &str, errors: &mut Vec<FieldError>) -> Optio
             EventTrigger::TimeDaily { hour, minute }
         }
     };
+    let window = match map.get("between") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(raw)) => match ClockWindow::parse(raw) {
+            Ok(window) => Some(window),
+            Err(why) => {
+                push(errors, format!("{path}.between"), why);
+                return None;
+            }
+        },
+        Some(other) => {
+            push(
+                errors,
+                format!("{path}.between"),
+                format!(
+                    "must be a part of the day in quotes such as \"22:00-06:00\", not {}",
+                    kind_of(other)
+                ),
+            );
+            return None;
+        }
+    };
     Some(EventActivation {
         trigger,
         brief: brief?,
         cooldown,
+        window,
     })
 }
 

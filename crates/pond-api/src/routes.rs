@@ -518,6 +518,15 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ── Recipes ───────────────────────────────────────────────────────────
         .route("/recipes", get(list_recipes).post(create_recipe))
         .route("/recipes/validate", post(validate_recipe))
+        .route("/agents/suggestions", get(agent_suggestions))
+        .route(
+            "/agents/suggestions/{template}/enable",
+            post(enable_agent_suggestion),
+        )
+        .route(
+            "/agents/suggestions/{template}/dismiss",
+            post(dismiss_agent_suggestion),
+        )
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
         .route("/recipes/{name}/run", post(run_recipe))
         // ── Face biometrics ───────────────────────────────────────────────────
@@ -15116,6 +15125,12 @@ struct CreateRecipeRequest {
 async fn create_recipe(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
     body: Result<Json<CreateRecipeRequest>, JsonRejection>,
 ) -> impl axum::response::IntoResponse {
     let repo = match &state.recipe_repo {
@@ -15138,7 +15153,8 @@ async fn create_recipe(
                 .into_response()
         }
     };
-    let owner_profile_id = recipe_owner(&state, principal.as_ref()).await;
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let owner_profile_id = acting_member(&state, principal.as_ref(), on_host).await;
     let recipe = AgentRecipe {
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -15147,6 +15163,7 @@ async fn create_recipe(
         active: true,
         created_at: chrono::Utc::now().to_rfc3339(),
         owner_profile_id,
+        template: None,
     };
     match repo.upsert(&recipe).await {
         Ok(()) => (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response(),
@@ -15158,25 +15175,299 @@ async fn create_recipe(
     }
 }
 
-/// The member a new recipe belongs to: the one its paired device is attributed to, else nobody.
-/// Only the device counts: a recipe outlives the conversation it was written in.
-async fn recipe_owner(
+/// Whether a request comes from a process on this machine, the desktop: a loopback peer, not
+/// the plaintext development listener and not the tailnet, whose node also connects from here.
+fn on_this_host(
+    peer: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    insecure_dev: bool,
+    tailnet: bool,
+) -> bool {
+    !insecure_dev
+        && !tailnet
+        && peer.is_some_and(|axum::extract::ConnectInfo(p)| p.ip().is_loopback())
+}
+
+/// The member a request acts for when it saves an agent: its paired device's member, else, from
+/// this host, the household's primary member. Nobody otherwise; an unreadable attribution is
+/// nobody too, never the primary member, who may be someone else.
+async fn acting_member(
     state: &Arc<AppState>,
     principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    on_host: bool,
 ) -> Option<String> {
     let device = proven_device(principal);
-    let device_id = device.id()?.to_owned();
-    match device.rung(device_attribution(state).device_profile(&device_id).await) {
-        DeviceRung::Member(profile_id) => Some(profile_id),
-        DeviceRung::Unavailable(why) => {
-            tracing::warn!(
-                device = %device_id,
-                error = %why,
-                "recipes: could not read the device's member; saving the recipe with no owner"
-            );
+    if let Some(device_id) = device.id().map(str::to_owned) {
+        match device.rung(device_attribution(state).device_profile(&device_id).await) {
+            DeviceRung::Member(profile_id) => return Some(profile_id),
+            DeviceRung::Unavailable(why) => {
+                tracing::warn!(
+                    device = %device_id,
+                    error = %why,
+                    "could not read the device's member; acting for nobody"
+                );
+                return None;
+            }
+            DeviceRung::NoDevice | DeviceRung::Unattributed => {}
+        }
+    }
+    if !on_host {
+        return None;
+    }
+    match state.settings_repo.get().await {
+        Ok(settings) => settings
+            .primary_profile_id
+            .filter(|id| !id.trim().is_empty()),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the primary member; acting for nobody");
             None
         }
-        DeviceRung::NoDevice | DeviceRung::Unattributed => None,
+    }
+}
+
+/// Same stand-in as [`proposal_repo`]: the ledger is a plain table beside the recipes.
+fn agent_suggestion_ledger(
+    state: &Arc<AppState>,
+) -> pond_infra::sqlite_agent_suggestion::SqliteAgentSuggestionLedger {
+    pond_infra::sqlite_agent_suggestion::SqliteAgentSuggestionLedger::new(state.db.system.clone())
+}
+
+/// What this pond can run for `member`, read from where each capability lives. A failed read
+/// counts as absent, so a card is hidden rather than offered for something that cannot run.
+async fn pond_capabilities(
+    state: &Arc<AppState>,
+    member: Option<&str>,
+) -> pond_core::shared::services::agent_templates::PondCapabilities {
+    use pond_core::shared::services::agent_templates::{camera_configured, PondCapabilities};
+
+    let settings = state.settings_repo.get().await.unwrap_or_default();
+    let face_names_people = settings.vision_face_recognition_enabled
+        && camera_configured(&settings)
+        && state
+            .face_recognition
+            .as_ref()
+            .is_some_and(|slot| slot.current().is_ok());
+    let presence = match member {
+        Some(member) => {
+            face_names_people
+                || device_attribution(state)
+                    .devices_for_profile(member)
+                    .await
+                    .is_ok_and(|devices| !devices.is_empty())
+        }
+        None => false,
+    };
+    let sensor_types = state
+        .sensor_storage
+        .list_sensors()
+        .await
+        .map(|sensors| {
+            sensors
+                .into_iter()
+                .map(|(_, kind)| kind.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+    let web_search = settings.ext_knowledge_enabled
+        && match &state.secret_repo {
+            Some(repo) => repo
+                .get(pond_core::mcp::domain::tool_group::BRAVE_SEARCH_API_KEY)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|key| !key.trim().is_empty()),
+            None => false,
+        };
+    PondCapabilities {
+        presence,
+        identified_member: member.is_some(),
+        camera: camera_configured(&settings),
+        sensor_types,
+        weather: settings.ext_weather_enabled && state.weather_provider.is_some(),
+        web_search,
+    }
+}
+
+/// `GET /api/v1/agents/suggestions` -- the shipped agents this pond can run for the caller, less
+/// those they declined or already have. Nobody identified is offered nothing.
+async fn agent_suggestions(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::services::agent_templates::{enabled_templates, suggestions};
+    use pond_core::user_data::ports::agent_suggestion::AgentSuggestionLedger as _;
+
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return Json(json!([])).into_response();
+    };
+    // Unreadable, every card would come back, the declined ones included: show none instead.
+    let dismissed = match agent_suggestion_ledger(&state).dismissed(&member).await {
+        Ok(dismissed) => dismissed,
+        Err(e) => {
+            tracing::warn!(error = %e, "agent suggestions: the declined cards could not be read");
+            return Json(json!([])).into_response();
+        }
+    };
+    let enabled = match &state.recipe_repo {
+        Some(repo) => match repo.list().await {
+            Ok(recipes) => enabled_templates(&recipes, &member),
+            Err(e) => {
+                tracing::warn!(error = %e, "agent suggestions: recipes could not be read");
+                return Json(json!([])).into_response();
+            }
+        },
+        None => Default::default(),
+    };
+    let pond = pond_capabilities(&state, Some(&member)).await;
+    Json(suggestions(&pond, &dismissed, &enabled)).into_response()
+}
+
+/// Serialises turning agents on, so two taps cannot both take the same free name: the recipe
+/// store's upsert would replace the first copy with the second.
+static ENABLING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// `POST /api/v1/agents/suggestions/{template}/enable` -- copies a shipped agent into the
+/// caller's recipes. Nothing runs that the template's activations do not declare.
+async fn enable_agent_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(template): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::services::agent_templates::{
+        copy_name, enabled_templates, template as find_template, template_copy,
+    };
+
+    let Some(shipped) = find_template(&template) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no shipped agent named `{template}`")})),
+        )
+            .into_response();
+    };
+    let Some(repo) = &state.recipe_repo else {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({"error": "Recipe repository not configured"})),
+        )
+            .into_response();
+    };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "only a household member can turn an agent on"})),
+        )
+            .into_response();
+    };
+    let pond = pond_capabilities(&state, Some(&member)).await;
+    let missing = shipped.missing(&pond);
+    if !missing.is_empty() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({
+                "error": "this pond cannot run that agent yet",
+                "missing": missing,
+            })),
+        )
+            .into_response();
+    }
+
+    let _one_at_a_time = ENABLING.lock().await;
+    let recipes = match repo.list().await {
+        Ok(recipes) => recipes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    if enabled_templates(&recipes, &member).contains(shipped.id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "you already have this agent"})),
+        )
+            .into_response();
+    }
+    let taken = recipes.into_iter().map(|r| r.name).collect();
+    let recipe = template_copy(
+        shipped,
+        &member,
+        copy_name(shipped, &taken),
+        chrono::Utc::now(),
+    );
+    match repo.upsert(&recipe).await {
+        Ok(()) => {
+            tracing::info!(
+                target: "giap::trace",
+                kind = "agent_enabled",
+                template = shipped.id,
+                recipe = %recipe.name,
+                member = %member,
+                "a member turned a shipped agent on"
+            );
+            (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/agents/suggestions/{template}/dismiss` -- hides a card from the caller for good.
+async fn dismiss_agent_suggestion(
+    State(state): State<Arc<AppState>>,
+    Path(template): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::user_data::ports::agent_suggestion::AgentSuggestionLedger as _;
+
+    let Some(shipped) = pond_core::shared::services::agent_templates::template(&template) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("there is no shipped agent named `{template}`")})),
+        )
+            .into_response();
+    };
+    let on_host = on_this_host(peer.ok(), insecure.is_some(), tailnet.is_some());
+    let Some(member) = acting_member(&state, principal.as_ref(), on_host).await else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "only a household member can dismiss a suggestion"})),
+        )
+            .into_response();
+    };
+    match agent_suggestion_ledger(&state)
+        .dismiss(shipped.id, &member, chrono::Utc::now())
+        .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
@@ -15282,6 +15573,19 @@ async fn update_recipe(
                 .into_response()
         }
     };
+    if let (Some(template), Some(yaml)) = (existing.template.as_deref(), req.yaml.as_deref()) {
+        let widened = pond_core::shared::services::agent_templates::widened_groups(template, yaml);
+        if !widened.is_empty() {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": "a copy of a shipped agent may narrow its tools, never widen them",
+                    "widened": widened,
+                })),
+            )
+                .into_response();
+        }
+    }
     let updated = AgentRecipe {
         id: existing.id,
         name: existing.name,
@@ -15290,6 +15594,7 @@ async fn update_recipe(
         active: req.active.unwrap_or(existing.active),
         created_at: existing.created_at,
         owner_profile_id: existing.owner_profile_id,
+        template: existing.template,
     };
     match repo.upsert(&updated).await {
         Ok(()) => Json(recipe_view_json(&updated)).into_response(),

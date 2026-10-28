@@ -38,4 +38,7 @@ pub struct AgentRecipe {
     /// names nobody. `None` for recipes saved from no paired device.
     #[serde(default)]
     pub owner_profile_id: Option<String>,
+    /// The shipped template this recipe was copied from; `None` for one written by hand.
+    #[serde(default)]
+    pub template: Option<String>,
 }

@@ -137,7 +137,9 @@ pub async fn run_agent_activations(deps: ActivationDeps) {
 
         let now = Utc::now();
         let firings = match &event {
-            Some(event) => activations::firings_for_event(&agents, event, &mut book, now),
+            Some(event) => {
+                activations::firings_for_event(&agents, event, &gate.timezone, &mut book, now)
+            }
             None => activations::firings_for_clock(&agents, &gate.timezone, &mut book, now),
         };
         for firing in firings {

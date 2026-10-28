@@ -644,6 +644,7 @@ impl DelegationAuthority {
             // From the request: it describes this delegation, not the persona.
             background: request.background,
             compile_prefill: false,
+            prefill_retention: None,
             persona: role.instructions.clone(),
         })
     }
@@ -727,6 +728,8 @@ pub struct TaskSpec {
     background: bool,
     /// A prefill compile run, set only by the pond's own compile pass; it widens nothing.
     compile_prefill: bool,
+    /// Helper snapshots unused for longer are discarded by that compile.
+    prefill_retention: Option<std::time::Duration>,
     /// The role's own instructions, examples included: the child's persona in its preamble.
     persona: String,
 }
@@ -793,6 +796,16 @@ impl TaskSpec {
 
     pub fn compiles_prefill(&self) -> bool {
         self.compile_prefill
+    }
+
+    /// The compile also discards helper snapshots no role has used for `retention`.
+    pub fn retaining_helpers_for(mut self, retention: std::time::Duration) -> Self {
+        self.prefill_retention = Some(retention);
+        self
+    }
+
+    pub fn prefill_retention(&self) -> Option<std::time::Duration> {
+        self.prefill_retention
     }
 
     /// The role's instructions, for the child's system prompt; the request's are its task.

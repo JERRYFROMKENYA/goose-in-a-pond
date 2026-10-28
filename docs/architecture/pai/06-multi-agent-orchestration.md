@@ -1514,6 +1514,19 @@ whose user messages differ from their first token, under `request_context::compi
 The boot pass is a lane job, exempt from the activity gate, after the existing prewarm. The
 household's turns still come first.
 
+### 9.3.1 Which prefills are kept (Jerry, 2026-10-28)
+
+| Agent | Prefill |
+|---|---|
+| Default agents (the shipped planner, worker and verifier) | Compiled on every start. |
+| Suggested agents (shipped templates) | The recipe exists; no prefill until a member turns one on. |
+| An agent a member builds or turns on | Registered with its definition's hash in `agent_prefills`, compiled when it is created or edited, and rebuilt on any start that finds it missing or bad. |
+| An agent unused for `agent_prefill_retention_days` (14) | Its snapshot is discarded and the start-up pass skips it; its next run compiles it again, cold once. |
+
+Use is recorded whenever the runner gives the agent a step. The engine applies the retention to
+helper snapshots on every compile pass, by their own last use, so a snapshot no registry row
+claims is not kept forever.
+
 ### 9.4 Phases
 
 - **P14 — prefill compile.** The engine primitive, checksums in the snapshot index, and the boot and

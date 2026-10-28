@@ -1011,9 +1011,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
                 s.vision_event_types = v;
             }
         }
-        "picture_support_download_enabled" => {
-            s.picture_support_download_enabled = value == "true"
-        }
+        "picture_support_download_enabled" => s.picture_support_download_enabled = value == "true",
         // Matter
         // Legacy `matter_enabled` is ignored: its toggle is gone, so an old `false` would stick.
         "matter_enabled" => {}

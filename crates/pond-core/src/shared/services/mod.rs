@@ -3,6 +3,7 @@ pub mod child_sessions;
 pub mod delegation;
 pub mod egress;
 pub mod in_process_event_bus;
+pub mod long_task_roles;
 pub mod passages;
 pub mod print_output;
 pub mod sensor_persisting_event_bus;

@@ -53,9 +53,9 @@ describe("a long task under way", () => {
 
   it("shows each step with its agent, its state and its summary", () => {
     show(taskOf());
-    expect(screen.getByText("Long-task planner")).toBeTruthy();
-    expect(screen.getAllByText("Long-task worker")).toHaveLength(2);
-    expect(screen.getByText("Long-task verifier")).toBeTruthy();
+    expect(screen.getByText("Point Gander")).toBeTruthy();
+    expect(screen.getAllByText("Forager Gosling")).toHaveLength(2);
+    expect(screen.getByText("Sentinel Goose")).toBeTruthy();
     expect(screen.getByText("Split it into three parts.")).toBeTruthy();
     expect(screen.getAllByText("Waiting")).toHaveLength(2);
     expect(screen.getByText("Working")).toBeTruthy();

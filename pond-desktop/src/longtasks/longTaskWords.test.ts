@@ -130,7 +130,7 @@ describe("a task in plain words", () => {
   });
 
   it("names a built-in agent by its job and any other by the name it was saved under", () => {
-    expect(stepAgent({ role: "long-task-planner" })).toBe("Long-task planner");
+    expect(stepAgent({ role: "long-task-planner" })).toBe("Point Gander");
     expect(stepAgent({ role: "study-planner" })).toBe("study-planner");
   });
 });

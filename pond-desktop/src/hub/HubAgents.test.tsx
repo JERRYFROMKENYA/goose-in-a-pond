@@ -200,7 +200,7 @@ describe("start-up copies on the hub's Recipes screen", () => {
     const card = await screen.findByRole("article", { name: "Greeter" });
     expect(await within(card).findByText("Ready")).toBeTruthy();
     const group = await screen.findByRole("region", { name: "Built-in agents" });
-    expect(within(group).getByRole("listitem", { name: "Long-task planner" })).toBeTruthy();
+    expect(within(group).getByRole("listitem", { name: "Point Gander" })).toBeTruthy();
     expect(within(group).queryByRole("button", { name: /edit|delete/i })).toBeNull();
   });
 

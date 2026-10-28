@@ -3854,6 +3854,10 @@ PAI-2, PAI-3 and PAI-4; not a PAI milestone).** Design and store audit:
   - The SSE `tool_result` frame is marked `transient` for clients.
   - Every other store was audited (§8.10.6). Two remain open: Goose on the Go's card cache keeps
     search cards, and the LiteRT backend's KV snapshot can park a conversation that read one.
+  - The desktop keeps nothing of a result beyond the live view (`localStorage` holds only the run
+    pointer; there is no card cache, IndexedDB or export). A reloaded conversation shows a quiet
+    line naming the sources in place of a card, and the web search panel has the "Nearby places"
+    switch (§8.10.5), whose text names the town that would leave.
   - Local places are opt-in (`web_search_local_results`, default off). When on, only the town
     from `weather_location_name` goes out, as `X-Loc-City`: no coordinates, no country.
   - Egress is unchanged: the same Brave host, traced and gated on the `pond-net` clients.

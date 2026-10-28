@@ -960,6 +960,10 @@ The `audience: ["user"]` block keeps `SearchCard`'s fields and gains optional `p
 - **The SSE `tool_result` frame carrying a transient result has `"transient": true`.** A client
   shows the card for the conversation in view and must not store it, because history keeps only
   the stub (§8.10.6).
+- **The desktop** (`SearchCard`) draws `places` above the pages, under a "Nearby places" label with
+  a `MapPin`, and the pages under "Pages" when both are present. At most three places show in a
+  chat chip, five elsewhere. A place is a link only when its URL is `http(s)`, as a page is, and
+  an empty or malformed `places` field draws nothing.
 
 #### 8.10.4 Fallback
 
@@ -1011,6 +1015,22 @@ The `audience: ["user"]` block keeps `SearchCard`'s fields and gains optional `p
   - An old client ignores the field.
 - **The privacy line** for both apps, when on: "Each web search sends <town> to Brave, so the
   results can include places near you."
+- **The desktop's switch** is "Nearby places" on the one `WebSearchPanel` both desktop UIs mount
+  (classic Context, Sources; hub Accounts):
+  - Off until turned on, drawn from `local_results.enabled`. Its text says what would leave the
+    house: "Sends your town (Nairobi) to Brave with each search, so it can find places near you.
+    Your exact location is never sent."
+  - With `town` null it cannot turn on, and says to set the location first, with a "Set your
+    location" button to Settings where the app can navigate there. Left on with no town it can
+    still be turned off, and says no town is sent.
+  - A pond that does not report `local_results` gets the switch disabled and "This pond cannot
+    look for nearby places yet".
+  - It saves through `PUT /api/v1/settings` with that one key, at once, and goes back with "Could
+    not save this setting" when the save fails.
+  - The panel's privacy paragraph gains the town sentence above while the switch is on and a town
+    is set.
+  - The setting's entry in the desktop Settings catalogue is `ownedBy: "web-search"`, so that
+    screen does not offer a second switch that could be turned on with no town.
 
 #### 8.10.6 History keeps only the stub
 
@@ -1054,7 +1074,7 @@ rewritten only once the turn is over.
 | `pond_system.db`, the turn's tool rows | the model's copy | the stub, with `"transient": true`. The SSE handler hands `keep` to `ChatService::persist_assistant_turn`, which stores it in place of the content (`kept_tool_row`) |
 | goose's `sessions.db` (`<data_dir>/engine`) | the whole result, card included | the stub. `TurnSweep::finish` rewrites the conversation before `Done`. A turn dropped unfinished (cancel, early return) hands the sweep to a task; it waits on the conversation's rewrite lock and skips if a newer turn has begun. Every turn's start also sweeps, in the same write as the image cap, which catches a crash or a missed cancel |
 | SSE frames and the runs registry | the copy and the card | in memory only; a finished run stays reattachable for 120 s. The frame is marked `transient` |
-| desktop renderer | in memory | clear; `localStorage` holds only the run pointer |
+| desktop renderer | in memory | clear; `localStorage` holds only the run pointer. A conversation reloaded from history shows one quiet line under the answer, "Web search: results aren't kept after the turn. Sources: ...", in place of a card |
 | Goose on the Go, `services/card-cache.ts` | every card it is shown, search cards included, in AsyncStorage | **open:** honour `transient` |
 | voice child NDJSON `tool_result` | up to 2,000 characters to the shell | in memory; the shell logs only non-contract lines and stderr. Voice turns store user and assistant text, no tool rows |
 | memory extraction | reads user and assistant rows only | clear: the assistant's answer is the model's own words |
@@ -1068,6 +1088,12 @@ rewritten only once the turn is over.
 | `GIAP_CAPTURE_PAYLOAD` | whole payloads, to a directory | a developer's switch, never set on a household pond. Never point it at Brave results (§3(b)(xiii)) |
 | a delegated subagent's session | the child's own conversation | `ChildRunner::release` deletes it; orchestration is off by default |
 | the direct dispatcher (mistral.rs, pond-agent) | the joined text | `ToolCallResult.keep` carries the stub, and the mistral.rs path persists it. The quarantined pond-agent passes `None` |
+
+**How a client reads the stub.** `GET /sessions/{id}/messages` returns a tool row with `content`
+set to the stored row as JSON, and `tool_call_id` beside it. The marker is inside that JSON, not
+a field of the message: `{"tool_call_id", "tool", "content": "<stub>", "arguments", "transient":
+true}`. A client parses `content` to find it. The desktop also accepts a top-level `transient`
+with the stub as `content`.
 
 **Not redacted, on purpose:** the model's own words. That is its answer, its reasoning when
 `persist_thinking` is on, and a summary goose's compaction writes mid-turn. Each can paraphrase
@@ -1148,6 +1174,18 @@ place and LLM Context give a household question, through the one tool. Not taken
     request log;
   - the turn after a search began from a 4,023-token prompt with a 0.67 s prefill, against
     4,556 tokens at the end of the turn that searched. One observation, not an A/B.
+- **The desktop, on a Mac** (`pond-desktop`, 2026-10-28). Against mocked routes only, never a live
+  pond:
+  - `npm run typecheck` is clean and `npm test` passes (124 files, 1,941 tests), covering the
+    switch, the card's places and link rule, the store keeping no card in web storage, and the
+    reloaded line;
+  - `npm run lint` reports one error and one warning, both in files this change did not touch
+    (`sections/Devices.tsx`, `hub/state/themeStore.ts`);
+  - Playwright on local Chrome: the web search panel and card specs, with Connections, Settings,
+    Chat, the accessibility baseline and the hub's smoke, Uber and Privacy specs, passed (87
+    passed, 2 skipped), with the panel's axe scan and 3:1 switch-edge checks in light and dark;
+  - not run: the Electron shell, and a pond. The shapes of `local_results` and of the history
+    row were read from the Rust that writes them, not from a live response.
 
 #### 8.10.9 Open
 
@@ -1156,4 +1194,5 @@ place and LLM Context give a household question, through the one tool. Not taken
 | Phone card cache | Goose on the Go keeps every card it is shown (`services/card-cache.ts`), so a search card's titles, URLs and snippets outlive the turn on the phone. It should skip a frame marked `transient` | GOTG follow-up |
 | LiteRT KV snapshot | the LiteRT backend parks a whole conversation's KV on disk before a side call, a numeric copy of whatever the turn read. One fix is to delete that snapshot when the turn ends, or never to park one holding a transient result | goose fork follow-up |
 | `X-Loc-Country` | accepted by Brave, but the pond stores no country code. The onboarding geocode could store one | Jerry |
-| Desktop card and switch | `SearchCard` does not draw `places` yet, and neither app has the local-places switch | desktop agent, GOTG |
+| Phone card and switch | Goose on the Go draws no `places` and has no local-places switch | GOTG follow-up |
+| Desktop dark link colour | a link in dark measured 2.85 to 3.11:1 because `--border-ink` there is the accent lifted to an edge's 3:1; the web search card and help links now use `--purple-200` in dark (9.1:1 and 8.7:1). Other `--border-ink` text in dark has not been measured | desktop follow-up |

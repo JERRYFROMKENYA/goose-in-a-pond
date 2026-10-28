@@ -895,6 +895,52 @@ export interface AgentRecipe {
   parameters?: RecipeParameter[];
   extensions?: RecipeExtensionSpec[];
   activities?: string[];
+  /** The member whose paired device first saved it; `null` when saved from no attributed device. */
+  owner_profile_id?: string | null;
+}
+
+/** One problem `POST /recipes/validate` found, at the path of its field (`giap_role.activations[2].event.on`). */
+export interface RecipeFieldError {
+  path: string;
+  message: string;
+}
+
+/** An activation as the validator reports it, tagged on `kind`. */
+export type ValidatedActivation =
+  | { kind: "delegated" }
+  | { kind: "task_step" }
+  | { kind: "schedule"; cron: string; brief: string; cooldown_secs: number }
+  | { kind: "event"; on: string; brief: string; cooldown_secs: number }
+  | { kind: "agent"; from: string[] };
+
+export interface ValidatedRole {
+  name: string;
+  tool_groups: string[];
+  activations: ValidatedActivation[];
+  hooks: { before: string[]; after: Array<string | { hand_to: string }> };
+  /** The role's own text, examples included; tool schemas are not counted. */
+  preamble_chars: number;
+}
+
+/** A shipped agent template the pond offers, shown only when this pond can run it. Nothing runs until it is turned on. */
+export interface AgentSuggestion {
+  /** The template's name; the key the enable and dismiss routes take. */
+  template: string;
+  title: string;
+  description: string;
+  /** Why it fits this pond, in the pond's words. */
+  why: string;
+  /** What it uses that this pond has, such as presence or a camera. */
+  needs: string[];
+  /** When it would run, such as "Every weekday at 7:00". */
+  activations_summary: string;
+}
+
+/** Answer of `POST /recipes/validate`: 200 whether or not the block is acceptable. */
+export interface RecipeValidation {
+  ok: boolean;
+  role: ValidatedRole | null;
+  errors: RecipeFieldError[];
 }
 
 // ── Chat / Streaming ──────────────────────────────────────────

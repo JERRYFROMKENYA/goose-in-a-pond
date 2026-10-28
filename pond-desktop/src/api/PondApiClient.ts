@@ -3,6 +3,7 @@ import {
   ApiError,
   type AddExtensionRequest,
   type AgentRecipe,
+  type AgentSuggestion,
   type AgentTool,
   type CalibrateResponse,
   type ChallengeResponse,
@@ -46,6 +47,7 @@ import {
   type OllamaModel,
   type PairingCodeResponse,
   type PromptTemplate,
+  type RecipeValidation,
   type RetitleOneResult,
   type RetitleResult,
   type Schedule,
@@ -1661,6 +1663,34 @@ export class PondApiClient {
 
   removeRecipe(id: string): Promise<void> {
     return this.del(`/api/v1/recipes/${encodeURIComponent(id)}`);
+  }
+
+  /** Agent templates this pond could run, none switched on. A dismissed one is not listed again. */
+  async listAgentSuggestions(): Promise<AgentSuggestion[]> {
+    const r = await this.get<AgentSuggestion[] | { suggestions?: AgentSuggestion[] }>("/api/v1/agents/suggestions");
+    return Array.isArray(r) ? r : (r?.suggestions ?? []);
+  }
+
+  /** Copies the template into the household's recipes, owned by the member who asked. 409 if it already is. */
+  async enableAgentSuggestion(template: string): Promise<{ recipe: AgentRecipe }> {
+    const r = await this.post<AgentRecipe | { recipe: AgentRecipe }>(
+      `/api/v1/agents/suggestions/${encodeURIComponent(template)}/enable`,
+    );
+    // The route answers with the recipe itself; a wrapped one is read the same.
+    return r && typeof r === "object" && "recipe" in r ? { recipe: r.recipe } : { recipe: r as AgentRecipe };
+  }
+
+  /** The card stays hidden for good. */
+  dismissAgentSuggestion(template: string): Promise<void> {
+    return this.post(`/api/v1/agents/suggestions/${encodeURIComponent(template)}/dismiss`);
+  }
+
+  /** Checks an agent's `giap_role` block without saving; a refused block is an answer, not an error. */
+  validateRecipe(yaml: string, name?: string): Promise<RecipeValidation> {
+    return this.post("/api/v1/recipes/validate", {
+      yaml,
+      ...(name ? { name } : {}),
+    });
   }
 
   // ── Chat streaming ────────────────────────────────────────

@@ -3957,6 +3957,11 @@ impl GooseAdapter {
                     if produced_visible {
                         break 'attempts;
                     }
+                    // A warm-up's reply is never read, and a compile's one token often reads as empty;
+                    // re-engaging would only prefill longer prompts nobody asked for.
+                    if request.warmup {
+                        break 'attempts;
+                    }
                     // The final reply is the last attempt: one that wrote nothing is not re-asked.
                     if final_attempt || attempt >= MAX_EMPTY_TURN_REENGAGEMENTS {
                         tracing::warn!(

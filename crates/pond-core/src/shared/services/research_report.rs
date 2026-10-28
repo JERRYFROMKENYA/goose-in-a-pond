@@ -1,0 +1,442 @@
+//! A long task's report, put together by the pond rather than written in one reply: the summary,
+//! then each section a step drafted, in plan order, then the sources they cite. So a report is as
+//! long as its plan, never as long as one context window allows.
+use crate::shared::domain::long_task::{ArtifactKind, ArtifactSummary, PlanStep};
+use crate::shared::services::long_task_runner::result_artifact;
+use chrono::{DateTime, NaiveDate, Utc};
+
+/// The data artifact a plan's dated events are saved in, which the calendar export reads.
+pub const CALENDAR_TITLE: &str = "Calendar";
+
+/// Longest title a report takes from its goal.
+const TITLE_CHARS: usize = 80;
+
+/// Which stored artifacts make up a task's report, by id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReportParts {
+    pub result: Option<String>,
+    /// Drafted sections in the order their steps were planned.
+    pub sections: Vec<String>,
+    pub calendars: Vec<String>,
+}
+
+/// A report's sections are its drafts, ordered by their steps' place in the plan; a draft whose
+/// step a replan deleted keeps its place by when it was written, after the planned ones.
+pub fn report_parts(steps: &[PlanStep], artifacts: &[ArtifactSummary]) -> ReportParts {
+    let result = result_artifact(artifacts).map(|a| a.id.clone());
+    let ordinal = |a: &ArtifactSummary| {
+        a.step_key
+            .as_ref()
+            .and_then(|key| steps.iter().find(|s| s.key() == key))
+            .map(|s| s.ordinal())
+    };
+    let mut drafts: Vec<&ArtifactSummary> = artifacts
+        .iter()
+        .filter(|a| a.kind == ArtifactKind::Draft && Some(&a.id) != result.as_ref())
+        .collect();
+    drafts.sort_by_key(|a| (ordinal(a).is_none(), ordinal(a), a.created_at));
+    ReportParts {
+        result,
+        sections: drafts.into_iter().map(|a| a.id.clone()).collect(),
+        calendars: artifacts
+            .iter()
+            .filter(|a| {
+                a.kind == ArtifactKind::Data && a.title.eq_ignore_ascii_case(CALENDAR_TITLE)
+            })
+            .map(|a| a.id.clone())
+            .collect(),
+    }
+}
+
+/// The report's title: the goal's first line, cut to a title's length.
+pub fn report_title(goal: &str) -> String {
+    let line = goal
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("Report")
+        .trim();
+    if line.chars().count() <= TITLE_CHARS {
+        return line.to_string();
+    }
+    let cut: String = line.chars().take(TITLE_CHARS - 3).collect();
+    format!("{}...", cut.trim_end())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub title: String,
+    pub url: String,
+}
+
+/// The whole report in Markdown: title, summary, sections, then the sources they link to.
+pub fn assemble(goal: &str, summary: Option<&str>, sections: &[(String, String)]) -> String {
+    let mut out = format!("# {}\n\n", report_title(goal));
+    if let Some(summary) = summary.map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str(summary);
+        out.push_str("\n\n");
+    }
+    for (title, body) in sections {
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        // A section that brings its own heading keeps it; one that does not gets its title.
+        if !body.starts_with('#') {
+            out.push_str(&format!("## {}\n\n", title.trim()));
+        }
+        out.push_str(body);
+        out.push_str("\n\n");
+    }
+    let cited = sources(&out);
+    if !cited.is_empty() {
+        out.push_str("## Sources\n\n");
+        for source in cited {
+            out.push_str(&format!("- [{}]({})\n", source.title, source.url));
+        }
+    }
+    out.trim_end().to_string() + "\n"
+}
+
+/// Every web link the text cites as `[title](url)`, once each, in the order first cited.
+pub fn sources(markdown: &str) -> Vec<Source> {
+    let mut found: Vec<Source> = Vec::new();
+    let mut rest = markdown;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find("](") else { break };
+        let title = &after[..close];
+        let target = &after[close + 2..];
+        let Some(end) = target.find(')') else { break };
+        let url = target[..end].trim();
+        let is_web = url.starts_with("https://") || url.starts_with("http://");
+        if is_web && !title.contains('[') && !found.iter().any(|s| s.url == url) {
+            let title = title.trim();
+            found.push(Source {
+                title: if title.is_empty() {
+                    url.to_string()
+                } else {
+                    title.to_string()
+                },
+                url: url.to_string(),
+            });
+        }
+        rest = &target[end..];
+    }
+    found
+}
+
+/// One dated event a plan saved for the calendar export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarEvent {
+    pub title: String,
+    pub when: EventTime,
+    pub location: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventTime {
+    /// A day with no time: a whole-day event ending after `last`.
+    Days { first: NaiveDate, last: NaiveDate },
+    At {
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    },
+}
+
+/// The events in a calendar artifact: a JSON array or one JSON object per line, each with
+/// `title`, `start` and optional `end`, `location` and `notes`. An unreadable entry is skipped,
+/// because a model wrote these and one bad line must not lose the rest.
+pub fn calendar_events(body: &str) -> Vec<CalendarEvent> {
+    let values: Vec<serde_json::Value> =
+        match serde_json::from_str::<serde_json::Value>(body.trim()) {
+            Ok(serde_json::Value::Array(items)) => items,
+            Ok(single @ serde_json::Value::Object(_)) => vec![single],
+            _ => body
+                .lines()
+                .filter_map(|line| serde_json::from_str(line.trim().trim_end_matches(',')).ok())
+                .collect(),
+        };
+    values.iter().filter_map(event_from).collect()
+}
+
+fn text_field(value: &serde_json::Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn event_from(value: &serde_json::Value) -> Option<CalendarEvent> {
+    let title = text_field(value, "title")?;
+    let start = text_field(value, "start")?;
+    let end = text_field(value, "end");
+    let when = if let Ok(start) = DateTime::parse_from_rfc3339(&start) {
+        let start = start.with_timezone(&Utc);
+        let end = end
+            .and_then(|e| DateTime::parse_from_rfc3339(&e).ok())
+            .map(|e| e.with_timezone(&Utc))
+            .filter(|e| *e > start)
+            .unwrap_or(start + chrono::Duration::hours(1));
+        EventTime::At { start, end }
+    } else {
+        let first = NaiveDate::parse_from_str(&start, "%Y-%m-%d").ok()?;
+        let last = end
+            .and_then(|e| NaiveDate::parse_from_str(&e, "%Y-%m-%d").ok())
+            .filter(|l| *l >= first)
+            .unwrap_or(first);
+        EventTime::Days { first, last }
+    };
+    Some(CalendarEvent {
+        title,
+        when,
+        location: text_field(value, "location"),
+        notes: text_field(value, "notes"),
+    })
+}
+
+/// The events as an iCalendar file (RFC 5545), for a phone's or a desktop's calendar.
+pub fn to_ics(task_id: &str, events: &[CalendarEvent], now: DateTime<Utc>) -> String {
+    let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let mut lines = vec![
+        "BEGIN:VCALENDAR".to_string(),
+        "VERSION:2.0".to_string(),
+        "PRODID:-//Goose In A Pond//Deep research//EN".to_string(),
+        "CALSCALE:GREGORIAN".to_string(),
+    ];
+    for (n, event) in events.iter().enumerate() {
+        lines.push("BEGIN:VEVENT".to_string());
+        lines.push(format!("UID:{task_id}-{n}@goose-in-a-pond"));
+        lines.push(format!("DTSTAMP:{stamp}"));
+        match event.when {
+            EventTime::At { start, end } => {
+                lines.push(format!("DTSTART:{}", start.format("%Y%m%dT%H%M%SZ")));
+                lines.push(format!("DTEND:{}", end.format("%Y%m%dT%H%M%SZ")));
+            }
+            EventTime::Days { first, last } => {
+                // DTEND is exclusive for whole days.
+                let after = last.succ_opt().unwrap_or(last);
+                lines.push(format!("DTSTART;VALUE=DATE:{}", first.format("%Y%m%d")));
+                lines.push(format!("DTEND;VALUE=DATE:{}", after.format("%Y%m%d")));
+            }
+        }
+        lines.push(format!("SUMMARY:{}", ics_text(&event.title)));
+        if let Some(location) = &event.location {
+            lines.push(format!("LOCATION:{}", ics_text(location)));
+        }
+        if let Some(notes) = &event.notes {
+            lines.push(format!("DESCRIPTION:{}", ics_text(notes)));
+        }
+        lines.push("END:VEVENT".to_string());
+    }
+    lines.push("END:VCALENDAR".to_string());
+    lines
+        .iter()
+        .map(|l| fold(l))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n"
+}
+
+fn ics_text(text: &str) -> String {
+    text.replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace("\r\n", "\\n")
+        .replace('\n', "\\n")
+}
+
+/// Lines longer than 75 octets continue on the next line after a space, never inside a character.
+fn fold(line: &str) -> String {
+    let mut out = String::with_capacity(line.len() + 8);
+    let mut width = 0;
+    for ch in line.chars() {
+        let len = ch.len_utf8();
+        if width + len > 75 {
+            out.push_str("\r\n ");
+            width = 1;
+        }
+        out.push(ch);
+        width += len;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shared::domain::long_task::{PlanStepParts, StepKey, StepState};
+
+    fn t(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(1_790_000_000 + secs, 0).unwrap()
+    }
+
+    fn step(key: &str, ordinal: u32) -> PlanStep {
+        PlanStep::from_parts(PlanStepParts {
+            task_id: "task-1".into(),
+            key: key.into(),
+            ordinal,
+            role: "long-task-worker".into(),
+            instructions: "do it".into(),
+            inputs: Vec::new(),
+            depends_on: Vec::new(),
+            acceptance: None,
+            state: StepState::Pending,
+            attempts: 0,
+            summary: None,
+            failure: None,
+            started_at: None,
+            finished_at: None,
+        })
+        .unwrap()
+    }
+
+    fn artifact(
+        id: &str,
+        step: Option<&str>,
+        kind: ArtifactKind,
+        title: &str,
+        at: i64,
+    ) -> ArtifactSummary {
+        ArtifactSummary {
+            id: id.into(),
+            task_id: "task-1".into(),
+            step_key: step.map(|k| StepKey::parse(k).unwrap()),
+            kind,
+            title: title.into(),
+            summary: String::new(),
+            tokens: 10,
+            created_at: t(at),
+        }
+    }
+
+    #[test]
+    fn sections_follow_the_plan_and_the_summary_and_notes_stay_out_of_them() {
+        let steps = [step("intro", 0), step("costs", 1), step("routes", 2)];
+        let artifacts = [
+            artifact("a-routes", Some("routes"), ArtifactKind::Draft, "Routes", 1),
+            artifact(
+                "a-notes",
+                Some("intro"),
+                ArtifactKind::Findings,
+                "What I found",
+                2,
+            ),
+            artifact("a-costs", Some("costs"), ArtifactKind::Draft, "Costs", 3),
+            artifact("a-orphan", Some("gone"), ArtifactKind::Draft, "Extra", 4),
+            artifact("a-result", Some("routes"), ArtifactKind::Draft, "Result", 5),
+            artifact("a-cal", None, ArtifactKind::Data, "calendar", 6),
+        ];
+        let parts = report_parts(&steps, &artifacts);
+        assert_eq!(parts.result.as_deref(), Some("a-result"));
+        assert_eq!(parts.sections, ["a-costs", "a-routes", "a-orphan"]);
+        assert_eq!(parts.calendars, ["a-cal"]);
+    }
+
+    #[test]
+    fn a_report_is_the_summary_then_its_sections_then_what_they_cite() {
+        let report = assemble(
+            "Plan our Mombasa trip\nfor four friends",
+            Some("Four days, mostly by the sea."),
+            &[
+                ("Day one".into(), "Land at [Moi airport](https://example.org/moi).".into()),
+                ("Ignored title".into(), "## Day two\n\nFort Jesus, see [Moi airport](https://example.org/moi) and [the fort](https://example.org/fort).".into()),
+                ("Empty".into(), "   ".into()),
+            ],
+        );
+        assert!(report.starts_with("# Plan our Mombasa trip\n\nFour days"));
+        assert!(report.contains("## Day one\n\nLand at"));
+        assert!(
+            !report.contains("Ignored title"),
+            "a section's own heading wins"
+        );
+        assert!(!report.contains("## Empty"));
+        let sources = report.split("## Sources").nth(1).unwrap();
+        assert_eq!(
+            sources.matches("https://example.org/moi").count(),
+            1,
+            "cited once, listed once"
+        );
+        assert!(sources.contains("[the fort](https://example.org/fort)"));
+    }
+
+    #[test]
+    fn only_web_links_are_sources() {
+        let found = sources(
+            "[a](https://a.example) [b](javascript:alert(1)) [c](mailto:x@y) [](http://d.example)",
+        );
+        assert_eq!(
+            found,
+            [
+                Source {
+                    title: "a".into(),
+                    url: "https://a.example".into()
+                },
+                Source {
+                    title: "http://d.example".into(),
+                    url: "http://d.example".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_goal_makes_a_short_title() {
+        assert_eq!(
+            report_title("  \nCompare heat pumps\nmore"),
+            "Compare heat pumps"
+        );
+        let title = report_title(&"word ".repeat(40));
+        assert!(title.chars().count() <= TITLE_CHARS && title.ends_with("..."));
+    }
+
+    #[test]
+    fn calendar_entries_read_from_a_list_or_lines_and_a_bad_one_is_skipped() {
+        let lines = "{\"title\": \"Flight\", \"start\": \"2026-11-14T09:00:00+03:00\", \"end\": \"2026-11-14T10:10:00+03:00\", \"location\": \"JKIA\"},\nnot json\n{\"title\": \"Beach day\", \"start\": \"2026-11-15\"}\n{\"start\": \"2026-11-16\"}";
+        let events = calendar_events(lines);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].when,
+            EventTime::At {
+                start: DateTime::parse_from_rfc3339("2026-11-14T06:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                end: DateTime::parse_from_rfc3339("2026-11-14T07:10:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            }
+        );
+        assert_eq!(events[0].location.as_deref(), Some("JKIA"));
+        let day = NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
+        assert_eq!(
+            events[1].when,
+            EventTime::Days {
+                first: day,
+                last: day
+            }
+        );
+        assert_eq!(
+            calendar_events("[{\"title\": \"A\", \"start\": \"2026-11-15\"}]").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_calendar_file_escapes_text_and_folds_long_lines() {
+        let events = calendar_events("{\"title\": \"Dinner; seafood, at Tamarind\", \"start\": \"2026-11-15\", \"end\": \"2026-11-16\", \"notes\": \"Book ahead\\nfor four\"}");
+        let ics = to_ics("task-1", &events, t(0));
+        assert!(ics.starts_with("BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"));
+        assert!(ics.contains("SUMMARY:Dinner\\; seafood\\, at Tamarind\r\n"));
+        assert!(
+            ics.contains("DTSTART;VALUE=DATE:20261115\r\nDTEND;VALUE=DATE:20261117\r\n"),
+            "the end day is included"
+        );
+        assert!(ics.contains("DESCRIPTION:Book ahead\\nfor four"));
+        assert!(ics.ends_with("END:VCALENDAR\r\n"));
+        let long = fold(&"x".repeat(200));
+        assert!(long.split("\r\n").all(|l| l.len() <= 75));
+        assert_eq!(long.replace("\r\n ", ""), "x".repeat(200));
+    }
+}

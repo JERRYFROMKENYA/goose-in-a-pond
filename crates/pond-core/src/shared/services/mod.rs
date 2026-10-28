@@ -11,6 +11,7 @@ pub mod long_task_roles;
 pub mod long_task_runner;
 pub mod passages;
 pub mod prefill_progress;
+pub mod research_report;
 pub mod print_output;
 pub mod sensor_persisting_event_bus;
 pub mod session_summary;

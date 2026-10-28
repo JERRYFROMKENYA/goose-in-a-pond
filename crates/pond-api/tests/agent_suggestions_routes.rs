@@ -696,3 +696,153 @@ async fn deep_research_starts_a_research_task_the_chat_card_can_follow() {
         "a refused turn never reaches the model"
     );
 }
+
+/// The response's status, content type, file name and body as text.
+async fn fetch(pond: &Pond, uri: &str) -> (StatusCode, String, String, String) {
+    let response = pond
+        .router
+        .clone()
+        .oneshot(call(Method::GET, uri, None, false))
+        .await
+        .unwrap();
+    let status = response.status();
+    let header = |name| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let (kind, disposition) = (
+        header(axum::http::header::CONTENT_TYPE),
+        header(axum::http::header::CONTENT_DISPOSITION),
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        kind,
+        disposition,
+        String::from_utf8_lossy(&bytes).to_string(),
+    )
+}
+
+/// A report is joined by the pond from the summary and the drafted sections, so it is as long as
+/// its plan; it exports as Markdown, a standalone page and, when it has dated events, a calendar.
+#[tokio::test]
+async fn a_long_report_is_joined_from_its_sections_and_exports_three_ways() {
+    use pond_core::shared::domain::long_task::{
+        Artifact, ArtifactKind, LongTask, LongTaskBudget, LongTaskKind,
+    };
+    use pond_core::user_data::domain::profile::ProfileScope;
+
+    let pond = pond(true, false).await;
+    let task = LongTask::start(
+        ProfileScope::Owner(pond.member.clone()),
+        None,
+        "Plan our Mombasa trip for four friends",
+        None,
+        LongTaskBudget::new(24, None).unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap()
+    .with_kind(LongTaskKind::Research);
+    pond.tasks.create_task(&task).await.unwrap();
+    let now = chrono::Utc::now();
+    for (n, (kind, title, body)) in [
+        (ArtifactKind::Findings, "Raw notes", "never shown in the report".to_string()),
+        (ArtifactKind::Draft, "Day one", "Arrive and see [Fort Jesus](https://example.org/fort).".to_string()),
+        (ArtifactKind::Draft, "Meals", "| Day | Dinner |\n|---|---|\n| Fri | Biryani |".to_string()),
+        (ArtifactKind::Draft, "Result", "Four days by the sea.".to_string()),
+        (
+            ArtifactKind::Data,
+            "Calendar",
+            "{\"title\": \"Fort Jesus\", \"start\": \"2026-11-14T10:00:00+03:00\", \"location\": \"Mombasa\"}".to_string(),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let at = now + chrono::Duration::seconds(n as i64);
+        let artifact = Artifact::new(task.id(), None, kind, title, "one line", body, at).unwrap();
+        pond.tasks.insert_artifact(&artifact).await.unwrap();
+    }
+
+    let uri = format!("/api/v1/long-tasks/{}", task.id());
+    let (status, report) = send(
+        &pond,
+        call(Method::GET, &format!("{uri}/report"), None, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    let markdown = report["markdown"].as_str().unwrap();
+    assert!(
+        markdown.starts_with("# Plan our Mombasa trip for four friends\n\nFour days by the sea.")
+    );
+    let (day, meals) = (
+        markdown.find("## Day one").unwrap(),
+        markdown.find("## Meals").unwrap(),
+    );
+    assert!(day < meals, "sections keep their order: {markdown}");
+    assert!(
+        !markdown.contains("never shown"),
+        "research notes stay out of the report"
+    );
+    assert_eq!(report["sections"], 2);
+    assert_eq!(report["kind"], "research");
+    assert_eq!(report["sources"][0]["url"], "https://example.org/fort");
+    assert_eq!(report["calendar_events"], 1);
+
+    let (status, kind, disposition, body) =
+        fetch(&pond, &format!("{uri}/export?format=markdown")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(kind.starts_with("text/markdown"));
+    assert_eq!(
+        disposition,
+        "attachment; filename=\"plan-our-mombasa-trip-for-four-friends.md\""
+    );
+    assert_eq!(body, markdown);
+
+    let (status, kind, _, body) = fetch(&pond, &format!("{uri}/export?format=html")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(kind.starts_with("text/html"));
+    assert!(body.starts_with("<!doctype html>") && body.contains("<td>Biryani</td>"));
+
+    let (status, kind, disposition, body) = fetch(&pond, &format!("{uri}/export?format=ics")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(kind.starts_with("text/calendar"));
+    assert!(disposition.ends_with(".ics\""));
+    assert!(
+        body.contains("SUMMARY:Fort Jesus\r\n") && body.contains("DTSTART:20261114T070000Z\r\n")
+    );
+
+    let (status, ..) = fetch(&pond, &format!("{uri}/export?format=pdf")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let plain = LongTask::start(
+        ProfileScope::Owner(pond.member.clone()),
+        None,
+        "nothing dated",
+        None,
+        LongTaskBudget::new(3, None).unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    pond.tasks.create_task(&plain).await.unwrap();
+    let (status, ..) = fetch(
+        &pond,
+        &format!("/api/v1/long-tasks/{}/export?format=ics", plain.id()),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "no dated events, no calendar file"
+    );
+
+    let stranger = pond_with_no_member().await;
+    let (status, ..) = fetch(&stranger, &format!("{uri}/export?format=markdown")).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

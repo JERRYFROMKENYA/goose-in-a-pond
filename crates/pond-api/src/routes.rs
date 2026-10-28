@@ -535,6 +535,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/long-tasks/{id}/artifacts/{artifact_id}",
             get(get_long_task_artifact),
         )
+        .route("/long-tasks/{id}/report", get(get_long_task_report))
+        .route("/long-tasks/{id}/export", get(export_long_task))
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -15644,6 +15646,198 @@ async fn get_long_task(
         )
             .into_response(),
     }
+}
+
+/// A task's whole report: its summary and drafted sections joined in plan order, and the dated
+/// events its calendar artifacts hold.
+async fn long_task_report(
+    state: &Arc<AppState>,
+    task: &pond_core::shared::domain::long_task::LongTask,
+) -> anyhow::Result<(
+    String,
+    Vec<pond_core::shared::services::research_report::CalendarEvent>,
+    usize,
+)> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    use pond_core::shared::services::research_report as report;
+    let repo = long_task_repo(state);
+    let steps = repo.list_steps(task.id()).await?;
+    let artifacts = repo.list_artifacts(task.id()).await?;
+    let parts = report::report_parts(&steps, &artifacts);
+    let summary = match &parts.result {
+        Some(id) => repo
+            .get_artifact(task.id(), id)
+            .await?
+            .map(|a| a.body().to_string()),
+        None => None,
+    };
+    let mut sections = Vec::with_capacity(parts.sections.len());
+    for id in &parts.sections {
+        if let Some(artifact) = repo.get_artifact(task.id(), id).await? {
+            sections.push((artifact.title().to_string(), artifact.body().to_string()));
+        }
+    }
+    let mut events = Vec::new();
+    for id in &parts.calendars {
+        if let Some(artifact) = repo.get_artifact(task.id(), id).await? {
+            events.extend(report::calendar_events(artifact.body()));
+        }
+    }
+    let markdown = report::assemble(task.goal(), summary.as_deref(), &sections);
+    Ok((markdown, events, sections.len()))
+}
+
+/// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with
+/// what it cites and whether it has dated events a calendar can take.
+async fn get_long_task_report(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::services::research_report as report;
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    match long_task_report(&state, &task).await {
+        Ok((markdown, events, sections)) => Json(json!({
+            "id": task.id(),
+            "title": report::report_title(task.goal()),
+            "state": task.state(),
+            "kind": task.kind(),
+            "markdown": markdown,
+            "sections": sections,
+            "sources": report::sources(&markdown)
+                .into_iter()
+                .map(|s| json!({"title": s.title, "url": s.url}))
+                .collect::<Vec<_>>(),
+            "calendar_events": events.len(),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct LongTaskExportQuery {
+    format: Option<String>,
+}
+
+/// `GET /api/v1/long-tasks/{id}/export?format=markdown|html|ics` -- the report as a file to
+/// keep: Markdown, a page that prints or saves as a PDF, or its dated events for a calendar.
+async fn export_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<LongTaskExportQuery>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::services::research_report as report;
+    let format = query.format.as_deref().unwrap_or("markdown");
+    if !matches!(format, "markdown" | "html" | "ics") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "format is markdown, html or ics"})),
+        )
+            .into_response();
+    }
+    let Some(member) = long_task_caller(
+        &state,
+        principal.as_ref(),
+        peer,
+        insecure.is_some(),
+        tailnet.is_some(),
+    )
+    .await
+    else {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "nobody identified"})),
+        )
+            .into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    let (markdown, events, _) = match long_task_report(&state, &task).await {
+        Ok(found) => found,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let title = report::report_title(task.goal());
+    let stem = crate::report_export::file_stem(&title);
+    let now = chrono::Utc::now();
+    let (content_type, extension, body) = match format {
+        "html" => (
+            "text/html; charset=utf-8",
+            "html",
+            crate::report_export::html_document(
+                &title,
+                &markdown,
+                &now.format("%-d %B %Y").to_string(),
+            ),
+        ),
+        "ics" if events.is_empty() => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "this report has no dated events for a calendar"})),
+            )
+                .into_response()
+        }
+        "ics" => (
+            "text/calendar; charset=utf-8",
+            "ics",
+            report::to_ics(task.id(), &events, now),
+        ),
+        _ => ("text/markdown; charset=utf-8", "md", markdown),
+    };
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, content_type.to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{stem}.{extension}\""),
+            ),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// `GET /api/v1/long-tasks/{id}/artifacts/{artifact_id}` -- an artifact's whole body, for

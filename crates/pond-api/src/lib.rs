@@ -17,6 +17,7 @@ pub mod network;
 pub mod oauth_callback;
 pub mod player;
 pub mod quiet_pass;
+mod report_export;
 pub mod rides;
 pub mod routes;
 pub mod runs;

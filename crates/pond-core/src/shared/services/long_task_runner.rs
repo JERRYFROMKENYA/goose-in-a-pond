@@ -1,8 +1,8 @@
 //! What a long task runs next, and what each helper is told. Pure: the lane loop in `pond-server`
 //! does the I/O, so every decision here is tested without a model.
 use crate::shared::domain::long_task::{
-    blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskState, OutcomeKind,
-    PlanStep, StepKey, StepOutcome, StepState,
+    blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskKind, LongTaskState,
+    OutcomeKind, PlanStep, StepKey, StepOutcome, StepState,
 };
 use crate::shared::domain::orchestration::{AgentRole, TaskRun, TaskStatus};
 use crate::shared::services::long_task_roles::{self as roles, TASK_WORK_EXTENSION};
@@ -155,6 +155,18 @@ fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
         .collect()
 }
 
+/// A research task's plan gathers before it writes, so the report can cite what each step found.
+const RESEARCH_PLAN: &str = "This is deep research the person asked for. Plan steps that each \
+     look into one part of the question with search_web or get_wikipedia_article and save what \
+     they find with its sources. End with one step that writes the report as an artifact titled \
+     \"Result\": the short answer first, then the findings, each with the title and link of its \
+     source, and where the sources disagree.\n";
+
+/// A research step works from sources, not from what a small model remembers.
+const RESEARCH_STEP: &str = "This is deep research. Look things up with search_web or \
+     get_wikipedia_article rather than from memory, keep only what the sources say, and put each \
+     source's title and link beside what it says. If the sources disagree, say so.\n";
+
 fn date_line(now: DateTime<Utc>) -> String {
     format!("Today is {} (UTC).\n", now.format("%A %-d %B %Y, %H:%M"))
 }
@@ -170,6 +182,9 @@ pub fn planner_brief(
 ) -> String {
     let mut brief = date_line(now);
     brief.push_str(&format!("Goal: {}\n", task.goal()));
+    if task.kind() == LongTaskKind::Research {
+        brief.push_str(RESEARCH_PLAN);
+    }
     brief.push_str(&format!(
         "At most {} steps in all.\n\nRoles that can do a step:\n",
         task.budget().max_steps()
@@ -236,6 +251,9 @@ pub fn worker_brief(
         .collect();
     let mut brief = date_line(now);
     brief.push_str(&format!("The task's goal: {}\n", task.goal()));
+    if task.kind() == LongTaskKind::Research {
+        brief.push_str(RESEARCH_STEP);
+    }
     brief.push_str(&format!(
         "Your step ({}): {}\n",
         step.key(),

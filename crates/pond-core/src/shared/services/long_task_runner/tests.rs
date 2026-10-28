@@ -208,6 +208,26 @@ fn the_planner_is_told_what_failed_and_why() {
     assert!(brief.contains("the page would not load"));
 }
 
+#[test]
+fn only_a_research_task_is_briefed_to_search_and_cite() {
+    let general = task_in(LongTaskState::Running, None);
+    let research = task_in(LongTaskState::Running, None).with_kind(LongTaskKind::Research);
+    let step_b = step("b", 0, &[], StepState::Pending, 0);
+    let plan = |task: &LongTask| {
+        planner_brief(task, &[], &[], &[], &PlanReason::Blocked(Vec::new()), t(10))
+    };
+    let work = |task: &LongTask| worker_brief(task, &step_b, &[], t(10));
+
+    assert!(plan(&research).contains("deep research"));
+    assert!(
+        plan(&research).contains(RESULT_TITLE),
+        "the plan ends in the report the card opens"
+    );
+    assert!(work(&research).contains("title and link"));
+    assert!(!plan(&general).contains("deep research"));
+    assert!(!work(&general).contains("deep research"));
+}
+
 fn run(status: TaskStatus, result: Option<&str>) -> TaskRun {
     TaskRun {
         id: "run-1".to_string(),

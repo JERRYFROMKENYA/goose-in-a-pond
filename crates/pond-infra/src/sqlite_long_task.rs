@@ -7,8 +7,8 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use pond_core::shared::domain::long_task::{
-    Artifact, ArtifactKind, ArtifactParts, ArtifactSummary, LongTask, LongTaskParts, LongTaskState,
-    PlanStep, PlanStepParts, StepKey, StepState, StepStateRefused, ValidatedPlan,
+    Artifact, ArtifactKind, ArtifactParts, ArtifactSummary, LongTask, LongTaskKind, LongTaskParts,
+    LongTaskState, PlanStep, PlanStepParts, StepKey, StepState, StepStateRefused, ValidatedPlan,
 };
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::user_data::domain::profile::ProfileScope;
@@ -16,10 +16,10 @@ use sqlx::{Pool, Sqlite};
 
 /// Column order must match `TaskRow`.
 const TASK_COLUMNS: &str = "id, owner_profile_id, scope, goal, origin_session_id, state, \
-     max_steps, deadline, created_at, updated_at, finished_at";
+     max_steps, deadline, created_at, updated_at, finished_at, kind";
 
 /// `(id, owner_profile_id, scope, goal, origin_session_id, state, max_steps, deadline,
-/// created_at, updated_at, finished_at)`.
+/// created_at, updated_at, finished_at, kind)`.
 type TaskRow = (
     String,
     Option<String>,
@@ -32,6 +32,7 @@ type TaskRow = (
     String,
     String,
     Option<String>,
+    String,
 );
 
 /// Column order must match `StepRow`.
@@ -172,10 +173,13 @@ fn row_to_task(row: TaskRow) -> Result<LongTask> {
         created_at,
         updated_at,
         finished_at,
+        kind,
     ) = row;
     let scope = scope_from_columns(&scope, owner_profile_id.as_deref())?;
     let state = LongTaskState::parse(&state)
         .with_context(|| format!("unreadable state on long task {id}: {state}"))?;
+    let kind = LongTaskKind::parse(&kind)
+        .with_context(|| format!("unreadable kind on long task {id}: {kind}"))?;
     let parts = LongTaskParts {
         owner_profile_id,
         scope,
@@ -184,6 +188,7 @@ fn row_to_task(row: TaskRow) -> Result<LongTask> {
         state,
         max_steps: u32_column(max_steps, "max_steps")?,
         deadline: parse_opt_ts(deadline)?,
+        kind,
         created_at: parse_ts(&created_at)?,
         updated_at: parse_ts(&updated_at)?,
         finished_at: parse_opt_ts(finished_at)?,
@@ -276,8 +281,8 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         sqlx::query(
             "INSERT INTO long_tasks \
              (id, owner_profile_id, scope, goal, origin_session_id, state, max_steps, deadline, \
-              created_at, updated_at, finished_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, updated_at, finished_at, kind) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(task.id())
         .bind(task.owner_profile_id())
@@ -290,6 +295,7 @@ impl LongTaskRepository for SqliteLongTaskRepository {
         .bind(sql_ts(task.created_at()))
         .bind(sql_ts(task.updated_at()))
         .bind(task.finished_at().map(sql_ts))
+        .bind(task.kind().as_str())
         .execute(&self.pool)
         .await
         .with_context(|| format!("storing long task {}", task.id()))?;
@@ -624,6 +630,30 @@ mod tests {
             at,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_task_keeps_its_kind_and_an_unknown_one_is_refused() {
+        let (_tmp, pool, repo) = repo().await;
+        let task = household_task(t(0)).with_kind(LongTaskKind::Research);
+        repo.create_task(&task).await.unwrap();
+        let stored = repo.get_task(task.id()).await.unwrap().unwrap();
+        assert_eq!(stored.kind(), LongTaskKind::Research);
+
+        let plain = household_task(t(1));
+        repo.create_task(&plain).await.unwrap();
+        assert_eq!(
+            repo.get_task(plain.id()).await.unwrap().unwrap().kind(),
+            LongTaskKind::General
+        );
+        assert!(
+            sqlx::query("UPDATE long_tasks SET kind = 'gossip' WHERE id = ?")
+                .bind(plain.id())
+                .execute(&pool)
+                .await
+                .is_err(),
+            "the column accepts only the kinds the domain knows"
+        );
     }
 
     async fn member(pool: &Pool<Sqlite>, id: &str) {

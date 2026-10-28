@@ -25,6 +25,7 @@ use device_handshake::DeviceHandshake;
 struct Pond {
     router: axum::Router,
     member: String,
+    tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
     _dir: tempfile::TempDir,
 }
 
@@ -72,7 +73,11 @@ async fn pond(paired: bool, primary: bool) -> Pond {
     state.recipe_repo = Some(Arc::new(SqliteRecipeRepository::new(
         state.db.system.clone(),
     )));
+    let tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository> = Arc::new(
+        pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone()),
+    );
     Pond {
+        tasks,
         router: build_router(
             Arc::new(state),
             std::path::PathBuf::from("pond-desktop/dist"),
@@ -447,4 +452,68 @@ async fn prefill_status_lists_every_agent_and_a_rebuild_queues_one() {
     pond_core::shared::services::prefill_progress::process_prefill_progress().take_rebuilds();
     assert_eq!(worker["status"], "queued");
     assert_eq!(worker["kind"], "default");
+}
+
+/// The chat card's routes: a member sees their own task, its steps and its result, and can stop
+/// it once; a caller nobody identified sees nothing.
+#[tokio::test]
+async fn a_member_sees_and_stops_their_long_task_and_nobody_else_does() {
+    use pond_core::shared::domain::long_task::{LongTask, LongTaskBudget};
+    use pond_core::user_data::domain::profile::ProfileScope;
+
+    let pond = pond(true, false).await;
+    let task = LongTask::start(
+        ProfileScope::Owner(pond.member.clone()),
+        None,
+        "plan the school trip",
+        None,
+        LongTaskBudget::new(12, None).unwrap(),
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    pond.tasks.create_task(&task).await.unwrap();
+
+    let (status, body) = send(&pond, call(Method::GET, "/api/v1/long-tasks", None, false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.as_array().unwrap().len(), 1, "{body}");
+    let uri = format!("/api/v1/long-tasks/{}", task.id());
+    let (status, body) = send(&pond, call(Method::GET, &uri, None, false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["goal"], "plan the school trip");
+    assert_eq!(body["state"], "planning");
+    assert!(body["steps"].as_array().unwrap().is_empty());
+
+    let (status, _) = send(
+        &pond,
+        call(Method::GET, "/api/v1/long-tasks/no-such-task", None, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let cancel = format!("{uri}/cancel");
+    let (status, body) = send(&pond, call(Method::POST, &cancel, None, false)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = send(&pond, call(Method::POST, &cancel, None, false)).await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a stopped task cannot be stopped again"
+    );
+
+    let stranger = pond_with_no_member().await;
+    let (status, body) = send(
+        &stranger,
+        call(Method::GET, "/api/v1/long-tasks", None, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        serde_json::json!([]),
+        "nobody identified sees no task"
+    );
+}
+
+async fn pond_with_no_member() -> Pond {
+    pond(false, false).await
 }

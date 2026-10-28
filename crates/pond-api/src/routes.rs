@@ -527,6 +527,13 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/agents/suggestions/{template}/dismiss",
             post(dismiss_agent_suggestion),
         )
+        .route("/long-tasks", get(list_long_tasks))
+        .route("/long-tasks/{id}", get(get_long_task))
+        .route("/long-tasks/{id}/cancel", post(cancel_long_task))
+        .route(
+            "/long-tasks/{id}/artifacts/{artifact_id}",
+            get(get_long_task_artifact),
+        )
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route("/agents/{name}/prefill/rebuild", post(rebuild_agent_prefill))
@@ -15287,6 +15294,260 @@ async fn pond_capabilities(
         sensor_types,
         weather: settings.ext_weather_enabled && state.weather_provider.is_some(),
         web_search,
+    }
+}
+
+/// The caller of a long-task route, as a member's scope: a paired member's device, or the
+/// desktop on this host acting for the primary member. Nobody identified reaches no task.
+async fn long_task_caller(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: bool,
+    tailnet: bool,
+) -> Option<String> {
+    let on_host = on_this_host(peer.ok(), insecure, tailnet);
+    acting_member(state, principal, on_host).await
+}
+
+/// A member reaches their own tasks and the household's unowned ones, like their other data.
+fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::LongTask) -> bool {
+    task.owner_profile_id().is_none_or(|owner| owner == member)
+}
+
+fn long_task_repo(
+    state: &Arc<AppState>,
+) -> pond_infra::sqlite_long_task::SqliteLongTaskRepository {
+    pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
+}
+
+/// One task as the chat card shows it: its steps with their agents, and its artifacts without
+/// their bodies.
+async fn long_task_view(
+    repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
+    task: &pond_core::shared::domain::long_task::LongTask,
+) -> anyhow::Result<Value> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let steps = repo.list_steps(task.id()).await?;
+    let artifacts = repo.list_artifacts(task.id()).await?;
+    let result = pond_core::shared::services::long_task_runner::result_artifact(&artifacts)
+        .map(|a| a.id.clone());
+    Ok(json!({
+        "id": task.id(),
+        "goal": task.goal(),
+        "state": task.state(),
+        "origin_session_id": task.origin_session_id(),
+        "created_at": task.created_at(),
+        "updated_at": task.updated_at(),
+        "finished_at": task.finished_at(),
+        "steps": steps.iter().map(|step| json!({
+            "key": step.key().as_str(),
+            "role": step.role(),
+            "state": step.state(),
+            "attempts": step.attempts(),
+            "summary": step.summary(),
+            "failure": step.failure(),
+        })).collect::<Vec<_>>(),
+        "artifacts": artifacts,
+        "result_artifact_id": result,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct LongTaskListQuery {
+    session_id: Option<String>,
+}
+
+/// `GET /api/v1/long-tasks?session_id=` -- the caller's tasks, newest first, or only those a
+/// conversation started.
+async fn list_long_tasks(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+    Query(query): Query<LongTaskListQuery>,
+) -> impl axum::response::IntoResponse {
+    use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    let Some(member) =
+        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
+            .await
+    else {
+        return Json(json!([])).into_response();
+    };
+    let repo = long_task_repo(&state);
+    let mut tasks = Vec::new();
+    for filter in [LongTaskOwnerFilter::Member(&member), LongTaskOwnerFilter::Unowned] {
+        match repo.list_tasks(filter, true).await {
+            Ok(found) => tasks.extend(found),
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": e.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    }
+    tasks.retain(|task| {
+        query
+            .session_id
+            .as_deref()
+            .is_none_or(|session| task.origin_session_id() == Some(session))
+    });
+    tasks.sort_by(|a, b| b.created_at().cmp(&a.created_at()));
+    let mut views = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        match long_task_view(&repo, task).await {
+            Ok(view) => views.push(view),
+            Err(e) => tracing::warn!(task = %task.id(), error = %e, "a long task could not be read"),
+        }
+    }
+    Json(json!(views)).into_response()
+}
+
+/// The task with `id` if the caller reaches it; a task they do not reach reads as unknown.
+async fn reachable_long_task(
+    state: &Arc<AppState>,
+    member: &str,
+    id: &str,
+) -> Result<pond_core::shared::domain::long_task::LongTask, Response<axum::body::Body>> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    match long_task_repo(state).get_task(id).await {
+        Ok(Some(task)) if long_task_reaches(member, &task) => Ok(task),
+        Ok(_) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "there is no such task"})),
+        )
+            .into_response()),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response()),
+    }
+}
+
+/// `GET /api/v1/long-tasks/{id}` -- one task, its steps and its artifacts.
+async fn get_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    let Some(member) =
+        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
+            .await
+    else {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "nobody identified"}))).into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    match long_task_view(&long_task_repo(&state), &task).await {
+        Ok(view) => Json(view).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /api/v1/long-tasks/{id}/artifacts/{artifact_id}` -- an artifact's whole body, for
+/// "Read the result".
+async fn get_long_task_artifact(
+    State(state): State<Arc<AppState>>,
+    Path((id, artifact_id)): Path<(String, String)>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) =
+        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
+            .await
+    else {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "nobody identified"}))).into_response();
+    };
+    if let Err(response) = reachable_long_task(&state, &member, &id).await {
+        return response;
+    }
+    match long_task_repo(&state).get_artifact(&id, &artifact_id).await {
+        Ok(Some(artifact)) => Json(json!({
+            "id": artifact.id(),
+            "title": artifact.title(),
+            "kind": artifact.kind(),
+            "summary": artifact.summary(),
+            "body": artifact.body(),
+        }))
+        .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "there is no such artifact in this task"})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /api/v1/long-tasks/{id}/cancel` -- stops a task; a step under way finishes first.
+async fn cancel_long_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    peer: Result<
+        axum::extract::ConnectInfo<std::net::SocketAddr>,
+        axum::extract::rejection::ExtensionRejection,
+    >,
+    insecure: Option<axum::Extension<crate::insecure_dev::InsecureDevTransport>>,
+    tailnet: Option<axum::Extension<pond_core::security::ports::remote_access::TailnetMachine>>,
+) -> Response<axum::body::Body> {
+    use pond_core::shared::domain::long_task::LongTaskState;
+    use pond_core::shared::ports::long_task::LongTaskRepository as _;
+    let Some(member) =
+        long_task_caller(&state, principal.as_ref(), peer, insecure.is_some(), tailnet.is_some())
+            .await
+    else {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "nobody identified"}))).into_response();
+    };
+    let task = match reachable_long_task(&state, &member, &id).await {
+        Ok(task) => task,
+        Err(response) => return response,
+    };
+    if task.state().is_terminal() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("the task has already {}", task.state())})),
+        )
+            .into_response();
+    }
+    match long_task_repo(&state)
+        .set_task_state(&id, LongTaskState::Cancelled, chrono::Utc::now())
+        .await
+    {
+        Ok(_) => Json(json!({"id": id, "state": "cancelled"})).into_response(),
+        Err(e) => (StatusCode::CONFLICT, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
 

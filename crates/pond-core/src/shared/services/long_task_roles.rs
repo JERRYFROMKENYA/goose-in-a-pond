@@ -119,7 +119,7 @@ giap_role:
        - [ ] Sunscreen
 
        Headings are plain words: no emoji and no bold inside them. Give each place a map link
-       and each fact you looked up a link to its page.
+       and each fact you looked up a link to its web page; never link to an artifact id.
     4. Save it with artifact_write as a draft titled as the reader should see it, such as
        "Itinerary" or "Meal plan". When the plan has dates, also save its dated events as a data
        artifact titled "Calendar": one JSON object per line with title, start and end (ISO 8601

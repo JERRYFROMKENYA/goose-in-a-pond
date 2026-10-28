@@ -15684,6 +15684,10 @@ async fn long_task_report(
         }
     }
     let markdown = report::assemble(task.goal(), summary.as_deref(), &sections);
+    // A small model often skips the calendar save; the itinerary's own times still hold.
+    if events.is_empty() {
+        events = report::itinerary_events(&markdown, task.created_at().date_naive());
+    }
     Ok((markdown, events, sections.len()))
 }
 

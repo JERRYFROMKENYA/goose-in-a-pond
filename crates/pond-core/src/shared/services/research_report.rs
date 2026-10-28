@@ -2,8 +2,8 @@
 //! then each section a step drafted, in plan order, then the sources they cite. So a report is as
 //! long as its plan, never as long as one context window allows.
 use crate::shared::domain::long_task::{ArtifactKind, ArtifactSummary, PlanStep};
-use crate::shared::services::long_task_runner::result_artifact;
-use chrono::{DateTime, NaiveDate, Utc};
+use crate::shared::services::long_task_runner::{result_artifact, RESULT_TITLE};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 
 /// The data artifact a plan's dated events are saved in, which the calendar export reads.
 pub const CALENDAR_TITLE: &str = "Calendar";
@@ -32,7 +32,10 @@ pub fn report_parts(steps: &[PlanStep], artifacts: &[ArtifactSummary]) -> Report
     };
     let mut drafts: Vec<&ArtifactSummary> = artifacts
         .iter()
-        .filter(|a| a.kind == ArtifactKind::Draft && Some(&a.id) != result.as_ref())
+        // A failed try's Result stays stored; no summary is ever a section.
+        .filter(|a| {
+            a.kind == ArtifactKind::Draft && !a.title.trim().eq_ignore_ascii_case(RESULT_TITLE)
+        })
         .collect();
     drafts.sort_by_key(|a| (ordinal(a).is_none(), ordinal(a), a.created_at));
     ReportParts {
@@ -55,6 +58,12 @@ pub fn report_title(goal: &str) -> String {
         .find(|l| !l.trim().is_empty())
         .unwrap_or("Report")
         .trim();
+    // A question's first clause names it ("Plan a trip to Mombasa, from Friday...").
+    let line = line
+        .find([',', ':', ';', '.', '?'])
+        .map(|at| line[..at].trim_end())
+        .filter(|clause| clause.chars().count() >= 20)
+        .unwrap_or(line);
     if line.chars().count() <= TITLE_CHARS {
         return line.to_string();
     }
@@ -110,11 +119,12 @@ pub fn assemble(goal: &str, summary: Option<&str>, sections: &[(String, String)]
         if body.is_empty() {
             continue;
         }
+        let body = below_the_title(body);
         // A section that brings its own heading keeps it; one that does not gets its title.
         if !body.starts_with('#') {
             out.push_str(&format!("## {}\n\n", title.trim()));
         }
-        out.push_str(body);
+        out.push_str(&body);
         out.push_str("\n\n");
     }
     let cited = sources(&out);
@@ -125,6 +135,40 @@ pub fn assemble(goal: &str, summary: Option<&str>, sections: &[(String, String)]
         }
     }
     out.trim_end().to_string() + "\n"
+}
+
+/// A section's headings moved down a level when it uses the report's own level for itself, so the
+/// title stays the only `# ` heading. Lines inside code fences are left alone.
+fn below_the_title(body: &str) -> String {
+    let level = |line: &str| {
+        let hashes = line.chars().take_while(|c| *c == '#').count();
+        (hashes > 0 && line[hashes..].starts_with(' ')).then_some(hashes)
+    };
+    let mut fenced = false;
+    let mut top = usize::MAX;
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced {
+            top = top.min(level(line).unwrap_or(usize::MAX));
+        }
+    }
+    if top != 1 {
+        return body.to_string();
+    }
+    fenced = false;
+    let mut out = String::with_capacity(body.len() + 16);
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        if !fenced && level(line).is_some() {
+            out.push('#');
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 /// Every web link the text cites as `[title](url)`, once each, in the order first cited.
@@ -190,6 +234,12 @@ pub enum EventTime {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     },
+    /// A wall-clock time with no zone, as an itinerary writes it: a calendar shows it as the
+    /// time where its owner is, which is where the traveller will be.
+    Local {
+        start: NaiveDateTime,
+        end: NaiveDateTime,
+    },
 }
 
 /// The events in a calendar artifact: a JSON array or one JSON object per line, each with
@@ -245,6 +295,155 @@ fn event_from(value: &serde_json::Value) -> Option<CalendarEvent> {
     })
 }
 
+/// A plan's timed lines as events, for a plan whose steps saved no calendar: each heading that
+/// names a date opens a day, and each `- HH:MM what` line under it is an event lasting until the
+/// next one that day, or an hour. A date with no year takes the first one on or after `since`.
+pub fn itinerary_events(markdown: &str, since: NaiveDate) -> Vec<CalendarEvent> {
+    let mut events: Vec<CalendarEvent> = Vec::new();
+    let mut day: Option<NaiveDate> = None;
+    let mut day_starts = 0;
+    let close_day = |events: &mut Vec<CalendarEvent>, from: usize| {
+        for i in from..events.len() {
+            let next_start = events.get(i + 1).map(|e| e.when);
+            if let EventTime::Local { start, end } = &mut events[i].when {
+                if let Some(EventTime::Local { start: next, .. }) = next_start {
+                    if next > *start {
+                        *end = next;
+                    }
+                }
+                if *end <= *start {
+                    *end = *start + chrono::Duration::hours(1);
+                }
+            }
+        }
+    };
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            if let Some(date) = heading_date(trimmed.trim_start_matches('#'), since) {
+                close_day(&mut events, day_starts);
+                day = Some(date);
+                day_starts = events.len();
+            }
+            continue;
+        }
+        let (Some(date), Some(item)) = (
+            day,
+            trimmed.strip_prefix("- ").or(trimmed.strip_prefix("* ")),
+        ) else {
+            continue;
+        };
+        let item = item.trim_start_matches(['*', ' ']);
+        let Some((clock, what)) = item.split_once(' ') else {
+            continue;
+        };
+        let Ok(time) = NaiveTime::parse_from_str(clock.trim_end_matches([':', '*']), "%H:%M")
+        else {
+            continue;
+        };
+        let (title, location) = plain_text(what);
+        if title.is_empty() {
+            continue;
+        }
+        let start = date.and_time(time);
+        events.push(CalendarEvent {
+            title,
+            when: EventTime::Local { start, end: start },
+            location,
+            notes: None,
+        });
+    }
+    close_day(&mut events, day_starts);
+    events
+}
+
+const MONTHS: [&str; 12] = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+];
+
+/// The date a heading names, such as "Day 1: Friday, November 13" or "Saturday 14 November 2026".
+fn heading_date(heading: &str, since: NaiveDate) -> Option<NaiveDate> {
+    let words: Vec<String> = heading
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    let at = words.iter().position(|w| {
+        MONTHS
+            .iter()
+            .any(|m| w == m || (w.len() >= 3 && m.starts_with(w.as_str()) && w.len() <= m.len()))
+    })?;
+    let month = MONTHS
+        .iter()
+        .position(|m| m.starts_with(words[at].as_str()))? as u32
+        + 1;
+    let day_of = |w: &String| w.parse::<u32>().ok().filter(|d| (1..=31).contains(d));
+    let day = words
+        .get(at + 1)
+        .and_then(day_of)
+        .or_else(|| at.checked_sub(1).and_then(|i| day_of(&words[i])))?;
+    let year = words
+        .iter()
+        .filter_map(|w| w.parse::<i32>().ok())
+        .find(|y| (2000..=2100).contains(y));
+    match year {
+        Some(year) => NaiveDate::from_ymd_opt(year, month, day),
+        None => {
+            let this = NaiveDate::from_ymd_opt(since.year(), month, day)?;
+            if this >= since {
+                Some(this)
+            } else {
+                NaiveDate::from_ymd_opt(since.year() + 1, month, day)
+            }
+        }
+    }
+}
+
+/// A line's words without its Markdown, and the first linked place in it.
+fn plain_text(text: &str) -> (String, Option<String>) {
+    let mut out = String::new();
+    let mut place = None;
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after
+            .find("](")
+            .and_then(|close| after[close + 2..].find(')').map(|end| (close, end)))
+        {
+            Some((close, end)) => {
+                let label = after[..close].trim();
+                place.get_or_insert_with(|| label.to_string());
+                out.push_str(label);
+                rest = &after[close + 2 + end + 1..];
+            }
+            None => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    let words = out.replace(['*', '_', '`'], "");
+    let title = words
+        .trim()
+        .trim_end_matches(['.', ',', ';'])
+        .trim()
+        .to_string();
+    (title, place.filter(|p| !p.is_empty()))
+}
+
 /// The events as an iCalendar file (RFC 5545), for a phone's or a desktop's calendar.
 pub fn to_ics(task_id: &str, events: &[CalendarEvent], now: DateTime<Utc>) -> String {
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -262,6 +461,10 @@ pub fn to_ics(task_id: &str, events: &[CalendarEvent], now: DateTime<Utc>) -> St
             EventTime::At { start, end } => {
                 lines.push(format!("DTSTART:{}", start.format("%Y%m%dT%H%M%SZ")));
                 lines.push(format!("DTEND:{}", end.format("%Y%m%dT%H%M%SZ")));
+            }
+            EventTime::Local { start, end } => {
+                lines.push(format!("DTSTART:{}", start.format("%Y%m%dT%H%M%S")));
+                lines.push(format!("DTEND:{}", end.format("%Y%m%dT%H%M%S")));
             }
             EventTime::Days { first, last } => {
                 // DTEND is exclusive for whole days.
@@ -374,6 +577,7 @@ mod tests {
             ),
             artifact("a-costs", Some("costs"), ArtifactKind::Draft, "Costs", 3),
             artifact("a-orphan", Some("gone"), ArtifactKind::Draft, "Extra", 4),
+            artifact("a-tried", Some("routes"), ArtifactKind::Draft, "Result", 5),
             artifact("a-result", Some("routes"), ArtifactKind::Draft, "Result", 5),
             artifact("a-cal", None, ArtifactKind::Data, "calendar", 6),
         ];
@@ -467,7 +671,124 @@ mod tests {
     }
 
     #[test]
+    fn an_itinerary_is_a_calendar_when_no_step_saved_one() {
+        let plan = "## Day-by-Day Itinerary: Mombasa (November 13 - 16, 2026)\n\n\
+                    ### Day 1: Friday, November 13\n\
+                    - 14:00 Check into accommodation.\n\
+                    - 16:00 Visit [Fort Jesus](https://example.org/fort), a Portuguese fort.\n\
+                    - Transportation: a tuk-tuk.\n\
+                    - **19:00** Dinner near the Old Town\n\n\
+                    ### Day 2: Saturday 14 November\n\
+                    - 09:00 Haller Park\n\n\
+                    # Meal Plan for Mombasa (November 13-16, 2026)\n\
+                    - **Breakfast:** Mahamri with tea\n";
+        let since = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let events = itinerary_events(plan, since);
+        let at = |d: u32, h: u32, m: u32| {
+            NaiveDate::from_ymd_opt(2026, 11, d)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap()
+        };
+        let times: Vec<_> = events.iter().map(|e| (e.title.as_str(), e.when)).collect();
+        assert_eq!(
+            times,
+            [
+                (
+                    "Check into accommodation",
+                    EventTime::Local {
+                        start: at(13, 14, 0),
+                        end: at(13, 16, 0)
+                    }
+                ),
+                (
+                    "Visit Fort Jesus, a Portuguese fort",
+                    EventTime::Local {
+                        start: at(13, 16, 0),
+                        end: at(13, 19, 0)
+                    }
+                ),
+                (
+                    "Dinner near the Old Town",
+                    EventTime::Local {
+                        start: at(13, 19, 0),
+                        end: at(13, 20, 0)
+                    }
+                ),
+                (
+                    "Haller Park",
+                    EventTime::Local {
+                        start: at(14, 9, 0),
+                        end: at(14, 10, 0)
+                    }
+                ),
+            ],
+            "untimed lines and the meal plan's meals are not events"
+        );
+        assert_eq!(events[1].location.as_deref(), Some("Fort Jesus"));
+        let ics = to_ics("task-1", &events, t(0));
+        assert!(
+            ics.contains("DTSTART:20261113T140000\r\nDTEND:20261113T160000\r\n"),
+            "local times carry no zone"
+        );
+
+        let january = itinerary_events("### Tuesday 5 January\n- 10:00 Fly home\n", since);
+        assert_eq!(
+            january[0].when,
+            EventTime::Local {
+                start: NaiveDate::from_ymd_opt(2027, 1, 5)
+                    .unwrap()
+                    .and_hms_opt(10, 0, 0)
+                    .unwrap(),
+                end: NaiveDate::from_ymd_opt(2027, 1, 5)
+                    .unwrap()
+                    .and_hms_opt(11, 0, 0)
+                    .unwrap(),
+            },
+            "a date with no year is the next one after the task began"
+        );
+        assert!(itinerary_events("- 09:00 No day above this\n", since).is_empty());
+    }
+
+    #[test]
+    fn a_section_that_titles_itself_at_the_top_level_moves_down_one() {
+        let report = assemble(
+            "Plan a trip",
+            None,
+            &[(
+                "Meal plan".into(),
+                "# Meal Plan\n\n## Friday\n\n```\n# not a heading\n```".into(),
+            )],
+        );
+        assert!(
+            report.contains("\n## Meal Plan\n\n### Friday\n"),
+            "{report}"
+        );
+        assert!(
+            report.contains("```\n# not a heading\n```"),
+            "code is left alone"
+        );
+        assert_eq!(
+            report.matches("\n# ").count(),
+            0,
+            "only the title is level one"
+        );
+    }
+
+    #[test]
     fn a_long_goal_makes_a_short_title() {
+        assert_eq!(
+            report_title(
+                "Plan a four-day trip to Mombasa for me and three friends, from Friday 13"
+            ),
+            "Plan a four-day trip to Mombasa for me and three friends",
+            "the first clause names it"
+        );
+        assert_eq!(
+            report_title("Tea, please"),
+            "Tea, please",
+            "too short to cut"
+        );
         assert_eq!(
             report_title("  \nCompare heat pumps\nmore"),
             "Compare heat pumps"

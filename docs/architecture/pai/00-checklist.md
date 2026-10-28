@@ -4002,5 +4002,9 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **PAI-3.** The prime's preamble is unchanged: the waiting line rides the deep-research note in the
   turn's `<system-context>`, and `task_start`'s result is a tool result.
 - **PAI-7.** Stopping is the member's own choice on their card. Nothing is stopped for them.
-- **Not verified on the Orin yet.** The nano was running three of a member's research tasks while
-  this was written, and a deploy restarts the pond, so it waits until they finish.
+- **Verified on the Orin** (main at `c4b4786f`, E4B QAT, 2026-10-29, a member's paired test device):
+  two deep-research asks in a row. The second's view said `position 2 of 2` with the first's goal
+  ahead, and `GET /long-tasks/queue` listed both in order. The prime replied that it was waiting its
+  turn behind another task and that the task card can stop the person's tasks. Stopping the first
+  moved the second to the front. Both were stopped and the device and its chats removed afterwards.
+  The phone's queue card (goose-on-the-go #204) is not checked on a device.

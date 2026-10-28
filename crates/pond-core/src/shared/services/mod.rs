@@ -1,4 +1,5 @@
 pub mod chat;
+pub mod child_sessions;
 pub mod delegation;
 pub mod egress;
 pub mod in_process_event_bus;

@@ -150,6 +150,8 @@ struct FakeRunnerState {
     reserved_during_run: Mutex<Vec<f32>>,
     /// Whether the run's engine calls were helper calls, read where the engine would read it.
     helper_during_run: Mutex<Vec<bool>>,
+    /// The parent the child's session resolved to during the run, as a tool server sees it.
+    parent_during_run: Mutex<Vec<Option<String>>>,
 }
 
 struct FakeRunner {
@@ -224,6 +226,14 @@ impl ChildRunner for FakeRunner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(goose_providers::request_context::is_helper());
+        self.state
+            .parent_during_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(
+                pond_core::shared::services::child_sessions::process_child_sessions()
+                    .parent_of(&plan.child_session_id),
+            );
         self.state
             .plans
             .lock()
@@ -484,6 +494,22 @@ async fn a_childs_engine_calls_are_helper_calls() {
     assert!(
         !goose_providers::request_context::is_helper(),
         "the scope ends with the run"
+    );
+    let parents = state
+        .parent_during_run
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    assert_eq!(parents.len(), 1);
+    let parent = parents[0].clone().expect(
+        "a running child must resolve to its parent, or a tool server cannot find its work",
+    );
+    let child = state.opened.lock().unwrap_or_else(|e| e.into_inner())[0].clone();
+    assert!(
+        pond_core::shared::services::child_sessions::process_child_sessions()
+            .parent_of(&child)
+            .is_none(),
+        "a finished child must stop resolving to {parent}"
     );
 }
 

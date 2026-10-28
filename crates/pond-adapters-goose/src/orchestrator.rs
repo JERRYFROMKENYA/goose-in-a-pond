@@ -917,6 +917,8 @@ async fn drive_run(
     );
 
     let max_turns = plan.max_turns;
+    let _bound = pond_core::shared::services::child_sessions::process_child_sessions()
+        .bind(&plan_child_session_id, &parent_session_id);
     // A child's engine calls take the model's one context rather than a second beside the parent's.
     let outcome =
         goose_providers::request_context::as_helper(runner.run(plan, cancel.clone())).await;

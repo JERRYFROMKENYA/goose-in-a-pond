@@ -1387,8 +1387,14 @@ What it means:
   on the cold path that already exists.
 - **A delegation inside a live turn costs the rebuild,** which grows with the history: 15 s at 8K.
   A suspend file holds that to about 2-3 s at any length, but it writes the conversation's KV to
-  disk for as long as the helper runs. The preamble snapshots' privacy argument is that they hold
-  no conversation, so the suspend file is the maintainer's decision, not this document's.
+  disk for as long as the helper runs.
+
+**Decided 2026-10-28 (Jerry): the suspend file, bounded.** It is written only when a live turn
+waits on the helper (`request_context::as_helper(prime_waiting, ..)`, true when the child inherits
+its parent's device hold), never for a lane step. It is owner-only (0600 in a 0700 directory under
+`<goose data>/prompt-cache/suspended`), never indexed, and deleted on resume, on any call that has
+no waiting turn, when the model unloads and when a process starts. Its window checkpoints stay in
+memory, so a resume rewinds through the same `window_resume` path a resident cache uses.
 
 Role preambles also need their own snapshots. The ladder keeps `MAX_SNAPSHOTS` = 6 per model and
 window, and the Orin's E4B family already holds six (typed chat, voice, extraction, titling, the

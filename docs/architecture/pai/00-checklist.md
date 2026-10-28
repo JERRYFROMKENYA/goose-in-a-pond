@@ -3918,3 +3918,18 @@ PAI-4 and PAI-7).** Design: [06 sections 8 and 9](./06-multi-agent-orchestration
 - **Still open.** Boot's first prewarm call is preceded by a goose side call of about 750 tokens
   under the compile scope, whose system prompt is not GIAP's (`system_appendix_dropped`); it is
   harmless to the compile and its caller is unidentified.
+
+**2026-10-28 — the context space, designed; no code.**
+
+- [`context-space.md`](../context-space.md) proposes one item store, one multimodal index
+  (EmbeddingGemma 2) and declared background agents in place of memories, summaries, the three
+  corpora, suggestions and proactive review. It touches PAI-1, -2, -3, -6, -7 and -8. Status:
+  `DESIGNED`, current-state claims checked against `f8831d73`.
+- It reverses the personal-context index's "one index, separate stores", deliberately and in
+  writing (its section 1). Decision 1 in its section 11 is Jerry's.
+- Found while checking the tree: MCP `save_memory` writes `profile_id: None`, so a member's own save
+  is household-visible; turn recall reads vector BLOBs on source rows rather than the index; the
+  `SuggestionGeneration` lane job has no cancel watcher.
+- PAI-2 section 3.4 says an Orin Nano devkit exposes no fTPM. That holds for an unfused board only.
+  Jetson Linux r36 documents OP-TEE, LUKS and an fTPM for Orin, all rooted in an EKB whose key must
+  be fused into OemK1 or OemK2.

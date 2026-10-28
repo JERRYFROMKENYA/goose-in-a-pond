@@ -57,6 +57,7 @@ Work on any of PAI-1 to PAI-8 starts and ends with the checklist.
 | [PAI-7 Proactive intelligence](architecture/pai/07-proactive-intelligence.md) | |
 | [PAI-8 Personal context streaming](architecture/pai/08-personal-context-streaming.md) | |
 | [Personal-context index](architecture/personal-context-index.md) | The local vector index behind PAI-8 |
+| [Context space](architecture/context-space.md) | Designed: one store, one multimodal index and background agents in place of memories, summaries, the index and suggestions |
 | [Context and reasoning roadmap](architecture/context-and-reasoning-roadmap.md) | Phases A to F, with status |
 
 ## Models and inference

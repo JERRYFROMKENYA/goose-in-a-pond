@@ -791,6 +791,15 @@ pub struct StepReportParams {
     /// Ids of the artifacts you saved.
     #[schemars(with = "Option<Vec<String>>")]
     pub artifacts: Option<Value>,
+    /// Only if your instructions name agents you may hand work to: which one should go next.
+    #[schemars(with = "Option<String>")]
+    pub hand_to: Option<Value>,
+    /// What that agent should do, when you name one.
+    #[schemars(with = "Option<String>")]
+    pub brief: Option<Value>,
+    /// Only if your instructions allow it: a goal for a new long task that follows from this one.
+    #[schemars(with = "Option<String>")]
+    pub start_task: Option<Value>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -1217,6 +1226,9 @@ fn report_object(params: StepReportParams) -> Value {
         summary,
         failure,
         artifacts,
+        hand_to,
+        brief,
+        start_task,
         extra,
     } = params;
     let mut object: serde_json::Map<String, Value> = extra.into_iter().collect();
@@ -1225,6 +1237,9 @@ fn report_object(params: StepReportParams) -> Value {
         ("summary", summary),
         ("failure", failure),
         ("artifacts", artifacts),
+        ("hand_to", hand_to),
+        ("brief", brief),
+        ("start_task", start_task),
     ] {
         if let Some(value) = value {
             object.insert(key.to_string(), value);

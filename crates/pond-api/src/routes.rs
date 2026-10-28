@@ -517,6 +517,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/skills/{id}", put(update_skill).delete(delete_skill))
         // ── Recipes ───────────────────────────────────────────────────────────
         .route("/recipes", get(list_recipes).post(create_recipe))
+        .route("/recipes/validate", post(validate_recipe))
         .route("/recipes/{id}", put(update_recipe).delete(delete_recipe))
         .route("/recipes/{name}/run", post(run_recipe))
         // ── Face biometrics ───────────────────────────────────────────────────
@@ -15114,6 +15115,7 @@ struct CreateRecipeRequest {
 
 async fn create_recipe(
     State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     body: Result<Json<CreateRecipeRequest>, JsonRejection>,
 ) -> impl axum::response::IntoResponse {
     let repo = match &state.recipe_repo {
@@ -15136,6 +15138,7 @@ async fn create_recipe(
                 .into_response()
         }
     };
+    let owner_profile_id = recipe_owner(&state, principal.as_ref()).await;
     let recipe = AgentRecipe {
         id: Uuid::new_v4().to_string(),
         name: req.name,
@@ -15143,6 +15146,7 @@ async fn create_recipe(
         yaml: req.yaml,
         active: true,
         created_at: chrono::Utc::now().to_rfc3339(),
+        owner_profile_id,
     };
     match repo.upsert(&recipe).await {
         Ok(()) => (StatusCode::CREATED, Json(recipe_view_json(&recipe))).into_response(),
@@ -15152,6 +15156,81 @@ async fn create_recipe(
         )
             .into_response(),
     }
+}
+
+/// The member a new recipe belongs to: the one its paired device is attributed to, else nobody.
+/// Only the device counts: a recipe outlives the conversation it was written in.
+async fn recipe_owner(
+    state: &Arc<AppState>,
+    principal: Option<&axum::Extension<pond_core::security::ports::policy::Principal>>,
+) -> Option<String> {
+    let device = proven_device(principal);
+    let device_id = device.id()?.to_owned();
+    match device.rung(device_attribution(state).device_profile(&device_id).await) {
+        DeviceRung::Member(profile_id) => Some(profile_id),
+        DeviceRung::Unavailable(why) => {
+            tracing::warn!(
+                device = %device_id,
+                error = %why,
+                "recipes: could not read the device's member; saving the recipe with no owner"
+            );
+            None
+        }
+        DeviceRung::NoDevice | DeviceRung::Unattributed => None,
+    }
+}
+
+#[derive(Deserialize)]
+struct ValidateRecipeRequest {
+    yaml: String,
+    /// The recipe's name, which is the agent's; a draft may not have one yet.
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Name a draft agent is checked under before it has one.
+const DRAFT_AGENT_NAME: &str = "draft";
+
+/// `POST /api/v1/recipes/validate` -- every problem in an agent's `giap_role` block, each at the
+/// path of its field, so the builder or a small model can fix the right line. Always 200 for a
+/// readable body: a refused block is an answer, not a failed request.
+async fn validate_recipe(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<ValidateRecipeRequest>, JsonRejection>,
+) -> impl axum::response::IntoResponse {
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    // Unchecked rather than refused when the store is unreadable: the names are a convenience.
+    let known: Option<std::collections::BTreeSet<String>> = match &state.recipe_repo {
+        Some(repo) => match repo.list().await {
+            Ok(recipes) => Some(recipes.into_iter().map(|r| r.name).collect()),
+            Err(e) => {
+                tracing::debug!(error = %e, "recipes/validate: could not list agents; names go unchecked");
+                None
+            }
+        },
+        None => None,
+    };
+    let name = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(DRAFT_AGENT_NAME);
+    let checked = pond_core::shared::domain::role_block::validate_role_recipe(
+        name,
+        &req.yaml,
+        known.as_ref(),
+    );
+    Json(checked.report()).into_response()
 }
 
 #[derive(Deserialize)]
@@ -15210,6 +15289,7 @@ async fn update_recipe(
         yaml: req.yaml.unwrap_or(existing.yaml),
         active: req.active.unwrap_or(existing.active),
         created_at: existing.created_at,
+        owner_profile_id: existing.owner_profile_id,
     };
     match repo.upsert(&updated).await {
         Ok(()) => Json(recipe_view_json(&updated)).into_response(),

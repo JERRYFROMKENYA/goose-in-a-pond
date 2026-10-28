@@ -720,6 +720,14 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
+        upsert!(
+            "agent_activations_enabled",
+            if settings.agent_activations_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
         // Context ingest
         upsert!(
             "ext_context_enabled",
@@ -1231,6 +1239,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "unprompted_speech_categories" => s.unprompted_speech_categories = value.to_string(),
         "proactive_review_enabled" => s.proactive_review_enabled = value == "true",
         "long_tasks_enabled" => s.long_tasks_enabled = value == "true",
+        "agent_activations_enabled" => s.agent_activations_enabled = value == "true",
         // A corrupt row is not "true", so nothing is copied into the corpus.
         "context_ingest_enabled" => s.context_ingest_enabled = value == "true",
         // A corrupt row is not "true", so the pond keeps the codes to itself.

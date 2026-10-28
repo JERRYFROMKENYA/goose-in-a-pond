@@ -331,6 +331,13 @@ pub fn decide(
         }
         RoleLookup::Found(role) => role,
     };
+    // A role whose activations leave out `delegated` runs only on its own triggers or for agents.
+    if !role.accepts_delegation() {
+        return Err(Refusal::Narrowing(format!(
+            "the `{}` agent does not take delegated work; it runs on its own schedule or events,              or when another agent hands it work. Do the work yourself",
+            role.name()
+        )));
+    }
     authority
         .delegate(&role, request)
         .map_err(|e| Refusal::Narrowing(e.to_string()))
@@ -889,6 +896,29 @@ mod tests {
             RoleLookup::from_recipe("researcher", Some(researcher_yaml())),
             RoleLookup::Found(_)
         ));
+    }
+
+    #[test]
+    fn a_role_that_does_not_take_delegated_work_is_refused() {
+        let authority = root(ProfileScope::Household);
+        let scheduled = "giap_role:\n  tool_groups: [giap-weather]\n  instructions: go\n  \
+                         activations:\n    - schedule: { cron: \"0 0 7 * * *\", brief: b }\n";
+        let refusal = decide(
+            &authority,
+            RoleLookup::from_recipe("researcher", Some(scheduled)),
+            request(),
+        )
+        .unwrap_err();
+        assert!(matches!(refusal, Refusal::Narrowing(_)), "{refusal:?}");
+        assert!(refusal.message().contains("does not take delegated work"));
+        // Vacuity control: listing `delegated` beside the schedule lets the prime hand it work.
+        let both = scheduled.replace("activations:\n", "activations:\n    - delegated\n");
+        assert!(decide(
+            &authority,
+            RoleLookup::from_recipe("researcher", Some(&both)),
+            request()
+        )
+        .is_ok());
     }
 
     // ── describe_run ───────────────────────────────────────────────────────

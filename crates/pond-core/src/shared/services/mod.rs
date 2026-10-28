@@ -1,3 +1,4 @@
+pub mod agent_activations;
 pub mod chat;
 pub mod child_sessions;
 pub mod delegation;

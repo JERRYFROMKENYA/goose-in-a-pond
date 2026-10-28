@@ -765,6 +765,12 @@ pub struct Settings {
     #[serde(default = "Settings::default_long_tasks_enabled")]
     pub long_tasks_enabled: bool,
 
+    /// May a household's agents start on their own schedules and events? Each run is a one-step
+    /// long task, so it also needs [`Settings::long_tasks_enabled`]. Nothing runs until a recipe
+    /// declares a schedule or an event.
+    #[serde(default = "Settings::default_agent_activations_enabled")]
+    pub agent_activations_enabled: bool,
+
     /// May sensor and camera events become per-member context items the model is shown?
     /// Off stops ingest only; items already ingested stay recallable.
     #[serde(default = "Settings::default_context_ingest_enabled")]
@@ -939,6 +945,7 @@ impl Default for Settings {
             unprompted_speech_categories: Self::default_unprompted_speech_categories(),
             proactive_review_enabled: false,
             long_tasks_enabled: Self::default_long_tasks_enabled(),
+            agent_activations_enabled: Self::default_agent_activations_enabled(),
             context_ingest_enabled: false,
             ext_context_enabled: false,
             spoken_pairing_codes: Self::default_spoken_pairing_codes(),
@@ -1375,6 +1382,10 @@ impl Settings {
     }
 
     fn default_long_tasks_enabled() -> bool {
+        true
+    }
+
+    fn default_agent_activations_enabled() -> bool {
         true
     }
 
@@ -2036,6 +2047,8 @@ mod tests {
             "memory_date_proposals_enabled",
             // UI comes with the task panel; until then a switch would control nothing visible.
             "long_tasks_enabled",
+            // UI comes with the agent builder; until then a switch would control nothing visible.
+            "agent_activations_enabled",
             // Engine state, not preferences: the rollout lever and a self-stamped epoch.
             "memory_extraction_mode",
             "memory_extraction_first_pass_at",

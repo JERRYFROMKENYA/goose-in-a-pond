@@ -3873,6 +3873,26 @@ async fn run_server(
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
         // The nudge, not the hand bell: a task started mid-turn must still wait for quiet.
         if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.nudge_bell())) {
+            // Agents a schedule or a household event activates run as one-step long tasks.
+            let agent_presence: pond_server::agent_activations::SharedPresence = Default::default();
+            tokio::spawn(pond_server::agent_activations::run_agent_activations(
+                pond_server::agent_activations::ActivationDeps {
+                    settings: settings_repo.clone(),
+                    recipes: recipe_repo.clone(),
+                    tasks: repo.clone(),
+                    profiles: profile_repo.clone(),
+                    bus: event_bus.clone(),
+                    wake: bells.nudge_bell(),
+                    presence: agent_presence.clone(),
+                },
+            ));
+            let before_hooks = Arc::new(pond_server::agent_activations::BeforeHookSources {
+                scheduler: scheduler.clone(),
+                weather: weather.clone(),
+                presence: agent_presence,
+                profiles: profile_repo.clone(),
+                settings: settings_repo.clone(),
+            });
             tokio::spawn(run_long_task_runner(
                 settings_repo.clone(),
                 session_storage.clone(),
@@ -3882,6 +3902,7 @@ async fn run_server(
                 repo,
                 recipe_repo.clone(),
                 targeted_notification_sender.clone(),
+                before_hooks,
             ));
         }
     }
@@ -7035,6 +7056,7 @@ async fn run_long_task_runner(
     tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
     recipes: Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync>,
     sender: Arc<pond_infra::broadcast_notification_sender::BroadcastNotificationSender>,
+    before_hooks: Arc<pond_server::agent_activations::BeforeHookSources>,
 ) {
     use pond_core::shared::domain::long_task::{LongTaskState, StepState};
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
@@ -7154,6 +7176,7 @@ async fn run_long_task_runner(
             &offered,
             &mut fruitless,
             sender.as_ref(),
+            before_hooks.as_ref(),
         )
         .await
         {
@@ -7339,8 +7362,10 @@ async fn advance_long_task(
     offered: &[pond_core::shared::domain::orchestration::AgentRole],
     fruitless: &mut std::collections::HashMap<String, u32>,
     sender: &pond_infra::broadcast_notification_sender::BroadcastNotificationSender,
+    before_hooks: &pond_server::agent_activations::BeforeHookSources,
 ) -> anyhow::Result<()> {
-    use pond_core::shared::domain::long_task::{LongTaskState, OutcomeKind};
+    use pond_core::shared::domain::long_task::{LongTaskState, OutcomeKind, StepState};
+    use pond_core::shared::services::agent_activations as activations;
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
     use pond_core::shared::services::step_bindings::StepWork;
 
@@ -7354,7 +7379,10 @@ async fn advance_long_task(
         NextRun::GiveUp(reason) => {
             tasks.set_task_state(task.id(), LongTaskState::Failed, now).await?;
             fruitless.remove(task.id());
-            notify_long_task_owner(sender, task, false, format!("I couldn't finish it: {reason}.")).await;
+            if activations::runner_notifies_at_end(task, &steps, offered, false) {
+                notify_long_task_owner(sender, task, false, format!("I couldn't finish it: {reason}."))
+                    .await;
+            }
             Ok(())
         }
         NextRun::Finish => {
@@ -7364,11 +7392,29 @@ async fn advance_long_task(
                 .map(|a| a.summary.clone())
                 .or_else(|| steps.iter().rev().find_map(|s| s.summary().map(str::to_string)))
                 .unwrap_or_else(|| "It's done.".to_string());
-            notify_long_task_owner(sender, task, true, body).await;
+            if activations::runner_notifies_at_end(task, &steps, offered, true) {
+                notify_long_task_owner(sender, task, true, body).await;
+            }
+            Ok(())
+        }
+        // An activation's one step is its whole plan; it is never handed to the planner.
+        NextRun::Plan(_) if activations::is_activation_task(task) => {
+            tasks.set_task_state(task.id(), LongTaskState::Failed, now).await?;
+            fruitless.remove(task.id());
+            if activations::runner_notifies_at_end(task, &steps, offered, false) {
+                notify_long_task_owner(
+                    sender,
+                    task,
+                    false,
+                    activations::ACTIVATION_NOT_PLANNED.to_string(),
+                )
+                .await;
+            }
             Ok(())
         }
         NextRun::Plan(reason) => {
-            let brief = runner::planner_brief(task, &steps, &artifacts, offered, &reason, now);
+            let plannable = activations::plannable_roles(offered);
+            let brief = runner::planner_brief(task, &steps, &artifacts, &plannable, &reason, now);
             let end = helpers.run(task, planner, StepWork::Plan, brief).await?;
             if end == RunEnd::Preempted {
                 return Ok(());
@@ -7397,10 +7443,19 @@ async fn advance_long_task(
                 tasks.update_step(&step).await?;
                 return Ok(());
             };
+            if let Err(why) = activations::step_role_allowed(task, &step, role) {
+                step.start(now)?;
+                tasks.update_step(&step).await?;
+                step.fail(&why, chrono::Utc::now())?;
+                tasks.update_step(&step).await?;
+                return Ok(());
+            }
             step.start(now)?;
             tasks.update_step(&step).await?;
             let key = step.key().clone();
-            let brief = runner::worker_brief(task, &step, &artifacts, now);
+            let mut brief = runner::worker_brief(task, &step, &artifacts, now);
+            brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
+            brief.push_str(&activations::hand_back_offer(role, offered));
             let outcome = match helpers.run(task, role, StepWork::Do(key.clone()), brief).await {
                 Ok(RunEnd::Reported(outcome)) => outcome,
                 Ok(RunEnd::Preempted) => {
@@ -7434,6 +7489,21 @@ async fn advance_long_task(
                 Some(RunEnd::Reported(_)) | None => step.record(&outcome, chrono::Utc::now())?,
             }
             tasks.update_step(&step).await?;
+            if step.state() == StepState::Completed {
+                pond_server::agent_activations::apply_after_actions(
+                    &activations::after_hook_actions(task, role, &step, &outcome),
+                    task,
+                    &step,
+                    &outcome,
+                    &pond_server::agent_activations::AfterHookDeps {
+                        tasks,
+                        sender,
+                        roles: offered,
+                        wake: None,
+                    },
+                )
+                .await;
+            }
             if outcome.outcome() == OutcomeKind::NeedsApproval {
                 tasks
                     .set_task_state(task.id(), LongTaskState::AwaitingApproval, chrono::Utc::now())
@@ -10337,6 +10407,7 @@ async fn run_recipes_cmd(action: RecipeAction) -> Result<()> {
                 yaml,
                 active: true,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                owner_profile_id: None,
             };
             repo.upsert(&recipe).await?;
             println!("✓ Recipe '{name}' imported (id: {id})");

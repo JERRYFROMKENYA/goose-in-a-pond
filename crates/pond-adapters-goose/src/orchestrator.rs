@@ -1072,8 +1072,7 @@ impl Orchestrator for GooseOrchestrator {
         };
 
         let child_session_id = self.runner.open_child_session(spec.role()).await?;
-        // The role's persona is not on `TaskSpec` yet.
-        let role_persona: Option<&str> = None;
+        let role_persona = Some(spec.persona()).filter(|persona| !persona.trim().is_empty());
         let plan = match build_child_plan(&spec, &child_session_id, &env, role_persona) {
             Ok(plan) => plan,
             Err(refused) => {

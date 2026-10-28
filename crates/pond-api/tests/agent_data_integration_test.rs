@@ -1027,6 +1027,132 @@ async fn recipe_create_missing_yaml_returns_400() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+// ── Recipe validation ─────────────────────────────────────────────────────────
+
+const AGENT_YAML: &str = "title: Greeter\n\
+instructions: Greets whoever comes home.\n\
+giap_role:\n  \
+  tool_groups: [giap-weather]\n  \
+  activations:\n    \
+    - event: { on: presence.arrive, member: any, brief: Say hello. }\n  \
+  hooks:\n    \
+    after: [notify_owner]\n";
+
+#[tokio::test]
+async fn recipe_validate_names_every_wrong_field_by_its_path() {
+    let (app, _tmp) = make_app().await;
+    let bad = AGENT_YAML
+        .replace("presence.arrive", "presence.arive")
+        .replace("notify_owner", "notify_everyone");
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/recipes/validate",
+            serde_json::json!({"name": "greeter", "yaml": bad}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a refused block is an answer"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(body["ok"], false);
+    assert!(body["role"].is_null());
+    let paths: Vec<&str> = body["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["path"].as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "giap_role.activations[0].event.on",
+            "giap_role.hooks.after[0]"
+        ]
+    );
+
+    // Vacuity control: the same agent spelled right is valid and summarised.
+    let resp = app
+        .oneshot(post(
+            "/api/v1/recipes/validate",
+            serde_json::json!({"name": "greeter", "yaml": AGENT_YAML}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["role"]["name"], "greeter");
+    assert_eq!(body["role"]["tool_groups"][0], "giap-weather");
+    assert_eq!(body["role"]["activations"][0]["on"], "presence.arrive");
+    assert_eq!(body["role"]["hooks"]["after"][0], "notify_owner");
+    assert_eq!(
+        body["role"]["preamble_chars"],
+        "Greets whoever comes home.".len()
+    );
+    assert!(body["errors"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recipe_validate_checks_hand_offs_against_the_saved_agents() {
+    let (app, _tmp) = make_app().await;
+    let budgeter = "instructions: Costs a plan.\n\
+                    giap_role:\n  tool_groups: []\n  activations:\n    - agent: [planner]\n";
+    let validate = |app: axum::Router| async move {
+        let resp = app
+            .oneshot(post(
+                "/api/v1/recipes/validate",
+                serde_json::json!({"name": "budgeter", "yaml": budgeter}),
+            ))
+            .await
+            .unwrap();
+        body_json(resp).await
+    };
+    let before = validate(app.clone()).await;
+    assert_eq!(before["ok"], false);
+    assert_eq!(
+        before["errors"][0]["path"],
+        "giap_role.activations[0].agent[0]"
+    );
+
+    let resp = app
+        .clone()
+        .oneshot(post(
+            "/api/v1/recipes",
+            serde_json::json!({
+                "name": "planner",
+                "yaml": "instructions: Plans.\ngiap_role:\n  tool_groups: []\n",
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert!(
+        created["owner_profile_id"].is_null(),
+        "a recipe saved from no paired device has no owner"
+    );
+
+    let after = validate(app).await;
+    assert_eq!(after["ok"], true, "{after}");
+}
+
+#[tokio::test]
+async fn recipe_validate_refuses_a_body_without_yaml() {
+    let (app, _tmp) = make_app().await;
+    let resp = app
+        .oneshot(post(
+            "/api/v1/recipes/validate",
+            serde_json::json!({"name": "x"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 // ── Recipe run tests ──────────────────────────────────────────────────────────
 
 #[tokio::test]

@@ -1006,6 +1006,98 @@ pub fn validate_plan(
     })
 }
 
+/// A plan that keeps every step as it is and adds `draft` after them, for a step the runner adds
+/// itself (a hand-off). Open steps are carried over unchanged: a replan through
+/// [`validate_plan`] would turn a failed or skipped one back into Pending.
+pub fn validate_appended_step(
+    task: &LongTask,
+    draft: StepDraft,
+    existing: &[PlanStep],
+) -> Result<ValidatedPlan, PlanError> {
+    if task.state.is_terminal() {
+        return Err(PlanError::TaskFinished { state: task.state });
+    }
+    if let Some(stray) = existing.iter().find(|step| step.task_id != task.id) {
+        return Err(PlanError::StepsOfAnotherTask {
+            task: task.id.clone(),
+            other: stray.task_id.clone(),
+        });
+    }
+    let cap = task.budget.max_steps;
+    if existing.len() + 1 > cap as usize {
+        return Err(PlanError::TooManySteps {
+            requested: existing.len() + 1,
+            kept: existing.len(),
+            cap,
+        });
+    }
+    let key = StepKey::parse(&draft.key)?;
+    if existing.iter().any(|step| step.key == key) {
+        return Err(PlanError::DuplicateKey { key: key.into() });
+    }
+    let role = draft.role.trim();
+    if role.is_empty() {
+        return Err(PlanError::MissingRole { step: key.into() });
+    }
+    let instructions = draft.instructions.trim();
+    if instructions.is_empty() {
+        return Err(PlanError::MissingInstructions { step: key.into() });
+    }
+    let mut depends_on: Vec<StepKey> = Vec::with_capacity(draft.depends_on.len());
+    for raw in draft
+        .depends_on
+        .iter()
+        .map(|raw| raw.trim())
+        .filter(|raw| !raw.is_empty())
+    {
+        let Some(dep) = existing.iter().find(|step| step.key.as_str() == raw) else {
+            return Err(PlanError::UnknownDependency {
+                step: key.to_string(),
+                missing: raw.to_string(),
+            });
+        };
+        if !depends_on.contains(&dep.key) {
+            depends_on.push(dep.key.clone());
+        }
+    }
+
+    let mut ordered: Vec<&PlanStep> = existing.iter().collect();
+    ordered.sort_by_key(|step| step.ordinal);
+    let ordinal = ordered
+        .last()
+        .map_or(1, |step| step.ordinal.saturating_add(1));
+    let mut steps: Vec<PlanStep> = ordered
+        .iter()
+        .filter(|step| !step.state.survives_replan())
+        .map(|step| (*step).clone())
+        .collect();
+    steps.push(PlanStep {
+        task_id: task.id.clone(),
+        key,
+        ordinal,
+        role: role.to_string(),
+        instructions: instructions.to_string(),
+        inputs: clean_ids(draft.inputs),
+        depends_on,
+        acceptance: non_blank(draft.acceptance.as_deref()),
+        state: StepState::Pending,
+        attempts: 0,
+        summary: None,
+        failure: None,
+        started_at: None,
+        finished_at: None,
+    });
+    Ok(ValidatedPlan {
+        task_id: task.id.clone(),
+        steps,
+        kept: ordered
+            .iter()
+            .filter(|step| step.state.survives_replan())
+            .map(|step| step.key.clone())
+            .collect(),
+    })
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mark {
     Unvisited,
@@ -1218,6 +1310,70 @@ pub struct StepOutcome {
     summary: String,
     artifacts: Vec<String>,
     failure: Option<String>,
+    #[serde(skip_serializing_if = "HandBackAsks::is_empty")]
+    asks: HandBackAsks,
+}
+
+/// Cap on a hand-off's brief, which becomes the next step's instructions.
+pub const MAX_HAND_OFF_BRIEF_CHARS: usize = 1_200;
+
+/// What a hand-back asks the runner to do next. Asking grants nothing: the runner checks the
+/// agent's hooks and the target's activations before it acts on either.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct HandBackAsks {
+    /// An agent to run next, and what it should do.
+    pub hand_to: Option<HandToAsk>,
+    /// The goal of a long task to start, for an agent whose hooks allow `start_task`.
+    pub start_task: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HandToAsk {
+    pub agent: String,
+    pub brief: Option<String>,
+}
+
+impl HandBackAsks {
+    pub fn is_empty(&self) -> bool {
+        self.hand_to.is_none() && self.start_task.is_none()
+    }
+
+    fn from_object(object: &serde_json::Map<String, serde_json::Value>) -> Self {
+        let brief = first_present(object, &BRIEF_KEYS)
+            .map(value_text)
+            .and_then(|text| non_blank(Some(text.as_str())))
+            .map(|text| cap_text(&text, MAX_HAND_OFF_BRIEF_CHARS));
+        let hand_to = first_present(object, &HAND_TO_KEYS).and_then(|value| match value {
+            serde_json::Value::String(agent) => {
+                non_blank(Some(agent.as_str())).map(|agent| HandToAsk {
+                    agent,
+                    brief: brief.clone(),
+                })
+            }
+            serde_json::Value::Object(inner) => inner
+                .get("agent")
+                .or_else(|| inner.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|agent| non_blank(Some(agent)))
+                .map(|agent| HandToAsk {
+                    agent,
+                    brief: first_present(inner, &BRIEF_KEYS)
+                        .map(value_text)
+                        .and_then(|text| non_blank(Some(text.as_str())))
+                        .map(|text| cap_text(&text, MAX_HAND_OFF_BRIEF_CHARS))
+                        .or_else(|| brief.clone()),
+                }),
+            _ => None,
+        });
+        let start_task = first_present(object, &START_TASK_KEYS)
+            .and_then(serde_json::Value::as_str)
+            .and_then(|goal| non_blank(Some(goal)))
+            .map(|goal| cap_text(&goal, MAX_STEP_SUMMARY_CHARS));
+        Self {
+            hand_to,
+            start_task,
+        }
+    }
 }
 
 /// Names a small model invents for each field, first match wins. None of them widens anything:
@@ -1228,6 +1384,9 @@ const SUMMARY_KEYS: [&str; 6] = [
 ];
 const ARTIFACT_KEYS: [&str; 4] = ["artifacts", "artifact_ids", "artifact", "outputs"];
 const FAILURE_KEYS: [&str; 4] = ["failure", "error", "reason", "problem"];
+const HAND_TO_KEYS: [&str; 4] = ["hand_to", "handoff", "hand_off", "next_agent"];
+const BRIEF_KEYS: [&str; 3] = ["brief", "hand_to_brief", "handoff_brief"];
+const START_TASK_KEYS: [&str; 3] = ["start_task", "new_task", "follow_up_task"];
 
 impl StepOutcome {
     /// Summary and failure are capped at [`MAX_STEP_SUMMARY_CHARS`]; a Completed step keeps no
@@ -1246,7 +1405,13 @@ impl StepOutcome {
                 OutcomeKind::Completed => None,
                 OutcomeKind::Failed | OutcomeKind::NeedsApproval => capped(failure),
             },
+            asks: HandBackAsks::default(),
         }
+    }
+
+    pub fn with_asks(mut self, asks: HandBackAsks) -> Self {
+        self.asks = asks;
+        self
     }
 
     /// Read a helper's final message: bare JSON, fenced JSON, or JSON inside prose.
@@ -1274,7 +1439,8 @@ impl StepOutcome {
             .map(artifact_ids)
             .unwrap_or_default();
         let failure = first_present(object, &FAILURE_KEYS).map(value_text);
-        Ok(Self::new(outcome, &summary, artifacts, failure.as_deref()))
+        Ok(Self::new(outcome, &summary, artifacts, failure.as_deref())
+            .with_asks(HandBackAsks::from_object(object)))
     }
 
     pub fn outcome(&self) -> OutcomeKind {
@@ -1292,6 +1458,10 @@ impl StepOutcome {
 
     pub fn failure(&self) -> Option<&str> {
         self.failure.as_deref()
+    }
+
+    pub fn asks(&self) -> &HandBackAsks {
+        &self.asks
     }
 }
 

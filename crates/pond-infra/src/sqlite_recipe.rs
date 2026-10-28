@@ -25,6 +25,7 @@ fn row_to_recipe(row: &sqlx::sqlite::SqliteRow) -> Result<AgentRecipe> {
         yaml: row.try_get("yaml")?,
         active: row.try_get::<i64, _>("active")? != 0,
         created_at: row.try_get("created_at")?,
+        owner_profile_id: row.try_get("owner_profile_id")?,
     })
 }
 
@@ -32,7 +33,7 @@ fn row_to_recipe(row: &sqlx::sqlite::SqliteRow) -> Result<AgentRecipe> {
 impl AgentRecipeRepository for SqliteRecipeRepository {
     async fn list(&self) -> Result<Vec<AgentRecipe>> {
         let rows = sqlx::query(
-            "SELECT id, name, description, yaml, active, created_at \
+            "SELECT id, name, description, yaml, active, created_at, owner_profile_id \
              FROM agent_recipes ORDER BY name ASC",
         )
         .fetch_all(&self.pool)
@@ -43,7 +44,7 @@ impl AgentRecipeRepository for SqliteRecipeRepository {
 
     async fn get_by_name(&self, name: &str) -> Result<Option<AgentRecipe>> {
         let rows = sqlx::query(
-            "SELECT id, name, description, yaml, active, created_at \
+            "SELECT id, name, description, yaml, active, created_at, owner_profile_id \
              FROM agent_recipes WHERE name = ?",
         )
         .bind(name)
@@ -55,7 +56,7 @@ impl AgentRecipeRepository for SqliteRecipeRepository {
 
     async fn get_by_id(&self, id: &str) -> Result<Option<AgentRecipe>> {
         let rows = sqlx::query(
-            "SELECT id, name, description, yaml, active, created_at \
+            "SELECT id, name, description, yaml, active, created_at, owner_profile_id \
              FROM agent_recipes WHERE id = ?",
         )
         .bind(id)
@@ -68,14 +69,15 @@ impl AgentRecipeRepository for SqliteRecipeRepository {
     async fn upsert(&self, recipe: &AgentRecipe) -> Result<()> {
         sqlx::query(
             "INSERT OR REPLACE INTO agent_recipes \
-             (id, name, description, yaml, active, created_at) \
-             VALUES (?, ?, ?, ?, ?, datetime('now'))",
+             (id, name, description, yaml, active, created_at, owner_profile_id) \
+             VALUES (?, ?, ?, ?, ?, datetime('now'), ?)",
         )
         .bind(&recipe.id)
         .bind(&recipe.name)
         .bind(&recipe.description)
         .bind(&recipe.yaml)
         .bind(recipe.active as i64)
+        .bind(&recipe.owner_profile_id)
         .execute(&self.pool)
         .await?;
         Ok(())

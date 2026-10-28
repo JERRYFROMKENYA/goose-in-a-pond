@@ -14,6 +14,7 @@ use pond_core::shared::domain::long_task::{
 use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
+use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
 use pond_core::shared::services::long_task_runner::result_artifact;
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
@@ -466,17 +467,29 @@ impl TasksMcpServer {
         .map_err(|e| Refusal::Rejected(e.to_string()))?;
         deps.repo.create_task(&task).await.map_err(store)?;
         deps.wake_runner();
+        let open = deps
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, false)
+            .await
+            .map_err(store)?;
+        let place = place_of(&run_order(&open), task.id(), task.owner_profile_id());
         tracing::info!(
             target: "giap::trace",
             kind = "long_task_started",
             task_id = %task.id(),
             origin_session_id = %authority.session_id(),
             max_steps = task.budget().max_steps(),
+            position = place.as_ref().map(|p| p.position),
         );
+        let waiting = place
+            .as_ref()
+            .and_then(waiting_line)
+            .map(|line| format!(" {line}"))
+            .unwrap_or_default();
         Ok(format!(
             "Started task {}. The pond works on it while the household is quiet and tells the \
              person on their phone when it is done. Tell the person it has started; task_status \
-             with this id says how far it has got.",
+             with this id says how far it has got.{waiting}",
             task.id()
         ))
     }

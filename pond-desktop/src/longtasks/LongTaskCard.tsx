@@ -3,11 +3,12 @@ import { AlertCircle, AlertTriangle, Check, CircleSlash, Clock, Loader2, Pause, 
 import "./longTasks.css";
 import type { LongTask, LongTaskState } from "../api/types";
 import { useConfirm } from "../components/shared";
-import { isEnded, isResearch, resultLine, resultOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
+import { isEnded, isOwnAhead, isResearch, isWaiting, resultLine, resultOf, stepAgent, stepWords, taskKindLabel, taskWords } from "./longTaskWords";
 import type { LongTasksState } from "./useLongTasks";
 import { useLongTaskReport } from "./useLongTaskReport";
 import { ReportExport } from "./ReportExport";
 import { ReportSheet } from "./ReportSheet";
+import { LongTaskQueue } from "./LongTaskQueue";
 
 function StateIcon({ state }: { state: LongTaskState }) {
   const props = { size: 14, "aria-hidden": true as const };
@@ -73,6 +74,8 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
   const [sheetOpen, setSheetOpen] = useState(false);
 
   const ended = isEnded(task.state);
+  // The line's own choice covers this task, so the card does not offer a second Stop beside it.
+  const choosingInLine = isWaiting(task) && (task.queue?.ahead ?? []).some(isOwnAhead);
   const stopping = longTasks.stopping[id] === true;
   const stopError = longTasks.stopErrors[id];
   const result = task.state === "completed" ? resultOf(task) : null;
@@ -119,6 +122,7 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
       <p className="lt__state" aria-live="polite">
         {taskWords(task)}
       </p>
+      <LongTaskQueue task={task} longTasks={longTasks} />
 
       {task.steps.length > 0 ? (
         <ol className="lt__steps">
@@ -155,7 +159,7 @@ function LongTaskBody({ task, longTasks, variant }: { task: LongTask; longTasks:
             <ReportExport task={task} handle={report} variant={variant} placement="inline" />
           </>
         ) : null}
-        {!ended ? (
+        {!ended && !choosingInLine ? (
           <button
             type="button"
             className="ink-btn ink-btn--quiet lt__btn"

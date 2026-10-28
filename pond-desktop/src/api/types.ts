@@ -1017,6 +1017,18 @@ export interface LongTask {
   steps: LongTaskStep[];
   artifacts: LongTaskArtifact[];
   result_artifact_id: string | null;
+  /** Where an open task waits; `null` once it has ended, and absent from an older pond. */
+  queue?: LongTaskQueuePlace | null;
+}
+
+/** A task ahead in the line: one of the caller's own or the household's, or only a place another member holds. */
+export type LongTaskAhead = { id: string; goal: string; state: LongTaskState } | { another_member: true };
+
+/** One slot works the household's long tasks in the order they were asked for; 1 is the one under way. */
+export interface LongTaskQueuePlace {
+  position: number;
+  of: number;
+  ahead: LongTaskAhead[];
 }
 
 /** One web page a report cites. */

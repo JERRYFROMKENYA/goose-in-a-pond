@@ -1465,6 +1465,20 @@ instead of waiting for the prime to decide a question needs a long task.
 | Names | The shipped helpers are shown as Point Gander (planner), Forager Gosling (worker), Sentinel Goose (verifier) and Nestmaker Goose (composer), and each recipe tells its helper its own name, so the planner sees the others' too. Their ids (`long-task-planner` and so on) are unchanged, since plans, snapshots and the prefill registry route by them. The main assistant keeps the name the household gives it. |
 | Pictures | None are generated: the Orin runs no image model. A report's pictures are links, and the export never loads them. |
 
+### 8.9 The line (Jerry, 2026-10-29)
+
+One slot works every open task, so a task asked for while others are open waits. A member was left
+looking at a card that said "Planning" for an hour and asked twice more. Now the pond says where each
+task waits and lets the member choose what keeps going.
+
+| Piece | Design |
+|---|---|
+| Order | `long_task_queue::run_order`: open tasks in the order they were asked for, and the runner finishes the front one before it starts the next. The runner, the routes and the prime all read it, so none of them can disagree. It replaced a pick by `updated_at`, meant to let tasks take turns. It did not: a step never touches `updated_at`, so the oldest task always won. |
+| Who sees what | A member sees the goal and progress of their own tasks and the household's. Another member's task is only a place in the line (`another_member`), never its goal. |
+| Routes | Every task's view carries `queue: {position, of, ahead}`, `null` once it has ended. `GET /long-tasks/queue` gives the whole line as the caller may see it. Stopping is `POST /long-tasks/{id}/cancel`, as before. |
+| The prime | A deep-research turn and `task_start`'s result say where the new task waits and whose tasks are ahead, so the reply tells the person it waits its turn and that its card lets them stop what they no longer need. |
+| The card | A waiting task says "Waiting its turn: 3rd in line" rather than "Planning". Below that are the member's own tasks ahead and this one, each with Keep going or Stop, and one button to stop the ones picked. |
+
 ---
 
 ## 9. Agents are recipes (designed 2026-10-28; P14-P18)

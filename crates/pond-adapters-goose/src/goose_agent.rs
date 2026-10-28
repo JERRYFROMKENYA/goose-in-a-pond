@@ -3069,7 +3069,8 @@ impl GooseAdapter {
         };
 
         // Same subtraction for the entitlement: the delegation authority is built from it.
-        let entitled_tools = entitled_tools.map(|tools| {
+        // Named, not inferred from later use: on macOS that inference overflows through objc2's impls.
+        let entitled_tools: Option<HashSet<String>> = entitled_tools.map(|tools| {
             if turn_scope.excludes_everything() {
                 pond_core::mcp::services::tool_selection::subtract_guest_denied_tools(tools.iter())
                     .into_iter()
@@ -3086,7 +3087,7 @@ impl GooseAdapter {
             )
             .into_iter()
             .collect();
-        let entitled_tools = entitled_tools.map(|tools| {
+        let entitled_tools: Option<HashSet<String>> = entitled_tools.map(|tools| {
             pond_core::mcp::services::tool_selection::subtract_helper_only_tools(tools.iter())
                 .into_iter()
                 .collect()
@@ -3196,9 +3197,9 @@ impl GooseAdapter {
                 msg.push_str(&sc.render_envelope());
                 msg.push('\n');
             }
-            if let Some(ref task_id) = request.deep_research_task {
+            if let Some(ref research) = request.deep_research_task {
                 msg.push_str(&pond_core::shared::services::deep_research::turn_note(
-                    task_id,
+                    research,
                 ));
                 msg.push('\n');
             }

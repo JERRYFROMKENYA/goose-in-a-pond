@@ -499,8 +499,8 @@ pub struct ChildPlan {
     /// Which model this child runs on, already decided. [`ChildModel::assigned`] is the only
     /// predicate the runner may use.
     pub model: ChildModel,
-    /// A prefill compile run ([`TaskSpec::compiles_prefill`]).
-    pub compile_prefill: bool,
+    /// The shape a prefill compile run names ([`TaskSpec::compile_shape`]).
+    pub compile_shape: Option<String>,
     /// [`TaskSpec::prefill_retention`].
     pub prefill_retention: Option<std::time::Duration>,
 }
@@ -748,7 +748,7 @@ pub fn build_child_plan(
         max_turns: spec.max_turns(),
         // Decided here, the only place with both the role's request and the parent's provider.
         model: ChildModel::resolve(spec.requested_model(), &env.provider_name),
-        compile_prefill: spec.compiles_prefill(),
+        compile_shape: spec.compile_shape().map(str::to_string),
         prefill_retention: spec.prefill_retention(),
     })
 }
@@ -929,15 +929,16 @@ async fn drive_run(
     let _bound = pond_core::shared::services::child_sessions::process_child_sessions()
         .bind(&plan_child_session_id, &parent_session_id);
     // A child's engine calls take the model's one context rather than a second beside the parent's.
-    let (compile, retention) = (plan.compile_prefill, plan.prefill_retention);
+    let (compile, retention) = (plan.compile_shape.clone(), plan.prefill_retention);
     let outcome = goose_providers::request_context::as_helper(prime_waiting, async {
         use goose_providers::request_context::{compiling_prefill, compiling_prefill_retaining};
         match (compile, retention) {
-            (true, Some(retention)) => {
-                compiling_prefill_retaining(retention, runner.run(plan, cancel.clone())).await
+            (Some(shape), Some(retention)) => {
+                compiling_prefill_retaining(shape, retention, runner.run(plan, cancel.clone()))
+                    .await
             }
-            (true, None) => compiling_prefill(runner.run(plan, cancel.clone())).await,
-            (false, _) => runner.run(plan, cancel.clone()).await,
+            (Some(shape), None) => compiling_prefill(shape, runner.run(plan, cancel.clone())).await,
+            (None, _) => runner.run(plan, cancel.clone()).await,
         }
     })
     .await;

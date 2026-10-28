@@ -3893,6 +3893,10 @@ async fn run_server(
                 profiles: profile_repo.clone(),
                 settings: settings_repo.clone(),
             });
+            let prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry> =
+                Arc::new(pond_infra::sqlite_agent_prefill::SqliteAgentPrefillRegistry::new(
+                    db.system.clone(),
+                ));
             tokio::spawn(run_long_task_runner(
                 settings_repo.clone(),
                 session_storage.clone(),
@@ -3903,6 +3907,7 @@ async fn run_server(
                 recipe_repo.clone(),
                 targeted_notification_sender.clone(),
                 before_hooks,
+                prefills,
             ));
         }
     }
@@ -7057,6 +7062,7 @@ async fn run_long_task_runner(
     recipes: Arc<dyn pond_core::user_data::ports::recipe::AgentRecipeRepository + Send + Sync>,
     sender: Arc<pond_infra::broadcast_notification_sender::BroadcastNotificationSender>,
     before_hooks: Arc<pond_server::agent_activations::BeforeHookSources>,
+    prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry>,
 ) {
     use pond_core::shared::domain::long_task::{LongTaskState, StepState};
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
@@ -7159,7 +7165,35 @@ async fn run_long_task_runner(
             last_user_activity: last_user_activity.clone(),
         };
         if compile_due {
-            compile_role_prefills(&helpers, &every_role).await;
+            use pond_core::shared::services::agent_prefill;
+            let retention = settings.agent_prefill_retention_days;
+            let to_compile: Vec<pond_core::shared::domain::orchestration::AgentRole> =
+                match prefills.get_all().await {
+                    Ok(records) => {
+                        let plan =
+                            agent_prefill::plan_prefills(&every_role, &records, now, retention);
+                        for (agent, reason) in &plan.skipped {
+                            tracing::info!(
+                                target: "giap::trace",
+                                kind = "role_prefill_skipped",
+                                agent = %agent,
+                                reason = %reason,
+                                "an idle agent's prefill was not compiled"
+                            );
+                        }
+                        for agent in &plan.forget {
+                            let _ = prefills.forget(agent).await;
+                        }
+                        plan.compile.into_iter().cloned().collect()
+                    }
+                    // Unreadable: compile them all, since a warm first run beats a cold one.
+                    Err(e) => {
+                        tracing::warn!(error = %e, "long-task runner: the prefill registry could not be read");
+                        every_role.clone()
+                    }
+                };
+            let retention = std::time::Duration::from_secs(u64::from(retention.max(1)) * 86_400);
+            compile_role_prefills(&helpers, &to_compile, prefills.as_ref(), retention).await;
             compiled = Some(roles_print);
             drop(slot);
             continue;
@@ -7177,6 +7211,7 @@ async fn run_long_task_runner(
             &mut fruitless,
             sender.as_ref(),
             before_hooks.as_ref(),
+            prefills.as_ref(),
         )
         .await
         {
@@ -7282,6 +7317,7 @@ impl LongTaskHelpers {
         &self,
         role: &pond_core::shared::domain::orchestration::AgentRole,
         brief: &str,
+        retention: std::time::Duration,
     ) -> anyhow::Result<()> {
         use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
         use pond_core::shared::services::long_task_runner as runner;
@@ -7307,7 +7343,8 @@ impl LongTaskHelpers {
                 },
             )
             .map_err(|e| anyhow::anyhow!("the compile run was refused: {e:?}"))?
-            .compiling_prefill();
+            .compiling_prefill(format!("role:{}", role.name()))
+            .retaining_helpers_for(retention);
         let cancel = tokio_util::sync::CancellationToken::new();
         let _lease = self.authorities.publish(&session_id, authority, cancel);
         self.orchestrator.spawn(spec).await?;
@@ -7320,13 +7357,27 @@ impl LongTaskHelpers {
 async fn compile_role_prefills(
     helpers: &LongTaskHelpers,
     roles: &[pond_core::shared::domain::orchestration::AgentRole],
+    prefills: &dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry,
+    retention: std::time::Duration,
 ) {
     let started = std::time::Instant::now();
     for role in roles {
+        let mut ok = true;
         for brief in ["Alpha. Compile check.", "Begin. Compile check."] {
-            if let Err(e) = helpers.compile(role, brief).await {
+            if let Err(e) = helpers.compile(role, brief, retention).await {
                 tracing::warn!(role = %role.name(), error = %e, "a role's prefill compile failed");
+                ok = false;
                 break;
+            }
+        }
+        // Recorded only when both calls ran, so a failed compile is tried again next pass.
+        if ok {
+            let hash = pond_core::shared::services::agent_prefill::definition_hash(role);
+            if let Err(e) = prefills
+                .note_compiled(role.name(), &hash, chrono::Utc::now())
+                .await
+            {
+                tracing::debug!(role = %role.name(), error = %e, "the prefill registry did not record a compile");
             }
         }
     }
@@ -7363,6 +7414,7 @@ async fn advance_long_task(
     fruitless: &mut std::collections::HashMap<String, u32>,
     sender: &pond_infra::broadcast_notification_sender::BroadcastNotificationSender,
     before_hooks: &pond_server::agent_activations::BeforeHookSources,
+    prefills: &dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry,
 ) -> anyhow::Result<()> {
     use pond_core::shared::domain::long_task::{LongTaskState, OutcomeKind, StepState};
     use pond_core::shared::services::agent_activations as activations;
@@ -7452,6 +7504,8 @@ async fn advance_long_task(
             }
             step.start(now)?;
             tasks.update_step(&step).await?;
+            // A role's use keeps its prefill inside the retention.
+            let _ = prefills.note_used(role.name(), now).await;
             let key = step.key().clone();
             let mut brief = runner::worker_brief(task, &step, &artifacts, now);
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);

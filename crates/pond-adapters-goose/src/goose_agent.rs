@@ -4113,7 +4113,12 @@ impl AgentPort for GooseAdapter {
                 .into_iter()
                 .enumerate()
             {
-                goose_providers::request_context::compiling_prefill(async {
+                let shape = if voice_mode {
+                    "prime-voice"
+                } else {
+                    "prime-typed"
+                };
+                goose_providers::request_context::compiling_prefill(shape, async {
                     let mut stream = self.chat_stream(warm_up(turn, message)).await?;
                     while let Some(event) = stream.next().await {
                         // Only the prefill matters; the reply is discarded.

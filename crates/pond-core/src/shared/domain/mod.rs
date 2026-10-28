@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_prefill;
 pub mod long_task;
 pub mod orchestration;
 pub mod role_block;

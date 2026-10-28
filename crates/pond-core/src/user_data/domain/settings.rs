@@ -771,6 +771,11 @@ pub struct Settings {
     #[serde(default = "Settings::default_agent_activations_enabled")]
     pub agent_activations_enabled: bool,
 
+    /// Days an agent may go unused before the start-up pass stops compiling its prefill; at least
+    /// one. The shipped planner, worker and verifier are compiled whatever this says.
+    #[serde(default = "Settings::default_agent_prefill_retention_days")]
+    pub agent_prefill_retention_days: u32,
+
     /// May sensor and camera events become per-member context items the model is shown?
     /// Off stops ingest only; items already ingested stay recallable.
     #[serde(default = "Settings::default_context_ingest_enabled")]
@@ -946,6 +951,7 @@ impl Default for Settings {
             proactive_review_enabled: false,
             long_tasks_enabled: Self::default_long_tasks_enabled(),
             agent_activations_enabled: Self::default_agent_activations_enabled(),
+            agent_prefill_retention_days: Self::default_agent_prefill_retention_days(),
             context_ingest_enabled: false,
             ext_context_enabled: false,
             spoken_pairing_codes: Self::default_spoken_pairing_codes(),
@@ -1387,6 +1393,10 @@ impl Settings {
 
     fn default_agent_activations_enabled() -> bool {
         true
+    }
+
+    fn default_agent_prefill_retention_days() -> u32 {
+        crate::shared::services::agent_prefill::DEFAULT_AGENT_PREFILL_RETENTION_DAYS
     }
 
     fn default_context_ingest_enabled() -> bool {
@@ -2049,6 +2059,8 @@ mod tests {
             "long_tasks_enabled",
             // UI comes with the agent builder; until then a switch would control nothing visible.
             "agent_activations_enabled",
+            // UI comes with the builder's prefill line.
+            "agent_prefill_retention_days",
             // Engine state, not preferences: the rollout lever and a self-stamped epoch.
             "memory_extraction_mode",
             "memory_extraction_first_pass_at",

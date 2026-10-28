@@ -643,7 +643,7 @@ impl DelegationAuthority {
             model: role.model.clone(),
             // From the request: it describes this delegation, not the persona.
             background: request.background,
-            compile_prefill: false,
+            compile_shape: None,
             prefill_retention: None,
             persona: role.instructions.clone(),
         })
@@ -726,8 +726,9 @@ pub struct TaskSpec {
     model: Option<String>,
     /// From the request; the adapter refuses it on an on-device provider.
     background: bool,
-    /// A prefill compile run, set only by the pond's own compile pass; it widens nothing.
-    compile_prefill: bool,
+    /// The shape a prefill compile run names, set only by the pond's own compile pass; it widens
+    /// nothing.
+    compile_shape: Option<String>,
     /// Helper snapshots unused for longer are discarded by that compile.
     prefill_retention: Option<std::time::Duration>,
     /// The role's own instructions, examples included: the child's persona in its preamble.
@@ -789,13 +790,13 @@ impl TaskSpec {
 
     /// Marks the run as a prefill compile: the engine checks and rebuilds the role's snapshot and
     /// the child generates one token. Only the pond's compile pass calls this.
-    pub fn compiling_prefill(mut self) -> Self {
-        self.compile_prefill = true;
+    pub fn compiling_prefill(mut self, shape: impl Into<String>) -> Self {
+        self.compile_shape = Some(shape.into());
         self
     }
 
-    pub fn compiles_prefill(&self) -> bool {
-        self.compile_prefill
+    pub fn compile_shape(&self) -> Option<&str> {
+        self.compile_shape.as_deref()
     }
 
     /// The compile also discards helper snapshots no role has used for `retention`.

@@ -290,7 +290,9 @@ giap_role:
 
     const activation = screen.getByRole("group", { name: /^Activation 2:/ });
     expect(within(activation).getByText(/did you mean `presence.arrive`/)).toBeTruthy();
-    expect(within(screen.getByRole("group", { name: /^Activation 1:/ }) as HTMLElement).queryByText(/did you mean/)).toBeNull();
+    // Activation 1 is `delegated`, a toggle with no group of its own: the message is shown once,
+    // by the activation it is about, and nowhere else.
+    expect(screen.getAllByText(/did you mean `presence.arrive`/)).toHaveLength(1);
 
     const instructions = screen.getByLabelText("Instructions");
     expect(instructions.getAttribute("aria-invalid")).toBe("true");

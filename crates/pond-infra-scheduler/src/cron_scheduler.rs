@@ -296,6 +296,100 @@ impl CronSchedulerAdapter {
         true
     }
 
+    /// Run `id` now, in the background; `caught_up_from` marks a missed run made late.
+    async fn start_run(
+        &self,
+        id: &str,
+        caught_up_from: Option<chrono::DateTime<Utc>>,
+    ) -> Result<()> {
+        use pond_core::user_data::domain::schedule::ScheduleResultEvent;
+
+        let (kind, label) = {
+            let guard = self.tasks.lock().await;
+            let entry = guard
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
+            (Self::resolve_kind(entry), entry.persisted.label.clone())
+        };
+
+        let executor = self.executor.clone();
+        let tasks = self.tasks.clone();
+        let run_history = self.run_history.clone();
+        let result_tx = self.result_tx.clone();
+        let persist = self.persist.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            {
+                let mut guard = tasks.lock().await;
+                if let Some(entry) = guard.get_mut(&id) {
+                    entry.currently_running = true;
+                }
+            }
+            // Rules fire via `run_now`; their cooldown reads this stamp back after a restart.
+            CronSchedulerAdapter::stamp_fire(&tasks, &persist, &id).await;
+
+            let run_id = match caught_up_from {
+                Some(due_at) => run_history.record_late_start(&id, due_at).await,
+                None => run_history.record_start(&id).await,
+            };
+            let start = std::time::Instant::now();
+
+            // Broadcast "started" event so clients see progress immediately
+            if let Some(tx) = &result_tx {
+                let _ = tx.send(ScheduleResultEvent {
+                    schedule_id: id.clone(),
+                    schedule_label: label.clone(),
+                    run_id: run_id.clone(),
+                    status: RunStatus::Running,
+                    result: None,
+                    error: None,
+                    duration_ms: None,
+                });
+            }
+
+            let result = executor.execute(&id, &kind).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            let (status, result_text, error_text) = match &result {
+                Ok(text) => {
+                    run_history
+                        .record_finish(&run_id, RunStatus::Completed, Some(text.clone()), None)
+                        .await;
+                    (RunStatus::Completed, Some(text.clone()), None)
+                }
+                Err(e) => {
+                    tracing::error!("run_now task {id} failed: {e}");
+                    run_history
+                        .record_finish(&run_id, RunStatus::Failed, None, Some(e.to_string()))
+                        .await;
+                    (RunStatus::Failed, None, Some(e.to_string()))
+                }
+            };
+
+            if let Some(tx) = &result_tx {
+                let _ = tx.send(ScheduleResultEvent {
+                    schedule_id: id.clone(),
+                    schedule_label: label,
+                    run_id: run_id.clone(),
+                    status,
+                    result: result_text,
+                    error: error_text,
+                    duration_ms: Some(duration_ms),
+                });
+            }
+
+            // Mark not-running. `last_run` was stamped at fire time above.
+            {
+                let mut guard = tasks.lock().await;
+                if let Some(entry) = guard.get_mut(&id) {
+                    entry.currently_running = false;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
     // ── Internal job management ───────────────────────────────────────────────
 
     /// Registers a recurring task: a one-shot at its next local occurrence, re-armed each fire.
@@ -937,89 +1031,7 @@ impl SchedulerPort for CronSchedulerAdapter {
     }
 
     async fn run_now(&self, id: &str) -> Result<()> {
-        use pond_core::user_data::domain::schedule::ScheduleResultEvent;
-
-        let (kind, label) = {
-            let guard = self.tasks.lock().await;
-            let entry = guard
-                .get(id)
-                .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
-            (Self::resolve_kind(entry), entry.persisted.label.clone())
-        };
-
-        let executor = self.executor.clone();
-        let tasks = self.tasks.clone();
-        let run_history = self.run_history.clone();
-        let result_tx = self.result_tx.clone();
-        let persist = self.persist.clone();
-        let id = id.to_string();
-        tokio::spawn(async move {
-            {
-                let mut guard = tasks.lock().await;
-                if let Some(entry) = guard.get_mut(&id) {
-                    entry.currently_running = true;
-                }
-            }
-            // Rules fire via `run_now`; their cooldown reads this stamp back after a restart.
-            CronSchedulerAdapter::stamp_fire(&tasks, &persist, &id).await;
-
-            let run_id = run_history.record_start(&id).await;
-            let start = std::time::Instant::now();
-
-            // Broadcast "started" event so clients see progress immediately
-            if let Some(tx) = &result_tx {
-                let _ = tx.send(ScheduleResultEvent {
-                    schedule_id: id.clone(),
-                    schedule_label: label.clone(),
-                    run_id: run_id.clone(),
-                    status: RunStatus::Running,
-                    result: None,
-                    error: None,
-                    duration_ms: None,
-                });
-            }
-
-            let result = executor.execute(&id, &kind).await;
-            let duration_ms = start.elapsed().as_millis() as u64;
-
-            let (status, result_text, error_text) = match &result {
-                Ok(text) => {
-                    run_history
-                        .record_finish(&run_id, RunStatus::Completed, Some(text.clone()), None)
-                        .await;
-                    (RunStatus::Completed, Some(text.clone()), None)
-                }
-                Err(e) => {
-                    tracing::error!("run_now task {id} failed: {e}");
-                    run_history
-                        .record_finish(&run_id, RunStatus::Failed, None, Some(e.to_string()))
-                        .await;
-                    (RunStatus::Failed, None, Some(e.to_string()))
-                }
-            };
-
-            if let Some(tx) = &result_tx {
-                let _ = tx.send(ScheduleResultEvent {
-                    schedule_id: id.clone(),
-                    schedule_label: label,
-                    run_id: run_id.clone(),
-                    status,
-                    result: result_text,
-                    error: error_text,
-                    duration_ms: Some(duration_ms),
-                });
-            }
-
-            // Mark not-running. `last_run` was stamped at fire time above.
-            {
-                let mut guard = tasks.lock().await;
-                if let Some(entry) = guard.get_mut(&id) {
-                    entry.currently_running = false;
-                }
-            }
-        });
-
-        Ok(())
+        self.start_run(id, None).await
     }
 
     async fn update_task(&self, id: &str, req: UpdateScheduleRequest) -> Result<Schedule> {

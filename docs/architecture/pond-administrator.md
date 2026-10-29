@@ -37,8 +37,8 @@ None of these says "this person may administer the pond".
 - `nvpmodel` modes from `/etc/nvpmodel.conf`: 0 = 15W, 1 = 25W (the default), 2 = MAXN_SUPER,
   3 = 7W. Setting one needs root. Supply power comes from the INA3221 (`VDD_IN`). There is no
   battery.
-- The service is a user unit of `nano`; audio goes through that user's PulseAudio session, which a
-  system account does not have. That is why the nano's move waits.
+- The service is a user unit of `nano`; audio goes through that user's PulseAudio session. A system
+  account gets a session of its own from a lingering user manager ([the service account](#the-service-account)).
 
 ## The admin card
 
@@ -123,11 +123,59 @@ are RFC 3339.
   `nvpmodel -m [0-9]` and `systemctl reboot`, installed only after `visudo -c` passes it. A mode
   change reports `reboot_required` when `nvpmodel` asks for one; the phone then offers a restart.
 
+## The service account
+
+`scripts/install.sh` offers it on a new pond (default yes); `bash scripts/giap.sh service-account`
+moves an existing one, and `service-account undo` moves it back. Both live in
+`scripts/lib/install-systemd.sh` (`agamemnon_*`), tested by `install-systemd.test.sh`.
+
+| Piece | Decision |
+|---|---|
+| Account | `useradd --system --user-group`, locked, shell `/usr/sbin/nologin`, home `/var/lib/goose-in-a-pond`, in whichever of `video`, `render`, `audio`, `i2c` and `gpio` the host has |
+| Sound | `loginctl enable-linger agamemnon`: its user manager starts at boot and runs the board's own per-user sound server for it, as it would for any login (PulseAudio on JetPack 6; a PipeWire board should behave the same, untested). The unit sets `XDG_RUNTIME_DIR=/run/user/<uid>` and starts after `user@<uid>.service`, so ALSA's `default` device and `pactl` reach it. Chosen over PulseAudio's system mode, which replaces every login's audio on the board, and over sharing a login's socket through `PULSE_SERVER`, which ties the service to a login that may log out |
+| Binary | stays in the login's checkout, which `giap.sh update` rebuilds. An ACL (`u:agamemnon:--x`) lets it traverse the login's `0750` home without listing it; the unit names the checkout and the login's LiteRT and Node records (`GIAP_ASSET_ROOT`, `GIAP_LITERT_HOME`, `GIAP_NODE_HOME`) |
+| Data | moved to `/var/lib/goose-in-a-pond` (`0750`, `agamemnon`), with a link at the old path for the tools that look there. The login keeps read access through an ACL, inherited by new files. `setfacl -n` keeps each file's own mask, so what the pond creates with a private mode stays private (`setup/`, `secrets/`, `tls/`, `.runtime_host_credential`); a file it creates under the default umask is readable by the login, as it was when the login owned it |
+| Unit | a system unit, `User=agamemnon`, `POND_DATA_DIR=/var/lib/goose-in-a-pond` |
+| Power and Wi-Fi | the power drop-in and the Wi-Fi polkit grant name `agamemnon`; `connect_pond_user` reads it from the unit's `User=` |
+| Undo | the move keeps the old scope, user, data directory and unit file in `/var/lib/goose-in-a-pond-admin/before-agamemnon/`; undo restores them byte for byte. The account itself stays, locked and owning nothing |
+| Existing ponds | untouched: `giap.sh install` passes `--no-service` when a unit exists, and the installer leaves a unit run by another account alone |
+| Re-running the installer | refused on a pond run by `agamemnon`, because its steps write the data directory as the login. `giap.sh update` updates such a pond |
+
+`giap.sh doctor` names the account that runs the service, and warns when `agamemnon`'s user manager
+does not linger (no sound server, so voice falls back to raw ALSA) or it has a shell. Its admin
+card and setup code lines ask as `agamemnon` with `sudo -n`, and say so instead of prompting.
+
+**Proved on 2026-10-29** in containers on the nano, which left the board itself unchanged:
+
+- **Under systemd** (Ubuntu 22.04, with a stand-in server and a null sink): the installer's
+  service step made the account and moved the data. The service then played and heard a tone
+  through ALSA's `default` device, as `agamemnon`, on its own PulseAudio. `service-account undo`
+  and `service-account` round-tripped a classic system unit and a user unit like the nano's; the
+  user unit came back byte for byte.
+- **On the board's own hardware** (the nano's `pond-server` and its USB speaker and mic, with the
+  nano's pond stopped for 10 minutes):
+  - The installer's service step started the real server as `agamemnon`. Its startup sound test
+    heard the USB pair together at -47 dBFS, and it made that card the default in `agamemnon`'s
+    PulseAudio.
+  - Then a live voice turn ran as `agamemnon`: a spoken request played through the speaker,
+    Whisper on CUDA transcribed it exactly ("What is the capital of Kenya?"), and Kokoro spoke the
+    reply; the turn completed 4.7 s after the transcript. The reply text came from the `mock` provider,
+    because a fresh pond has no conversation model registered.
+  - The host credential stayed `0600` with an empty ACL mask.
+  - Not verified there: the vision models on the GPU, because the container lacked the host's CUDA
+    libraries.
+
 ## Not in this change
 
-- **The `agamemnon` account and moving the service to it.** A pond run by a system account has no
-  voice until audio stops depending on a login's PulseAudio session, and the install path needs a
-  fresh install to prove it. Until then the card's administrator is named `agamemnon` in the audit
-  trail and the card text, and the power drop-in names whichever account runs the service.
+- **The nano's move.** It waits for Jerry.
+- **A desktop shell on the same board** (the app, or `scripts/jetson/kiosk.sh`). It runs as the
+  login: it starts the voice loop (`pond-server chat --voice`), which opens the data directory
+  itself, and it signs in to the dashboard with the host credential. After a move it can do
+  neither, and `giap.sh service-account` warns when the kiosk unit is installed. The next step is
+  for the shell to start its voice child as `agamemnon`, through a sudoers rule for exactly that
+  command or a voice unit. A phone's voice goes through the server and works.
+- **The dev tools that assume a user unit**: `scripts/jetson.sh deploy` and `jetson-remote.sh`,
+  `console-collect.sh`, the ONNX Runtime build's stop and start, the bake-off scripts and
+  `kiosk.sh`. `giap.sh` itself (install, build, update, service menu) follows the unit's scope.
 - **The desktop app.** My Pond is on the phone only; the desktop already reaches the host through
   the host credential.

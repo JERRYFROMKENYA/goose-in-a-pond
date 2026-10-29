@@ -4025,3 +4025,17 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **Invariants.** No preamble or prompt change, no egress, no LLM call on the path.
 - **Not verified on the Orin yet.** The TPM seal and the `nvpmodel` switch need the board and
   Jerry's sudo password; the deploy waits for his go-ahead.
+
+**2026-10-29 — PAI-2: the pond's own account, `agamemnon` ([pond administrator](../pond-administrator.md#the-service-account)).**
+
+- **What landed.** `install.sh` offers a new pond its own locked system account; `giap.sh
+  service-account [undo|status]` moves an existing one and back. The service runs as `agamemnon`
+  from `/var/lib/goose-in-a-pond`, with its own PulseAudio from a lingering user manager.
+- **PAI-2.** The data directory is `0750` and other local users lose the group read they had
+  through the login's home. The login keeps read access through an ACL that leaves every file's own
+  mask alone, so `setup/`, `secrets/`, `tls/` and the host credential stay the service account's.
+  Nothing new leaves the device; the scripts change only who owns the data.
+- **Invariants.** No server code, preamble, prompt or setting changed.
+- **On hardware.** In containers on the nano: the installer's step ran the real `pond-server` as
+  `agamemnon`, and a live voice turn ran with Whisper on CUDA and the USB pair. The nano itself
+  was not moved. A desktop shell's voice loop, which runs as the login, is the next step.

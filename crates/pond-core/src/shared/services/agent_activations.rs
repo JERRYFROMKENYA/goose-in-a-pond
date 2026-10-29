@@ -1105,6 +1105,7 @@ pub fn plan_hand_off(
         inputs,
         depends_on: vec![source.key().to_string()],
         acceptance: None,
+        new_agent: None,
     };
     validate_appended_step(task, draft, steps).map_err(HandOffRefused::from)
 }

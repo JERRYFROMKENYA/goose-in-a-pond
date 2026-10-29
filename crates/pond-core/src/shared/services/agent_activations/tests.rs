@@ -103,6 +103,7 @@ fn step(key: &str, role: &str, ordinal: u32, deps: &[&str], state: StepState) ->
         failure: (state == StepState::Failed).then(|| "it broke".to_string()),
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap()
 }

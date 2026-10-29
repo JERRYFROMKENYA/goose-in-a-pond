@@ -540,6 +540,7 @@ mod tests {
             failure: None,
             started_at: None,
             finished_at: None,
+            agent: None,
         })
         .unwrap()
     }

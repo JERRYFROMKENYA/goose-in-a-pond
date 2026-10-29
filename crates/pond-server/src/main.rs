@@ -7615,7 +7615,22 @@ async fn advance_long_task(
         }
         NextRun::Plan(reason) => {
             let plannable = activations::plannable_roles(offered);
-            let brief = runner::planner_brief(task, &steps, &artifacts, &plannable, &reason, now);
+            let context = match runner::brief_artifact(&artifacts) {
+                Some(found) => tasks
+                    .get_artifact(task.id(), &found.id)
+                    .await?
+                    .map(|artifact| artifact.body().to_string()),
+                None => None,
+            };
+            let brief = runner::planner_brief(
+                task,
+                &steps,
+                &artifacts,
+                &plannable,
+                &reason,
+                context.as_deref(),
+                now,
+            );
             let end = helpers
                 .run(task, planner, StepWork::Plan, brief, false)
                 .await?;
@@ -7641,7 +7656,21 @@ async fn advance_long_task(
         }
         NextRun::Do(step) => {
             let mut step = step.clone();
-            let Some(role) = offered.iter().find(|r| r.name() == step.role()) else {
+            // A step names a saved role, or carries an agent its plan made when none fit.
+            let made = match (
+                offered.iter().any(|r| r.name() == step.role()),
+                step.agent(),
+            ) {
+                (false, Some(agent)) => offered
+                    .iter()
+                    .find(|r| r.name() == pond_core::shared::services::long_task_roles::WORKER_ROLE)
+                    .and_then(|worker| runner::role_for_agent(&step, agent, worker).ok()),
+                _ => None,
+            };
+            let Some(role) = made
+                .as_ref()
+                .or_else(|| offered.iter().find(|r| r.name() == step.role()))
+            else {
                 step.start(now)?;
                 tasks.update_step(&step).await?;
                 step.fail(

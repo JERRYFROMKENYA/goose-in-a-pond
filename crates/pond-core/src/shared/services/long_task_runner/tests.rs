@@ -229,7 +229,7 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
     };
     let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
 
-    assert!(plan(&research).contains("deep research"));
+    assert!(plan(&research).contains("This is research"));
     assert!(
         plan(&research).contains(RESULT_TITLE),
         "the plan ends in the report the card opens"
@@ -242,8 +242,47 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
         plan(&research).contains("Do not plan a step that combines"),
         "a compile step would repeat every section in the joined report"
     );
-    assert!(!plan(&general).contains("deep research"));
-    assert!(!work(&general).contains("deep research"));
+    assert!(!plan(&general).contains("This is research"));
+    assert!(!work(&general).contains("This is research"));
+}
+
+#[test]
+fn the_brief_sizes_the_answer_by_the_members_choice_or_asks_the_planner_to() {
+    let research = |answer| {
+        task_in(LongTaskState::Running, None)
+            .with_kind(LongTaskKind::Research)
+            .with_answer(answer)
+    };
+    let step_b = step("b", 0, &[], StepState::Pending, 0);
+    let plan =
+        |task: &LongTask| planner_brief(task, &[], &[], &[], &PlanReason::Fresh, None, t(10));
+    let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
+
+    let short = research(AnswerShape::Short);
+    assert!(plan(&short).contains("wants a short answer"));
+    assert!(
+        !plan(&short).contains("three parts"),
+        "no sections for a short answer"
+    );
+    assert!(
+        !plan(&short).contains("plan_write's answer"),
+        "the member already chose"
+    );
+    assert!(work(&short).contains("150 words"));
+    assert!(!work(&short).contains("400 to 900"));
+
+    let report = research(AnswerShape::Report);
+    assert!(plan(&report).contains("three parts"));
+    assert!(!plan(&report).contains("wants a short answer"));
+    assert!(work(&report).contains("400 to 900"));
+
+    let auto = research(AnswerShape::Auto);
+    assert!(plan(&auto).contains("plan_write's answer"));
+    assert!(plan(&auto).contains("wants a short answer") && plan(&auto).contains("three parts"));
+
+    let general = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
+    assert!(plan(&general).contains("wants a short answer"));
+    assert!(work(&general).contains("150 words"));
 }
 
 fn run(status: TaskStatus, result: Option<&str>) -> TaskRun {

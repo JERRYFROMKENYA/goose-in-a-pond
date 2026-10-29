@@ -1010,6 +1010,10 @@ export interface LongTask {
   state: LongTaskState;
   /** Absent from an older pond, which only has general tasks. */
   kind?: LongTaskKind;
+  /** How long the answer is meant to be; absent from an older pond. `auto` until its planner decides. */
+  answer?: ResearchAnswer;
+  /** A finished short answer's whole text, shown on the card; `null` for anything else. */
+  answer_text?: string | null;
   origin_session_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1087,7 +1091,12 @@ export interface ChatStreamRequest {
   resumable?: boolean;
   /** The message is a research question: the pond starts deep research on it. */
   deep_research?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide from the question. */
+  deep_research_answer?: ResearchAnswer;
 }
+
+/** How long a long task's answer should be: `auto` leaves it to the pond's reading of the ask. */
+export type ResearchAnswer = "auto" | "short" | "report";
 
 /**
  * Answer of `GET /long-tasks/deep-research`. `off` means the household switched long tasks or the

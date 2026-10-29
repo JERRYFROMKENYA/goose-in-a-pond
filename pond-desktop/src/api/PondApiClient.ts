@@ -9,6 +9,7 @@ import {
   type ChallengeResponse,
   type ChatEvent,
   type ChatStreamRequest,
+  type ResearchAnswer,
   type CleanupResponse,
   type CompactionReport,
   type ContextIndexHealth,
@@ -1820,6 +1821,7 @@ export class PondApiClient {
     images?: ImageAttachment[],
     resumable?: boolean,
     deepResearch?: boolean,
+    deepResearchAnswer?: ResearchAnswer,
   ): AsyncGenerator<ChatEvent> {
     const reqBody: ChatStreamRequest = {
       message,
@@ -1830,6 +1832,9 @@ export class PondApiClient {
       // Only when asked, so other bodies stay unchanged.
       ...(resumable ? { resumable: true } : {}),
       ...(deepResearch ? { deep_research: true } : {}),
+      ...(deepResearch && deepResearchAnswer && deepResearchAnswer !== "auto"
+        ? { deep_research_answer: deepResearchAnswer }
+        : {}),
     };
     yield* this.streamSse("/api/v1/chat/stream", reqBody, token);
   }

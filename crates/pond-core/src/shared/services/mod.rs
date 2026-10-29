@@ -7,6 +7,7 @@ pub mod deep_research;
 pub mod delegation;
 pub mod egress;
 pub mod in_process_event_bus;
+pub mod long_task_open;
 pub mod long_task_queue;
 pub mod long_task_roles;
 pub mod long_task_runner;

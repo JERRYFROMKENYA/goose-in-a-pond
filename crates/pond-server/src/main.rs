@@ -3897,6 +3897,7 @@ async fn run_server(
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
         // The nudge, not the hand bell: a task started mid-turn must still wait for quiet.
+        pond_core::shared::services::long_task_open::install_runner_bell(bells.nudge_bell());
         if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.nudge_bell())) {
             // Agents a schedule or a household event activates run as one-step long tasks.
             let agent_presence: pond_server::agent_activations::SharedPresence = Default::default();
@@ -7126,8 +7127,9 @@ async fn run_long_task_runner(
     use pond_core::user_data::services::inference_lane::LaneJob;
 
     const POLL_SECS: u64 = 30;
-    // Short, unlike the chores': a member asked for this work and is waiting for it.
-    const QUIET_SECS: u64 = 30;
+    // Short, unlike the chores': a member asked for this work and is waiting for it. A step the
+    // household then interrupts is rerun without spending a try, so a short wait costs little.
+    const QUIET_SECS: u64 = 10;
     // No spacing between runs: the loop asks again at once only after a run that did something,
     // and a gap is the window in which a chore takes the slot for a minute or two.
     const FLOOR_SECS: u64 = 0;
@@ -7167,10 +7169,17 @@ async fn run_long_task_runner(
     );
 
     let mut progressed = false;
+    let mut next_poll: Option<u64> = None;
     loop {
-        // A run that moved a task on is followed at once: the next step is ready now.
-        let poll = if progressed { 0 } else { POLL_SECS };
+        // A run that moved a task on is followed at once: the next step is ready now. A task held
+        // back only by the quiet gate is looked at again when the quiet is due, not a poll later.
+        let poll = if progressed {
+            0
+        } else {
+            next_poll.unwrap_or(POLL_SECS)
+        };
         progressed = false;
+        next_poll = None;
         let tick = crate::inference_lane_runner::wait_for_tick(
             std::time::Duration::from_secs(poll),
             &wake,
@@ -7210,6 +7219,7 @@ async fn run_long_task_runner(
             // A task started before a restart keeps going with nobody speaking first.
             true,
         );
+        let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
         let Some(slot) = lane
             .acquire(
                 LaneJob::LongTaskStep,
@@ -7223,10 +7233,13 @@ async fn run_long_task_runner(
                     started_at_utc,
                     db_activity,
                 ),
-                sched::combined_idle_for(in_process_at, db_activity, now),
+                idle_for,
             )
             .await
         else {
+            if candidate.is_some() && settings.long_tasks_enabled {
+                next_poll = Some(quiet_due_in(idle_for, QUIET_SECS, POLL_SECS));
+            }
             continue;
         };
         let helpers = LongTaskHelpers {
@@ -7531,6 +7544,15 @@ fn roles_fingerprint(roles: &[pond_core::shared::domain::orchestration::AgentRol
 
 /// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.
 #[allow(clippy::too_many_arguments)]
+/// Seconds until a waiting task's quiet is due, at least `RECHECK_SECS`: a turn in flight reads as no
+/// quiet at all, and the turn's end is not announced to the runner.
+fn quiet_due_in(idle_for: std::time::Duration, quiet_secs: u64, poll_secs: u64) -> u64 {
+    const RECHECK_SECS: u64 = 3;
+    quiet_secs
+        .saturating_sub(idle_for.as_secs())
+        .clamp(RECHECK_SECS, poll_secs)
+}
+
 async fn advance_long_task(
     task: &pond_core::shared::domain::long_task::LongTask,
     tasks: &dyn pond_core::shared::ports::long_task::LongTaskRepository,

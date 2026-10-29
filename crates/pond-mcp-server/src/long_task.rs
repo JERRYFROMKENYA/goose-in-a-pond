@@ -7,15 +7,16 @@
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
 use pond_core::shared::domain::long_task::{
-    next_ready_step, read_step_draft, validate_plan, Artifact, ArtifactKind, ArtifactSummary,
-    LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused, OutcomeKind, PlanStep,
-    StalePlan, StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
+    next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact, ArtifactKind,
+    ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused, OutcomeKind,
+    PlanStep, StalePlan, StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
 };
 use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
+use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
 use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
-use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact, BRIEF_TITLE};
+use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
@@ -304,6 +305,9 @@ pub struct TaskStartParams {
     /// dates and places, budget, diets and allergies, what was decided or ruled out. They see
     /// nothing of the conversation but this and the goal.
     pub brief: Option<String>,
+    /// short or report, only when the person said how much they want: short is the answer in a
+    /// few sentences, report is the whole of it in sections. Leave it out otherwise.
+    pub answer: Option<String>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -466,6 +470,10 @@ impl TasksMcpServer {
             })?;
         let budget = LongTaskBudget::new(DEFAULT_LONG_TASK_STEPS, None)
             .map_err(|e| Refusal::Rejected(e.to_string()))?;
+        let answer = non_blank(params.answer.take())
+            .or_else(|| take_alias(&mut params.extra, &ANSWER_ALIASES))
+            .and_then(|raw| AnswerShape::read(&raw))
+            .unwrap_or_default();
         let task = LongTask::start(
             authority.profile_scope().clone(),
             None,
@@ -474,21 +482,19 @@ impl TasksMcpServer {
             budget,
             Utc::now(),
         )
-        .map_err(|e| Refusal::Rejected(e.to_string()))?;
-        deps.repo.create_task(&task).await.map_err(store)?;
-        if let Some(body) = params.brief.as_deref().and_then(clip_brief) {
-            let brief = Artifact::new(
-                task.id(),
-                None,
-                ArtifactKind::Note,
-                BRIEF_TITLE,
-                "What the conversation said that the goal leaves out",
+        .map_err(|e| Refusal::Rejected(e.to_string()))?
+        .with_answer(answer);
+        let brief = params
+            .brief
+            .as_deref()
+            .and_then(clip_brief)
+            .map(|body| OpeningBrief {
+                summary: "What the conversation said that the goal leaves out",
                 body,
-                Utc::now(),
-            )
-            .map_err(|e| Refusal::Rejected(e.to_string()))?;
-            deps.repo.insert_artifact(&brief).await.map_err(store)?;
-        }
+            });
+        let task = open_task(deps.repo.as_ref(), task, brief)
+            .await
+            .map_err(store)?;
         deps.wake_runner();
         let open = deps
             .repo
@@ -844,6 +850,7 @@ pub struct ArtifactWriteParams {
 }
 
 const TITLE_ALIASES: [&str; 1] = ["name"];
+const ANSWER_ALIASES: [&str; 3] = ["answer_shape", "length", "shape"];
 const FINISH_ALIASES: [&str; 3] = ["done", "final", "last"];
 
 /// A yes from a bool or the words a model writes for one; anything else is no.
@@ -892,6 +899,9 @@ pub struct PlanWriteParams {
     /// Every step still to do, in order.
     #[schemars(with = "Option<Vec<PlanStepSchema>>")]
     pub steps: Option<Value>,
+    /// short or report: how long the person wants the answer, when the brief asks you to decide.
+    #[schemars(with = "Option<String>")]
+    pub answer: Option<Value>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -1016,8 +1026,9 @@ found, in a few sentences; `failure` = why, if it failed; `artifacts` = ids of w
 
     #[tool(description = "\
 Write this task's plan: every step still to do, in order. Each step names a listed `role`, or \
-carries a `new_agent` (name, instructions, tools) when none is for it. Steps already started or \
-finished stay as they are. If it is refused, fix what the message names and call it again.")]
+carries a `new_agent` (name, instructions, tools) when none is for it. Give `answer`, short or \
+report, when the brief asks you to decide it. Steps already started or finished stay as they are. \
+If it is refused, fix what the message names and call it again.")]
     async fn plan_write(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -1273,6 +1284,11 @@ impl TaskWorkMcpServer {
             .take()
             .or_else(|| take_value(&mut params.extra, &["plan"]));
         let (drafts, ignored) = plan_drafts(raw)?;
+        let answer = params
+            .answer
+            .take()
+            .or_else(|| take_value(&mut params.extra, &ANSWER_ALIASES))
+            .and_then(|value| value.as_str().and_then(AnswerShape::read));
 
         let repo = &helper.deps.repo;
         let Some(task) = repo
@@ -1287,6 +1303,12 @@ impl TaskWorkMcpServer {
         let current = repo.list_steps(task.id()).await.map_err(store)?;
         let plan =
             validate_plan(&task, drafts, &current).map_err(|e| Refusal::Rejected(e.to_string()))?;
+        // Before the steps, so the first worker is briefed for the answer the planner chose.
+        if let Some(answer) = answer {
+            repo.decide_task_answer(task.id(), answer)
+                .await
+                .map_err(store)?;
+        }
         if let Err(e) = repo.replace_open_steps(&plan).await {
             return Err(match e.downcast_ref::<StalePlan>() {
                 Some(stale) => Refusal::Rejected(stale.to_string()),
@@ -1394,7 +1416,11 @@ fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refu
     let mut unreadable = Vec::new();
     let mut ignored: Vec<String> = Vec::new();
     for (i, item) in items.into_iter().enumerate() {
-        match read_step_draft(item) {
+        let had: Vec<String> = item
+            .as_object()
+            .map(|fields| fields.keys().cloned().collect())
+            .unwrap_or_default();
+        match read_step_draft(item, i + 1) {
             Ok((draft, skipped)) => {
                 drafts.push(draft);
                 for name in skipped {
@@ -1403,7 +1429,14 @@ fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refu
                     }
                 }
             }
-            Err(e) => unreadable.push(format!("step {} cannot be read: {e}", i + 1)),
+            Err(e) if had.is_empty() => {
+                unreadable.push(format!("step {} cannot be read: {e}", i + 1))
+            }
+            Err(e) => unreadable.push(format!(
+                "step {} cannot be read: {e} (it has {})",
+                i + 1,
+                quoted(&had)
+            )),
         }
     }
     if !unreadable.is_empty() {
@@ -2401,6 +2434,27 @@ mod tests {
         assert!(saved.contains("`new_agent`"), "{saved}");
         let steps = pond.repo.list_steps(task.id()).await.unwrap();
         assert_eq!(steps[1].depends_on()[0].as_str(), "find-events");
+
+        // The planner's reading of the ask is kept, and a later one does not overturn it.
+        for answer in ["Short", "report"] {
+            worker
+                .run_plan(
+                    &meta,
+                    params(serde_json::json!({"answer": answer, "steps": [
+                        {"role": "r", "instructions": "x"},
+                    ]})),
+                )
+                .await
+                .unwrap();
+        }
+        let task = pond.repo.get_task(task.id()).await.unwrap().unwrap();
+        assert_eq!(task.answer(), AnswerShape::Short);
+        let steps = pond.repo.list_steps(task.id()).await.unwrap();
+        assert_eq!(
+            steps[0].key().as_str(),
+            "step-1",
+            "a step with no key takes its place"
+        );
     }
 
     #[test]

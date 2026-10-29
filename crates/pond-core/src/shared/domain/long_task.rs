@@ -143,6 +143,45 @@ impl LongTaskKind {
     }
 }
 
+/// How long a task's answer should be. The person chooses it, or the planner reads it from the ask.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerShape {
+    /// Nobody chose yet: the planner decides from the ask and records it.
+    #[default]
+    Auto,
+    /// The answer itself, in a few sentences, shown whole in the conversation.
+    Short,
+    /// A report in sections, opened on its own.
+    Report,
+}
+
+impl AnswerShape {
+    pub const ALL: [AnswerShape; 3] = [AnswerShape::Auto, AnswerShape::Short, AnswerShape::Report];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AnswerShape::Auto => "auto",
+            AnswerShape::Short => "short",
+            AnswerShape::Report => "report",
+        }
+    }
+
+    /// Exact stored spelling only; an unknown value is `None`, never a default shape.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|shape| shape.as_str() == raw)
+    }
+
+    /// What a model or a client sent: the stored spellings, any case, with blank as no choice.
+    pub fn read(raw: &str) -> Option<Self> {
+        let raw = raw.trim().to_ascii_lowercase();
+        if raw.is_empty() {
+            return Some(AnswerShape::Auto);
+        }
+        Self::parse(&raw)
+    }
+}
+
 /// Where one step of a plan is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -277,6 +316,7 @@ pub struct LongTask {
     state: LongTaskState,
     budget: LongTaskBudget,
     kind: LongTaskKind,
+    answer: AnswerShape,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
@@ -294,6 +334,7 @@ pub struct LongTaskParts {
     pub max_steps: u32,
     pub deadline: Option<DateTime<Utc>>,
     pub kind: LongTaskKind,
+    pub answer: AnswerShape,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -328,6 +369,7 @@ impl LongTask {
             state: LongTaskState::Planning,
             budget,
             kind: LongTaskKind::General,
+            answer: AnswerShape::Auto,
             created_at: at,
             updated_at: at,
             finished_at: None,
@@ -337,6 +379,21 @@ impl LongTask {
     pub fn with_kind(mut self, kind: LongTaskKind) -> Self {
         self.kind = kind;
         self
+    }
+
+    pub fn with_answer(mut self, answer: AnswerShape) -> Self {
+        self.answer = answer;
+        self
+    }
+
+    /// The planner's reading of the ask, kept only while nobody has chosen: a member's choice
+    /// stands. `false` when it changed nothing.
+    pub fn decide_answer(&mut self, answer: AnswerShape) -> bool {
+        if self.answer != AnswerShape::Auto || answer == AnswerShape::Auto {
+            return false;
+        }
+        self.answer = answer;
+        true
     }
 
     /// Rebuild a stored task through the same checks; a row that fails them is an error.
@@ -351,6 +408,7 @@ impl LongTask {
             max_steps,
             deadline,
             kind,
+            answer,
             created_at,
             updated_at,
             finished_at,
@@ -383,6 +441,7 @@ impl LongTask {
                 deadline,
             },
             kind,
+            answer,
             created_at,
             updated_at,
             finished_at,
@@ -411,6 +470,10 @@ impl LongTask {
 
     pub fn kind(&self) -> LongTaskKind {
         self.kind
+    }
+
+    pub fn answer(&self) -> AnswerShape {
+        self.answer
     }
 
     pub fn state(&self) -> LongTaskState {
@@ -650,11 +713,17 @@ pub const STEP_DRAFT_FIELDS: &[&str] = &[
     "check",
 ];
 
-/// Read one step of a `plan_write` call. A field spelt like one a step reads, such as `dependsOn`
-/// or `dependson`, is read as that field, since dropping a misspelt `depends_on` would cost the
-/// step its inputs. Returns the draft and the fields it ignored.
+/// Where a step with no `key` takes one from, in order, before falling back to its place.
+const KEY_FALLBACKS: &[&str] = &["name", "title", "step", "step_name", "step_id", "label"];
+
+/// Read the `position`th step (from 1) of a `plan_write` call. A field spelt like one a step reads,
+/// such as `dependsOn`, is read as that field, since dropping a misspelt `depends_on` would cost
+/// the step its inputs. A step with no key takes one from its name, else `step-<position>`: a key
+/// is only a handle, and refusing the plan for it cost the planner a turn. Returns the draft and
+/// the fields it ignored.
 pub fn read_step_draft(
     value: serde_json::Value,
+    position: usize,
 ) -> Result<(StepDraft, Vec<String>), serde_json::Error> {
     let squash = |name: &str| -> String {
         name.chars()
@@ -675,6 +744,7 @@ pub fn read_step_draft(
                     near.push((name, field));
                 }
             }
+            let mut unread = Vec::new();
             for (name, field) in near {
                 match STEP_DRAFT_FIELDS
                     .iter()
@@ -683,9 +753,29 @@ pub fn read_step_draft(
                     Some(known) if !read.contains_key(*known) => {
                         read.insert((*known).to_string(), field);
                     }
-                    _ => ignored.push(name),
+                    _ => unread.push((name, field)),
                 }
             }
+            let keyed = ["key", "id", "step_key"]
+                .iter()
+                .any(|name| read.get(*name).is_some_and(|value| !value.is_null()));
+            if !keyed {
+                let named = KEY_FALLBACKS.iter().find_map(|fallback| {
+                    let at = unread
+                        .iter()
+                        .position(|(name, _)| squash(name) == squash(fallback))?;
+                    let key = match &unread[at].1 {
+                        serde_json::Value::String(text) if !text.trim().is_empty() => text.clone(),
+                        serde_json::Value::Number(n) => format!("step-{n}"),
+                        _ => return None,
+                    };
+                    unread.remove(at);
+                    Some(key)
+                });
+                let key = named.unwrap_or_else(|| format!("step-{position}"));
+                read.insert("key".to_string(), serde_json::Value::String(key));
+            }
+            ignored.extend(unread.into_iter().map(|(name, _)| name));
             serde_json::Value::Object(read)
         }
         other => other,
@@ -2407,6 +2497,43 @@ mod task_tests {
     }
 
     #[test]
+    fn the_planner_decides_the_answer_only_when_the_member_did_not() {
+        let task = || {
+            LongTask::start(
+                ProfileScope::Household,
+                None,
+                "how warm is it",
+                None,
+                LongTaskBudget::new(3, None).unwrap(),
+                t(0),
+            )
+            .unwrap()
+        };
+        let mut auto = task();
+        assert_eq!(auto.answer(), AnswerShape::Auto);
+        assert!(!auto.decide_answer(AnswerShape::Auto));
+        assert!(auto.decide_answer(AnswerShape::Short));
+        assert!(!auto.decide_answer(AnswerShape::Report), "decided once");
+        assert_eq!(auto.answer(), AnswerShape::Short);
+
+        let mut chosen = task().with_answer(AnswerShape::Report);
+        assert!(
+            !chosen.decide_answer(AnswerShape::Short),
+            "the member's choice stands"
+        );
+        assert_eq!(chosen.answer(), AnswerShape::Report);
+
+        assert_eq!(AnswerShape::read(" Short "), Some(AnswerShape::Short));
+        assert_eq!(AnswerShape::read(""), Some(AnswerShape::Auto));
+        assert_eq!(AnswerShape::read("essay"), None);
+        assert_eq!(
+            AnswerShape::parse("Short"),
+            None,
+            "only the stored spelling"
+        );
+    }
+
+    #[test]
     fn the_deadline_passes_at_its_instant() {
         let budget = LongTaskBudget::new(3, Some(t(100))).unwrap();
         assert!(!budget.deadline_passed(t(99)));
@@ -2427,6 +2554,7 @@ mod task_tests {
             max_steps,
             deadline: None,
             kind: LongTaskKind::Research,
+            answer: AnswerShape::Auto,
             created_at: t(0),
             updated_at: t(5),
             finished_at: None,
@@ -2612,9 +2740,12 @@ mod draft_tests {
     #[test]
     fn a_misspelt_field_is_read_as_the_one_it_means_and_an_unknown_one_is_named() {
         for spelt in ["dependson", "dependsOn", "Depends-On"] {
-            let (draft, ignored) = read_step_draft(serde_json::json!({
-                "key": "b", "role": "r", "instructions": "go", spelt: ["a"]
-            }))
+            let (draft, ignored) = read_step_draft(
+                serde_json::json!({
+                    "key": "b", "role": "r", "instructions": "go", spelt: ["a"]
+                }),
+                1,
+            )
             .unwrap();
             assert_eq!(
                 draft.depends_on,
@@ -2623,10 +2754,13 @@ mod draft_tests {
             );
             assert!(ignored.is_empty(), "{spelt}: {ignored:?}");
         }
-        let (draft, ignored) = read_step_draft(serde_json::json!({
-            "key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"],
-            "depends_on": ["a"], "dependsOn": ["c"]
-        }))
+        let (draft, ignored) = read_step_draft(
+            serde_json::json!({
+                "key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"],
+                "depends_on": ["a"], "dependsOn": ["c"]
+            }),
+            1,
+        )
         .unwrap();
         assert_eq!(
             draft.depends_on,
@@ -2636,7 +2770,30 @@ mod draft_tests {
         let mut ignored = ignored;
         ignored.sort();
         assert_eq!(ignored, vec!["dependsOn".to_string(), "tools".to_string()]);
-        assert!(read_step_draft(serde_json::json!({"key": "b", "role": "r"})).is_err());
+        assert!(read_step_draft(serde_json::json!({"key": "b", "role": "r"}), 1).is_err());
+    }
+
+    #[test]
+    fn a_step_with_no_key_takes_one_from_its_name_or_its_place() {
+        let read = |value: serde_json::Value| read_step_draft(value, 3).unwrap();
+        let (named, ignored) =
+            read(serde_json::json!({"name": "Gather Events", "role": "r", "instructions": "go"}));
+        assert_eq!(
+            named.key, "Gather Events",
+            "validate_plan slugs it to gather-events"
+        );
+        assert!(
+            ignored.is_empty(),
+            "the name was used, not ignored: {ignored:?}"
+        );
+        let (numbered, _) = read(serde_json::json!({"step": 2, "role": "r", "instructions": "go"}));
+        assert_eq!(numbered.key, "step-2");
+        let (placed, _) = read(serde_json::json!({"role": "r", "instructions": "go"}));
+        assert_eq!(placed.key, "step-3");
+        let (kept, ignored) =
+            read(serde_json::json!({"key": "a", "name": "A", "role": "r", "instructions": "go"}));
+        assert_eq!(kept.key, "a");
+        assert_eq!(ignored, vec!["name".to_string()]);
     }
 }
 

@@ -415,7 +415,8 @@ const SHORT_PLAN: &str = "The person wants a short answer. You only write the pl
      does each step. Plan one step whose helper finds the answer and saves it as the Result \
      itself. Plan a second step only when the answer needs two different places looked in, never \
      a step that only writes or compiles, and no sections. The Result is the answer in its first \
-     sentence, at most 150 words in all, with its sources, and no heading.\n";
+     sentence, then a sentence or two on what it rests on, at most 150 words in all, with its \
+     sources, and no heading.\n";
 
 /// A research report gathers, writes a section per part, then the Result that opens it.
 const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the question needs: \
@@ -462,8 +463,9 @@ const SECTION_STEP: &str = "If your step writes a section, save it as a draft ar
      summary of them. A plan covers every day or item with its times, places and costs.\n";
 
 const SHORT_STEP: &str = "The person wants a short answer. If your step saves the Result, put \
-     the answer itself in its first sentence and keep the whole to 150 words with its sources, \
-     no heading and no sections.\n";
+     the answer itself in its first sentence, then a sentence or two on what it rests on, such as \
+     the times and what the camera or the source said. Keep the whole to 150 words with its \
+     sources, no heading and no sections.\n";
 
 /// The step a short answer the member chose runs in place of a plan: the planner's run would take
 /// longer than the answer.

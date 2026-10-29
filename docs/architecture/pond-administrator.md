@@ -127,8 +127,9 @@ are RFC 3339.
 
 ## Each phone's own key
 
-Decided by Jerry on 2026-10-29: a phone keeps My Pond open behind its own Face ID, fingerprint or
-passcode, without the household's card on it.
+Decided by Jerry on 2026-10-29: a phone keeps My Pond open behind its own Face ID or fingerprint,
+without the household's card on it. `expo-secure-store`'s biometric items do not fall back to the
+passcode, so a phone without biometrics enrolled keeps no key and uses the card.
 
 - **What the phone keeps.** The Pond issues each phone its own key: 32 random bytes, shown once. The
   Pond keeps only its SHA-256, bound to that device. The phone keeps the key in the Keychain or

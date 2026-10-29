@@ -634,8 +634,9 @@ only and is refused here. `init` answers `PakeChallenge {challenge_id, challenge
 
 `verify` takes `PakeVerifyRequest {challenge_id, share, confirm, device_name?}` and answers
 `HandshakeResponse`: `accepted`, `session_token`, `refresh_token`, `expires_at`, `hostname`,
-`server_version`, `capabilities`, `rejection_reason`, and `server_proof` (T_server in hex), which
-the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
+`server_version`, `capabilities` (`chat`, `devices`, `settings`, and `routines` for device-action
+routines and asking before a missed run), `rejection_reason`, and `server_proof` (T_server in hex),
+which the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
 same code in both `rejection_reason` and `error`.
 
 | Route | Status | `error` | Meaning |

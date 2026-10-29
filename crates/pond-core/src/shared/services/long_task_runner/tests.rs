@@ -666,3 +666,16 @@ fn step_parts(step: &PlanStep) -> PlanStepParts {
         agent: step.agent().cloned(),
     }
 }
+
+#[test]
+fn a_short_answers_notification_reads_its_links_as_words_and_stops_at_a_word() {
+    assert_eq!(
+        notification_text("Jerry was seen at 16:10 ([camera events](https://pond.local/e))."),
+        "Jerry was seen at 16:10 (camera events)."
+    );
+    assert_eq!(notification_text("## Answer\nYes."), "Answer\nYes.");
+    let long = "word ".repeat(400);
+    let cut = notification_text(&long);
+    assert!(cut.ends_with("word..."), "{cut}");
+    assert!(cut.chars().count() <= NOTIFICATION_CHARS + 3);
+}

@@ -7598,8 +7598,21 @@ async fn advance_long_task(
                 .set_task_state(task.id(), LongTaskState::Completed, now)
                 .await?;
             fruitless.remove(task.id());
-            let body = runner::result_artifact(&artifacts)
-                .map(|a| a.summary.clone())
+            // A short answer is the notification itself; anything longer is a line about it.
+            let short = match runner::result_artifact(&artifacts) {
+                Some(result)
+                    if task.answer()
+                        == pond_core::shared::domain::long_task::AnswerShape::Short =>
+                {
+                    tasks
+                        .get_artifact(task.id(), &result.id)
+                        .await?
+                        .map(|artifact| runner::notification_text(artifact.body()))
+                }
+                _ => None,
+            };
+            let body = short
+                .or_else(|| runner::result_artifact(&artifacts).map(|a| a.summary.clone()))
                 .or_else(|| {
                     steps
                         .iter()

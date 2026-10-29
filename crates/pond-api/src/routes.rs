@@ -15648,6 +15648,7 @@ async fn start_deep_research(
     Ok(pond_core::shared::domain::agent::DeepResearchTurn {
         task_id: task.id().to_string(),
         waiting: place.as_ref().and_then(waiting_line),
+        answer: task.answer(),
     })
 }
 

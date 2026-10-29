@@ -276,6 +276,34 @@ pub fn clip_brief(text: &str) -> Option<String> {
     Some(text.chars().take(BRIEF_CHARS).collect())
 }
 
+/// Longest short answer a notification carries whole; a phone shows about this much unexpanded.
+pub const NOTIFICATION_CHARS: usize = 700;
+
+/// A short answer as a notification reads it: Markdown links as their words, cut at a word.
+pub fn notification_text(body: &str) -> String {
+    let mut plain = String::with_capacity(body.len());
+    let mut rest = body.trim();
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](").map(|at| open + at) else {
+            break;
+        };
+        let Some(end) = rest[close..].find(')').map(|at| close + at) else {
+            break;
+        };
+        plain.push_str(&rest[..open]);
+        plain.push_str(&rest[open + 1..close]);
+        rest = &rest[end + 1..];
+    }
+    plain.push_str(rest);
+    let plain = plain.replace('#', "").trim().to_string();
+    if plain.chars().count() <= NOTIFICATION_CHARS {
+        return plain;
+    }
+    let cut: String = plain.chars().take(NOTIFICATION_CHARS).collect();
+    let at = cut.rfind(char::is_whitespace).unwrap_or(cut.len());
+    format!("{}...", cut[..at].trim_end())
+}
+
 /// The artifact the planner is told to end with, which `task_status` reports as the answer.
 pub const RESULT_TITLE: &str = "Result";
 

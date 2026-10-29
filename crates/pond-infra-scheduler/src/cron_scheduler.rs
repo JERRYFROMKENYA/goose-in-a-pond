@@ -397,14 +397,7 @@ fn next_occurrence(
     timezone: &str,
     after: chrono::DateTime<Utc>,
 ) -> Option<chrono::DateTime<Utc>> {
-    // Parsed as `tokio-cron-scheduler` parsed it while it fired cron jobs itself: seconds
-    // required, and day-of-month AND day-of-week. Stored expressions keep their meaning.
-    let cron = croner::parser::CronParser::builder()
-        .seconds(croner::parser::Seconds::Required)
-        .dom_and_dow(true)
-        .build()
-        .parse(cron_expr)
-        .ok()?;
+    let cron = parse_cron(cron_expr)?;
     let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
     match cron.find_next_occurrence(&after.with_timezone(&tz), false) {
         Ok(dt) => Some(dt.with_timezone(&Utc)),
@@ -417,6 +410,17 @@ fn next_occurrence(
             None
         }
     }
+}
+
+/// Parsed as `tokio-cron-scheduler` parsed it while it fired cron jobs itself: seconds
+/// required, and day-of-month AND day-of-week. Stored expressions keep their meaning.
+fn parse_cron(cron_expr: &str) -> Option<croner::Cron> {
+    croner::parser::CronParser::builder()
+        .seconds(croner::parser::Seconds::Required)
+        .dom_and_dow(true)
+        .build()
+        .parse(cron_expr)
+        .ok()
 }
 
 /// One recurring task, kept as a chain of one-shot jobs, each armed for its next local occurrence.

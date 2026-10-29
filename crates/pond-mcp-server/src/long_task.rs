@@ -2544,6 +2544,32 @@ mod tests {
     }
 
     #[test]
+    fn every_withheld_task_tool_is_one_the_server_offers_and_each_role_keeps_its_own() {
+        use pond_core::shared::services::long_task_roles::{PLANNER_ROLE, VERIFIER_ROLE};
+        use pond_core::shared::services::long_task_runner::tools_withheld;
+        let offered: Vec<String> = TaskWorkMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| format!("{TASK_WORK_EXTENSION}__{}", tool.name))
+            .collect();
+        for role in [PLANNER_ROLE, VERIFIER_ROLE, WORKER_ROLE] {
+            for tool in tools_withheld(role) {
+                assert!(
+                    offered.iter().any(|o| o == tool),
+                    "{role} withholds {tool}, no such tool"
+                );
+            }
+        }
+        let keeps = |role: &str, tool: &str| {
+            !tools_withheld(role).contains(&format!("{TASK_WORK_EXTENSION}__{tool}").as_str())
+        };
+        assert!(keeps(PLANNER_ROLE, "plan_write"));
+        assert!(keeps(VERIFIER_ROLE, "step_report"));
+        assert!(keeps(WORKER_ROLE, "artifact_write") && keeps(WORKER_ROLE, "step_report"));
+        assert!(!keeps(PLANNER_ROLE, "artifact_write") && !keeps(WORKER_ROLE, "plan_write"));
+    }
+
+    #[test]
     fn a_bare_web_address_in_a_link_gets_its_scheme_and_nothing_else_changes() {
         assert_eq!(
             absolute_links("Train [Rome2rio](rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."),

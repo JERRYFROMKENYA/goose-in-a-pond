@@ -7364,7 +7364,8 @@ impl LongTaskHelpers {
                     background: false,
                 },
             )
-            .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?
+            .withholding(runner::tools_withheld(role.name()).iter().copied());
 
         let reports = work != pond_core::shared::services::step_bindings::StepWork::Plan;
         let binding = process_step_bindings().bind(
@@ -7472,6 +7473,7 @@ impl LongTaskHelpers {
                 },
             )
             .map_err(|e| anyhow::anyhow!("the compile run was refused: {e:?}"))?
+            .withholding(runner::tools_withheld(role.name()).iter().copied())
             .compiling_prefill(format!("role:{}", role.name()))
             .retaining_helpers_for(retention);
         let spec = if rebuild { spec.rebuilding() } else { spec };

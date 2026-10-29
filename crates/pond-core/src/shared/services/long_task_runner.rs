@@ -347,19 +347,20 @@ fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
 const RESEARCH_SOURCES: &str = "This is research the person asked for. First decide where the \
      answer lives. What happened in this house, who the cameras saw, what the sensors read, what \
      is scheduled and what the household has said live in the house, and a step reads them with \
-     get_recent_camera_events, the sensor, schedule and device tools, or the memory tools. A \
-     question about this house needs no web step at all. Plan a web step only for something the \
+     get_recent_camera_events, the sensor, schedule and device tools, or the memory tools. Look \
+     only where the goal points: a question about the cameras reads the camera tools, not the \
+     schedule or what was said. A question about this house needs no web step at all. Plan a web step only for something the \
      goal itself asks about that lies outside the house, such as places, prices or facts about \
      the world. When part of the answer is out of every helper's reach, \
      such as old camera footage or a picture, plan no step for it: the Result says what could not \
      be read and how the person can get it.\n";
 
 /// A short answer is one or two steps: a plan with sections is the slow, long kind.
-const SHORT_PLAN: &str = "The person wants a short answer. Plan one step that finds the answer \
-     and saves it as the Result itself. Plan a second step only when the answer needs two \
-     different places looked in, never a step that only writes or compiles, and no sections. The \
-     Result is the answer in its first sentence, at most 150 words in all, with its sources, and \
-     no heading.\n";
+const SHORT_PLAN: &str = "The person wants a short answer. You only write the plan: a helper \
+     does each step. Plan one step whose helper finds the answer and saves it as the Result \
+     itself. Plan a second step only when the answer needs two different places looked in, never \
+     a step that only writes or compiles, and no sections. The Result is the answer in its first \
+     sentence, at most 150 words in all, with its sources, and no heading.\n";
 
 /// A research report gathers, writes a section per part, then the Result that opens it.
 const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the question needs: \
@@ -685,6 +686,25 @@ pub enum RunEnd {
     Reported(StepOutcome),
     /// A household turn stopped it; the step reruns without spending an attempt.
     Preempted,
+}
+
+/// The task-work tools a role's runs are not offered. A planner that held `artifact_write` and
+/// `step_report` tried to do the step itself before planning, which cost it a turn each time.
+pub fn tools_withheld(role_name: &str) -> &'static [&'static str] {
+    const PLANNER: &[&str] = &[
+        "giap-task-work__artifact_write",
+        "giap-task-work__step_report",
+    ];
+    const VERIFIER: &[&str] = &[
+        "giap-task-work__artifact_write",
+        "giap-task-work__plan_write",
+    ];
+    const WORKER: &[&str] = &["giap-task-work__plan_write"];
+    match role_name {
+        roles::PLANNER_ROLE => PLANNER,
+        roles::VERIFIER_ROLE => VERIFIER,
+        _ => WORKER,
+    }
 }
 
 /// What a helper is told when it stops with turns left but has not reported.

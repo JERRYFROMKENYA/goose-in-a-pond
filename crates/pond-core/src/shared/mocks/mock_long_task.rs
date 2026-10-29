@@ -217,6 +217,15 @@ impl LongTaskRepository for MockLongTaskRepository {
         ledger.artifacts.retain(|artifact| artifact.task_id() != id);
         Ok(true)
     }
+
+    async fn delete_artifact(&self, task_id: &str, artifact_id: &str) -> Result<bool> {
+        let mut ledger = self.ledger.lock().unwrap();
+        let before = ledger.artifacts.len();
+        ledger
+            .artifacts
+            .retain(|artifact| !(artifact.task_id() == task_id && artifact.id() == artifact_id));
+        Ok(ledger.artifacts.len() < before)
+    }
 }
 
 #[cfg(test)]

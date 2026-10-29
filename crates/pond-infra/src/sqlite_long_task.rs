@@ -592,6 +592,16 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             .with_context(|| format!("deleting long task {id}"))?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn delete_artifact(&self, task_id: &str, artifact_id: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM long_task_artifacts WHERE id = ? AND task_id = ?")
+            .bind(artifact_id)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("deleting artifact {artifact_id}"))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -1244,6 +1254,32 @@ mod tests {
             repo.insert_artifact(&orphan).await.is_err(),
             "the foreign key let it in"
         );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_is_deleted_only_through_its_own_task() {
+        let (_tmp, _pool, repo) = repo().await;
+        let mine = household_task(t(0));
+        let theirs = household_task(t(0));
+        repo.create_task(&mine).await.unwrap();
+        repo.create_task(&theirs).await.unwrap();
+        let kept = note(&theirs, None, "kept", t(1));
+        let gone = note(&theirs, None, "gone", t(2));
+        repo.insert_artifact(&kept).await.unwrap();
+        repo.insert_artifact(&gone).await.unwrap();
+
+        assert!(!repo.delete_artifact(mine.id(), gone.id()).await.unwrap());
+        assert!(repo.delete_artifact(theirs.id(), gone.id()).await.unwrap());
+        assert!(!repo.delete_artifact(theirs.id(), gone.id()).await.unwrap());
+        let left: Vec<String> = repo
+            .list_artifacts(theirs.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(left, [kept.id().to_string()]);
+        assert!(repo.get_task(theirs.id()).await.unwrap().is_some());
     }
 
     #[tokio::test]

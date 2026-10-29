@@ -39,6 +39,7 @@ Paths below are relative to `/api/v1` unless they start with `/api/v1` or are li
 - [Agent, tools, prompts, skills and recipes](#agent-tools-prompts-skills-and-recipes)
 - [Music player](#music-player)
 - [Rides and Uber accounts](#rides-and-uber-accounts)
+- [My Pond (administration)](#my-pond-administration)
 - [Faces](#faces)
 - [Mesh](#mesh)
 - [Remote access](#remote-access)
@@ -137,6 +138,7 @@ The route summary's "Also" column names these.
 | cred if tokenless | A caller admitted without a token must present the host credential (`bearer_or_host_credential`) | as above |
 | own device | The device named in the path or query is the caller's own (`require_own_device`) | `403` |
 | member | The caller's paired device is attributed to a household member | `403`; another member's record reads as `404` |
+| unlocked | A member's device that unlocked My Pond with the admin card in the last 15 minutes ([pond administrator](architecture/pond-administrator.md)) | `403 admin_members_only`, `403 admin_locked` |
 | changer | The host credential, the device that claimed the pond, or a member's device (`connection_changes`) | `403 not_allowed` |
 | run owner | Only the device that started the run; unknown and not-yours are the same `404` | `404 unknown run` |
 | internal | The internal extension token as the bearer | `401` |
@@ -505,6 +507,28 @@ The route summary's "Also" column names these.
 | GET | /uber/accounts | token +onb | loopback, cred | Members who connected Uber |
 | POST | /uber/accounts/connect | token +onb | loopback, cred | Start a member's Uber sign-in |
 | DELETE | /uber/accounts/{profile_id} | token +onb | loopback, cred | Forget a member's Uber sign-in |
+
+### My Pond (administration)
+
+Contract and refusals: [pond administrator](architecture/pond-administrator.md#wire-contract).
+
+| Method | Path | Auth | Also | Summary |
+|---|---|---|---|---|
+| GET | /admin/status | token +onb | member | Whether the pond has an admin card and this device is unlocked |
+| POST | /admin/unlock | token +onb | member | Unlock this device with the admin card; wrong cards are slowed |
+| POST | /admin/lock | token +onb | member | End this device's unlock |
+| GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
+| GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
+| DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
+| GET | /admin/caches | token +onb | unlocked | KV snapshots, download leftovers and accelerator caches |
+| POST | /admin/caches/{id}/clear | token +onb | unlocked | Clear one cache |
+| GET | /admin/tasks | token +onb | unlocked | Long tasks and their artifacts; another member's words withheld |
+| DELETE | /admin/tasks/{id} | token +onb | unlocked | Delete a finished task with its report |
+| DELETE | /admin/tasks/{id}/artifacts/{artifact_id} | token +onb | unlocked | Delete one artifact of a finished task |
+| GET | /admin/health | token +onb | unlocked | Host, memory, disk, temperatures and checks |
+| GET | /admin/power | token +onb | unlocked | Power mode, modes, supply and battery |
+| PUT | /admin/power/mode | token +onb | unlocked | Switch power mode |
+| POST | /admin/power/restart | token +onb | unlocked | Restart the computer; waits for `force` while a long task runs |
 
 ### Faces
 

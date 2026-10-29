@@ -36,7 +36,7 @@ use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::domain::schedule::{
-    OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
+    MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
@@ -354,6 +354,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
         .route("/schedules/{id}/run-now", post(run_schedule_now))
+        .route("/schedules/{id}/missed/run", post(run_missed_schedule))
+        .route("/schedules/{id}/missed/skip", post(skip_missed_schedule))
         .route("/schedules/{id}/runs", get(list_schedule_runs))
         .route("/schedules/events", get(schedule_events_sse))
         // ── Sensor rules ───────────────────────────────────────────────────
@@ -10615,6 +10617,47 @@ async fn run_schedule_now(
     };
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+/// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
+async fn run_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+}
+
+/// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
+async fn skip_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+}
+
+/// The first answer settles a missed run; a later one is `409`, as is answering none.
+async fn answer_missed_schedule(
+    state: &AppState,
+    id: &str,
+    answer: MissedRunAnswer,
+) -> (StatusCode, Json<Value>) {
+    let Some(scheduler) = &state.scheduler else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "scheduler not configured"})),
+        );
+    };
+    match scheduler.answer_missed_run(id, answer).await {
+        Ok(()) => match answer {
+            MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+            MissedRunAnswer::Skip => (StatusCode::OK, Json(json!({"skipped": id}))),
+        },
+        Err(e) if e.downcast_ref::<NoMissedRun>().is_some() => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": e.to_string(), "code": "no_missed_run"})),
+        ),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }

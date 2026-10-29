@@ -622,6 +622,8 @@ mod tests {
 
     fn task(id: &str, kind: TaskKind) -> OneTask {
         OneTask(pond_core::user_data::domain::schedule::Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             id: id.into(),
             label: "door rule".into(),
             cron: String::new(),

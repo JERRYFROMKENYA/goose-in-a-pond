@@ -360,6 +360,8 @@ impl CronSchedulerAdapter {
             compute_next_run(&entry.persisted.cron, &entry.persisted.timezone)
         };
         Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             id: entry.persisted.id.clone(),
             label: entry.persisted.label.clone(),
             cron: entry.persisted.cron.clone(),
@@ -727,6 +729,8 @@ impl SchedulerPort for CronSchedulerAdapter {
             compute_next_run(&cron, &req.timezone)
         };
         let schedule = Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             id: req.id.clone(),
             label: req.label,
             cron,
@@ -1107,6 +1111,7 @@ mod tests {
 
     fn create_req(id: &str, cron: &str) -> CreateScheduleRequest {
         CreateScheduleRequest {
+            ask_if_missed: false,
             id: id.to_string(),
             label: format!("Test task {id}"),
             cron: cron.to_string(),
@@ -1584,6 +1589,7 @@ mod tests {
             .update_task(
                 "tz",
                 UpdateScheduleRequest {
+                    ask_if_missed: None,
                     label: None,
                     cron: None,
                     timezone: Some("Africa/Nairobi".to_string()),
@@ -1672,6 +1678,7 @@ mod tests {
             .update_task(
                 "upd1",
                 UpdateScheduleRequest {
+                    ask_if_missed: None,
                     label: Some("Updated label".to_string()),
                     cron: Some("0 30 9 * * *".to_string()),
                     timezone: Some("Africa/Nairobi".to_string()),
@@ -1866,6 +1873,7 @@ mod tests {
             .update_task(
                 "atomic1",
                 UpdateScheduleRequest {
+                    ask_if_missed: None,
                     label: None,
                     cron: Some("every morning at 9".to_string()),
                     timezone: None,
@@ -1910,6 +1918,7 @@ mod tests {
             SensorTriggerSpec, TriggerCondition, TriggerSource, TriggerSourceKind,
         };
         CreateScheduleRequest {
+            ask_if_missed: false,
             fire_at: None,
             once: false,
             id: id.to_string(),

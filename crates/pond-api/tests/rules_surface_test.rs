@@ -100,6 +100,8 @@ impl SchedulerPort for InMemoryScheduler {
             anyhow::bail!("task '{}' already exists", req.id);
         }
         let schedule = Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             fire_at: None,
             id: req.id.clone(),
             label: req.label,

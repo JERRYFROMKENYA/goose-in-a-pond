@@ -10466,6 +10466,7 @@ async fn create_schedule(
     }
 
     let req = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: api_req.fire_at,
         once: api_req.once,
         id: api_req
@@ -10528,6 +10529,7 @@ async fn update_schedule(
     let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
 
     let req = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: api_req.name,
         cron: api_req.cron,
         timezone: api_req.timezone,
@@ -10813,6 +10815,7 @@ async fn create_rule(
 
     // Duplicate ids and the cron are the scheduler's to reject, not this handler's.
     let create = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: None,
         once: false,
         id: req.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -10885,6 +10888,7 @@ async fn update_rule(
     }
 
     let update = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: Some(req.name),
         cron: None,
         timezone: None,
@@ -19500,6 +19504,8 @@ mod tests {
 
         fn schedule(id: &str, kind: TaskKind) -> Schedule {
             Schedule {
+                ask_if_missed: false,
+                missed_run: None,
                 fire_at: None,
                 id: id.into(),
                 label: format!("label of {id}"),

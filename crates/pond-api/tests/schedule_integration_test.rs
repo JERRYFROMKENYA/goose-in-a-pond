@@ -105,6 +105,8 @@ impl SchedulerPort for InMemoryScheduler {
             req.cron
         };
         let schedule = Schedule {
+            ask_if_missed: false,
+            missed_run: None,
             fire_at: req.fire_at,
             id: req.id.clone(),
             label: req.label,

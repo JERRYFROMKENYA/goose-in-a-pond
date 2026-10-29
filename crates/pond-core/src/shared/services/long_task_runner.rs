@@ -1,11 +1,14 @@
 //! What a long task runs next, and what each helper is told. Pure: the lane loop in `pond-server`
 //! does the I/O, so every decision here is tested without a model.
 use crate::models::domain::message::Role;
+use crate::shared::domain::long_task::StepAgent;
 use crate::shared::domain::long_task::{
     blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskKind, LongTaskState,
     OutcomeKind, PlanStep, StepKey, StepOutcome, StepState,
 };
-use crate::shared::domain::orchestration::{AgentRole, TaskRun, TaskStatus};
+use crate::shared::domain::orchestration::{
+    AgentRole, RoleError, RolePersonalData, TaskRun, TaskStatus,
+};
 use crate::shared::services::long_task_roles::{self as roles, TASK_WORK_EXTENSION};
 use crate::user_data::domain::recipe::AgentRecipe;
 use chrono::{DateTime, Utc};
@@ -146,6 +149,41 @@ pub fn next_run<'a>(
     NextRun::Wait
 }
 
+/// The rules a made agent works by; a saved role's instructions carry the same in its own words.
+const MADE_AGENT_RULES: &str = "How you work:
+1. Your brief gives the task's goal, your step and your inputs. Use only your tools.
+2. Save what you make with artifact_write, titled as the reader should see it.
+3. Finish with step_report once, last: outcome completed or failed, what you did in a few
+   sentences, and the ids of what you saved.
+Never put a person's name, health or diet in a web search.";
+
+/// The agent a plan made for one step. Its tools are those it asked for within the task's
+/// ceiling, always with the task-work tools, and it takes the shipped worker's turns and window.
+pub fn role_for_agent(
+    step: &PlanStep,
+    agent: &StepAgent,
+    worker: &AgentRole,
+) -> Result<AgentRole, RoleError> {
+    let mut tools: std::collections::BTreeSet<String> = agent
+        .tools
+        .iter()
+        .filter(|group| LONG_TASK_ROOT_GROUPS.contains(&group.as_str()))
+        .cloned()
+        .collect();
+    tools.insert(TASK_WORK_EXTENSION.to_string());
+    AgentRole::new(
+        step.role(),
+        format!(
+            "You are {}, an agent made for one step of a longer task. {}\n\n{MADE_AGENT_RULES}",
+            agent.name, agent.instructions
+        ),
+        tools,
+        RolePersonalData::Inherit,
+        worker.max_turns(),
+        worker.context_fraction(),
+    )
+}
+
 /// The task-level note every helper is given: what the conversation said that the goal leaves out.
 /// A helper starts in an empty window, so without it "I'm lactose intolerant" said three messages
 /// before the ask never reaches the plan.
@@ -272,7 +310,10 @@ const RESEARCH_STEP: &str = "This is deep research. Look things up with search_w
      source as a Markdown link, [its title](its address), using the address the search gave. If \
      the sources disagree, say so. If your step writes a section, save it as a draft artifact \
      titled as the reader should see it, such as \"Getting around\", and write it in full: the \
-     pond puts it in the report as you wrote it. Use no emoji. Never put a person's name, health \
+     pond puts it in the report as you wrote it. A section is 400 to 900 words of specifics from \
+     the findings: names, prices, times, distances, addresses and what each is good for, not a \
+     summary of them. A plan covers every day or item with its times, places and costs. Use no \
+     emoji. Never put a person's name, health \
      or diet in a web search: search for the place, the dish or the thing.\n";
 
 fn date_line(now: DateTime<Utc>) -> String {

@@ -992,8 +992,9 @@ found, in a few sentences; `failure` = why, if it failed; `artifacts` = ids of w
     }
 
     #[tool(description = "\
-Write this task's plan: every step still to do, in order. Steps already started or finished \
-stay as they are. If it is refused, fix what the message names and call it again.")]
+Write this task's plan: every step still to do, in order. Each step names a listed `role`, or \
+carries a `new_agent` (name, instructions, tools) when none is for it. Steps already started or \
+finished stay as they are. If it is refused, fix what the message names and call it again.")]
     async fn plan_write(
         &self,
         ctx: RequestContext<RoleServer>,

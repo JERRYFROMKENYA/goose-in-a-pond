@@ -31,6 +31,9 @@ giap_role:
       inputs: ids of artifacts this step needs, from the brief, or []
       depends_on: keys of steps that must finish first, or []
       acceptance: one sentence a checker can verify, or leave it out
+      new_agent: in place of role, only when no listed role is for the step: its name, its
+        instructions, and tools, the groups it needs from giap-knowledge (web search and
+        Wikipedia), giap-weather, giap-memory (what the household has said) and giap-sensors
 
     A good step answers one question, reads one part of one document, or writes one draft.
     Split long reading across steps. A later step sees an earlier step's work only through

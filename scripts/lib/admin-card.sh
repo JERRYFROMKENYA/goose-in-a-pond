@@ -109,16 +109,28 @@ admin_card_power_dropin() {
   return "$rc"
 }
 
-# admin_card_doctor <pond-server> <data_dir>: one doctor line; sets ADMIN_CARD_LEVEL.
+# admin_card_doctor <pond-server> <data_dir> [service user]: one doctor line; sets ADMIN_CARD_LEVEL.
 # shellcheck disable=SC2034  # ADMIN_CARD_LEVEL is read by giap.sh's doctor
 admin_card_doctor() {
-  local bin="$1" data="$2" out rc
+  local bin="$1" data="$2" user="${3:-}" out rc
   ADMIN_CARD_LEVEL=info
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
     info "admin card: no pond-server binary to ask yet"
     return 0
   fi
-  out="$(POND_DATA_DIR="$data" "$bin" admin-card --status 2>&1)"; rc=$?
+  if [ -n "$user" ] && [ "$user" != "$(id -un)" ] && [ -n "$ADMIN_SUDO" ]; then
+    # The card sits in the service account's private setup/; the doctor never asks for a password.
+    if ! out="$($ADMIN_SUDO -n -u "$user" env POND_DATA_DIR="$data" "$bin" admin-card --status 2>&1)"; then
+      case "$out" in
+        *"sudo:"*)
+          info "admin card: kept by $user; check it with: bash scripts/giap.sh admin-card show"
+          return 0 ;;
+      esac
+    fi
+    rc=0; [ "$out" = present ] || [ "$out" = missing ] || rc=1
+  else
+    out="$(POND_DATA_DIR="$data" "$bin" admin-card --status 2>&1)"; rc=$?
+  fi
   case "$rc:$out" in
     0:present) ok "admin card: present (My Pond unlocks with it)"; ADMIN_CARD_LEVEL=ok ;;
     0:missing)

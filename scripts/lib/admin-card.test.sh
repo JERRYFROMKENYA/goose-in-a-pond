@@ -154,6 +154,24 @@ test_doctor_reports_present_missing_and_old_binaries() {
   contains "$out" "no pond-server binary"
 }
 
+test_doctor_asks_as_the_service_account_and_never_for_a_password() {
+  world
+  # shellcheck disable=SC2016  # the fake's own shell expands these
+  printf '%s\n' '#!/bin/sh' 'printf "sudo %s\n" "$*" >> "$FAKE_CALLS"' \
+    '[ -n "${SUDO_LOCKED:-}" ] && { echo "sudo: a password is required" >&2; exit 1; }' \
+    '[ "$1" = -n ] && shift; [ "$1" = -u ] && shift 2' 'exec "$@"' > "$W/bin/sudo"
+  chmod +x "$W/bin/sudo"
+  ADMIN_SUDO=sudo
+  echo present > "$FAKE_STATE"
+  local out
+  out="$(admin_card_doctor "$W/bin/pond-server" "$W/data" agamemnon; echo "level=$ADMIN_CARD_LEVEL")"
+  contains "$out" "admin card: present"
+  contains "$(cat "$FAKE_CALLS")" "sudo -n -u agamemnon env POND_DATA_DIR=$W/data"
+  out="$(SUDO_LOCKED=1 admin_card_doctor "$W/bin/pond-server" "$W/data" agamemnon; echo "level=$ADMIN_CARD_LEVEL")"
+  contains "$out" "kept by agamemnon"
+  contains "$out" "level=info"
+}
+
 for fn in $(declare -F | awk '{print $3}' | grep '^test_'); do
   t "$fn" "$fn"
 done

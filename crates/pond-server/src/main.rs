@@ -7334,20 +7334,13 @@ impl LongTaskHelpers {
         brief: String,
         may_retry: bool,
     ) -> anyhow::Result<pond_core::shared::services::long_task_runner::RunEnd> {
-        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
         use pond_core::shared::services::step_bindings::{process_step_bindings, StepBinding};
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = runner::long_task_session_id(task.id(), &run_id);
-        let authority = DelegationAuthority::root(
-            &session_id,
-            task.scope().clone(),
-            runner::LONG_TASK_ROOT_GROUPS
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        );
+        let authority = runner::long_task_authority(&session_id, task.scope().clone());
         let spec = authority
             .delegate(
                 role,
@@ -7360,6 +7353,7 @@ impl LongTaskHelpers {
             )
             .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?;
 
+        let reports = work != pond_core::shared::services::step_bindings::StepWork::Plan;
         let binding = process_step_bindings().bind(
             &session_id,
             StepBinding {
@@ -7368,6 +7362,16 @@ impl LongTaskHelpers {
                 work,
             },
         );
+        // The planner's hand-back is its plan, so only a step's helpers are asked to report.
+        let spec = if reports {
+            let watch = binding.report_watch();
+            spec.nudging(pond_core::shared::domain::orchestration::ReportNudge {
+                text: runner::REPORT_NUDGE.to_string(),
+                reported: std::sync::Arc::new(move || watch.is_reported()),
+            })
+        } else {
+            spec
+        };
         let cancel = tokio_util::sync::CancellationToken::new();
         let lease = self
             .authorities
@@ -7432,7 +7436,7 @@ impl LongTaskHelpers {
         retention: std::time::Duration,
         rebuild: bool,
     ) -> anyhow::Result<()> {
-        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
 
         let session_id = format!(
@@ -7440,13 +7444,9 @@ impl LongTaskHelpers {
             runner::LONG_TASK_SESSION_PREFIX,
             uuid::Uuid::new_v4()
         );
-        let authority = DelegationAuthority::root(
+        let authority = runner::long_task_authority(
             &session_id,
             pond_core::user_data::domain::profile::ProfileScope::household(),
-            runner::LONG_TASK_ROOT_GROUPS
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
         );
         let spec = authority
             .delegate(
@@ -7719,7 +7719,21 @@ async fn advance_long_task(
             let verdict =
                 if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
                     let saved = tasks.list_artifacts(task.id()).await?;
-                    let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
+                    let context = match runner::brief_artifact(&saved) {
+                        Some(found) => tasks
+                            .get_artifact(task.id(), &found.id)
+                            .await?
+                            .map(|artifact| artifact.body().to_string()),
+                        None => None,
+                    };
+                    let brief = runner::verifier_brief(
+                        task,
+                        &step,
+                        &outcome,
+                        &saved,
+                        context.as_deref(),
+                        chrono::Utc::now(),
+                    );
                     Some(
                         helpers
                             .run(task, verifier, StepWork::Check(key), brief, false)

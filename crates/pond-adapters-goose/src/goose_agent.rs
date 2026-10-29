@@ -4667,37 +4667,47 @@ impl GooseAdapter {
 
         // A `Message` event is a fragment, not a turn; `ChildTurns` owns the assembly rule.
         let mut turns = crate::orchestrator::ChildTurns::default();
-        while let Some(event) = stream.next().await {
-            match event {
-                Ok(goose::agents::AgentEvent::Message(msg)) => {
-                    // `as_concat_text()` drops `Thinking`: the child path's only reasoning gate.
-                    crate::orchestrator::child_stream_step(
-                        &mut turns,
-                        msg.role == rmcp::model::Role::Assistant,
-                        &msg.as_concat_text(),
-                    );
-                    // Never read `msg.content` here; it bypasses the reasoning gate.
-                    for tool in crate::orchestrator::child_tool_names(&msg) {
-                        crate::orchestrator::report_child_progress(
-                            &plan.parent_session_id,
-                            &plan.task_id,
-                            &plan.role,
-                            pond_core::shared::domain::agent::SubagentStatus::Tool,
-                            Some(tool),
-                        );
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        role = %plan.role,
-                        "subagent stream error, ending the run: {e}"
-                    );
-                    break;
-                }
+        drain_child_stream(&mut stream, &mut turns, &plan).await;
+        drop(stream);
+
+        if crate::orchestrator::should_nudge(&plan, turns.turns(), cancel.is_cancelled()) {
+            let text = plan
+                .nudge
+                .as_ref()
+                .map(|n| n.text.clone())
+                .unwrap_or_default();
+            tracing::info!(
+                target: "giap::trace",
+                kind = "subagent_nudged",
+                role = %plan.role,
+                turns = turns.turns(),
+                "a helper stopped without reporting; asking it once to report"
+            );
+            turns.other_role_message();
+            let nudge_config = goose::agents::SessionConfig {
+                id: plan.child_session_id.clone(),
+                schedule_id: None,
+                max_turns: Some(crate::orchestrator::NUDGE_TURNS),
+                retry_config: None,
+            };
+            let again = goose::session_context::with_session_id(
+                Some(plan.child_session_id.clone()),
+                async {
+                    child
+                        .reply(
+                            Message::user().with_text(&text),
+                            nudge_config,
+                            Some(cancel.clone()),
+                        )
+                        .await
+                },
+            )
+            .await;
+            match again {
+                Ok(mut stream) => drain_child_stream(&mut stream, &mut turns, &plan).await,
+                Err(e) => tracing::warn!(role = %plan.role, "the nudge could not start: {e}"),
             }
         }
-        drop(stream);
         let (last_text, assistant_turns) = turns.finish();
 
         // Post-run read: an extension can arrive without `add_extension` (e.g. `default_enabled`).
@@ -4714,6 +4724,47 @@ impl GooseAdapter {
             assistant_turns,
             loaded_extensions,
         })
+    }
+}
+
+/// Reads one child reply to its end, counting its turns and reporting its tool calls.
+async fn drain_child_stream<S, E>(
+    stream: &mut S,
+    turns: &mut crate::orchestrator::ChildTurns,
+    plan: &crate::orchestrator::ChildPlan,
+) where
+    S: futures::Stream<Item = Result<goose::agents::AgentEvent, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(goose::agents::AgentEvent::Message(msg)) => {
+                // `as_concat_text()` drops `Thinking`: the child path's only reasoning gate.
+                crate::orchestrator::child_stream_step(
+                    turns,
+                    msg.role == rmcp::model::Role::Assistant,
+                    &msg.as_concat_text(),
+                );
+                // Never read `msg.content` here; it bypasses the reasoning gate.
+                for tool in crate::orchestrator::child_tool_names(&msg) {
+                    crate::orchestrator::report_child_progress(
+                        &plan.parent_session_id,
+                        &plan.task_id,
+                        &plan.role,
+                        pond_core::shared::domain::agent::SubagentStatus::Tool,
+                        Some(tool),
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    role = %plan.role,
+                    "subagent stream error, ending the run: {e}"
+                );
+                break;
+            }
+        }
     }
 }
 

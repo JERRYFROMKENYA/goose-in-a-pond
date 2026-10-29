@@ -7,9 +7,9 @@
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
 use pond_core::shared::domain::long_task::{
-    next_ready_step, validate_plan, Artifact, ArtifactKind, ArtifactSummary, LongTask,
-    LongTaskBudget, LongTaskState, LongTaskStateRefused, OutcomeKind, PlanStep, StalePlan,
-    StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
+    next_ready_step, read_step_draft, validate_plan, Artifact, ArtifactKind, ArtifactSummary,
+    LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused, OutcomeKind, PlanStep,
+    StalePlan, StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
 };
 use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
@@ -231,18 +231,24 @@ fn quoted(items: &[String]) -> String {
 }
 
 /// Wrap an answer or a refusal as tool success, logging the refusal.
+const REFUSAL_TRACE_CHARS: usize = 400;
+
 fn answer(tool: &'static str, outcome: Result<String, Refusal>) -> CallToolResult {
     let text = match outcome {
         Ok(text) => text,
         Err(refusal) => {
+            let message = refusal.message();
+            // The model's own session is not kept, so this is the only record of what it was told.
+            let said: String = message.chars().take(REFUSAL_TRACE_CHARS).collect();
             tracing::warn!(
                 target: "giap::trace",
                 kind = "long_task_tool_refused",
                 tool,
                 reason = refusal.trace(),
+                message = %said,
                 "a long-task tool call was refused"
             );
-            refusal.message()
+            message
         }
     };
     CallToolResult::success(vec![ContentBlock::text(text)])
@@ -828,12 +834,28 @@ pub struct ArtifactWriteParams {
     /// The content itself.
     #[schemars(with = "Option<String>")]
     pub body: Option<Value>,
+    /// true on your step's last save when the step is done: it also reports the step completed,
+    /// so you need no step_report.
+    #[schemars(with = "Option<bool>")]
+    pub finish: Option<Value>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
 }
 
 const TITLE_ALIASES: [&str; 1] = ["name"];
+const FINISH_ALIASES: [&str; 3] = ["done", "final", "last"];
+
+/// A yes from a bool or the words a model writes for one; anything else is no.
+fn says_yes(value: Option<Value>) -> bool {
+    match value {
+        Some(Value::Bool(yes)) => yes,
+        Some(Value::String(text)) => {
+            matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "yes")
+        }
+        _ => false,
+    }
+}
 const SUMMARY_ALIASES: [&str; 2] = ["description", "one_line"];
 const BODY_ALIASES: [&str; 3] = ["content", "text", "contents"];
 
@@ -963,7 +985,8 @@ many tokens remain, so read a long one part by part.")]
 
     #[tool(description = "\
 Save what this step found, for later steps to read: `kind` (note, findings, draft or data), a \
-short `title`, a one-line `summary` and the `body`. Returns the artifact's id.")]
+short `title`, a one-line `summary` and the `body`. Returns the artifact's id. On the step's last \
+save, set `finish` to true to report the step completed in the same call.")]
     async fn artifact_write(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -1156,6 +1179,12 @@ impl TaskWorkMcpServer {
                 other => other.to_string(),
             })
             .unwrap_or_default();
+        let finish = says_yes(
+            params
+                .finish
+                .take()
+                .or_else(|| take_value(&mut params.extra, &FINISH_ALIASES)),
+        );
 
         let artifact = Artifact::new(
             &helper.binding.task_id,
@@ -1174,11 +1203,27 @@ impl TaskWorkMcpServer {
             .await
             .map_err(store)?;
         self.bindings.note_artifact(&helper.root, artifact.id());
+        if !finish {
+            return Ok(format!(
+                "Saved artifact `{}` ({} tokens). Name it in step_report's artifacts so later \
+                 steps can find it, or save your last artifact with finish true.",
+                artifact.id(),
+                artifact.tokens()
+            ));
+        }
+        let said = if summary.is_empty() { &title } else { &summary };
+        let outcome = StepOutcome::new(
+            OutcomeKind::Completed,
+            said,
+            self.bindings.written_by(&helper.root),
+            None,
+        );
+        if !self.bindings.report(&helper.root, outcome) {
+            return Err(Refusal::ReportTooLate);
+        }
         Ok(format!(
-            "Saved artifact `{}` ({} tokens). Name it in step_report's artifacts so later steps \
-             can find it.",
-            artifact.id(),
-            artifact.tokens()
+            "Saved artifact `{}` and recorded the step as completed. Your step is done; stop here.",
+            artifact.id()
         ))
     }
 
@@ -1227,7 +1272,7 @@ impl TaskWorkMcpServer {
             .steps
             .take()
             .or_else(|| take_value(&mut params.extra, &["plan"]));
-        let drafts = plan_drafts(raw)?;
+        let (drafts, ignored) = plan_drafts(raw)?;
 
         let repo = &helper.deps.repo;
         let Some(task) = repo
@@ -1265,6 +1310,17 @@ impl TaskWorkMcpServer {
                 " Kept as they are, already started or finished: {}.",
                 quoted(&kept)
             ));
+        }
+        if !ignored.is_empty() {
+            text.push_str(&format!(
+                " Ignored, as no step reads them: {}.",
+                quoted(&ignored)
+            ));
+            if ignored.iter().any(|name| name.contains("tool")) {
+                text.push_str(
+                    " A step's tools come from its role; give a step other tools with `new_agent`.",
+                );
+            }
         }
         Ok(text)
     }
@@ -1317,10 +1373,11 @@ fn outcome_phrase(outcome: OutcomeKind) -> &'static str {
     }
 }
 
-/// Each step parsed on its own, so one unreadable step is named instead of failing the call.
-fn plan_drafts(raw: Option<Value>) -> Result<Vec<StepDraft>, Refusal> {
-    let shape = "plan_write needs `steps`: a list of steps, each with `key`, `role` and \
-                 `instructions`.";
+/// Each step parsed on its own, so every unreadable step is named in one refusal. Also returns the
+/// fields no step reads, which are ignored rather than refused.
+fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refusal> {
+    let shape = "plan_write needs `steps`: a list of steps, each with `key`, `role` (or \
+                 `new_agent`) and `instructions`.";
     let Some(mut value) = raw else {
         return Err(Refusal::Malformed(shape.to_string()));
     };
@@ -1333,19 +1390,43 @@ fn plan_drafts(raw: Option<Value>) -> Result<Vec<StepDraft>, Refusal> {
         object @ Value::Object(_) => vec![object],
         _ => return Err(Refusal::Malformed(shape.to_string())),
     };
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(i, item)| {
-            serde_json::from_value::<StepDraft>(item).map_err(|e| {
-                Refusal::Malformed(format!(
-                    "Step {} cannot be read: {e}. Each step takes only `key`, `role`, \
-                     `instructions`, `inputs`, `depends_on` and `acceptance`.",
-                    i + 1
-                ))
-            })
-        })
-        .collect()
+    let mut drafts = Vec::with_capacity(items.len());
+    let mut unreadable = Vec::new();
+    let mut ignored: Vec<String> = Vec::new();
+    for (i, item) in items.into_iter().enumerate() {
+        match read_step_draft(item) {
+            Ok((draft, skipped)) => {
+                drafts.push(draft);
+                for name in skipped {
+                    if !ignored.contains(&name) {
+                        ignored.push(name);
+                    }
+                }
+            }
+            Err(e) => unreadable.push(format!("step {} cannot be read: {e}", i + 1)),
+        }
+    }
+    if !unreadable.is_empty() {
+        let fine = if drafts.is_empty() {
+            String::new()
+        } else {
+            " The other steps are fine; send them again unchanged with these fixed.".to_string()
+        };
+        return Err(Refusal::Malformed(format!(
+            "{}. Each step takes `key`, `role` or `new_agent`, `instructions`, and optionally \
+             `inputs`, `depends_on` and `acceptance`.{fine}",
+            capitalised(&unreadable.join("; "))
+        )));
+    }
+    Ok((drafts, ignored))
+}
+
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// The part of `artifact` to return and how to ask for the next one.
@@ -2268,20 +2349,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(circle.message().contains("circle"), "{}", circle.message());
-        let bad_field = worker
+        let unreadable = worker
             .run_plan(
                 &meta,
                 params(serde_json::json!({"steps": [
-                    {"key": "a", "role": "r", "instructions": "x", "tools": ["giap-system"]},
+                    {"key": "a", "role": "r", "instructions": "x"},
+                    {"key": "b", "role": "r", "instructions": 5},
+                    {"key": "c", "role": "r"},
                 ]})),
             )
             .await
-            .unwrap_err();
+            .unwrap_err()
+            .message();
         assert!(
-            bad_field.message().starts_with("Step 1 cannot be read"),
-            "{}",
-            bad_field.message()
+            unreadable.starts_with("Step 2 cannot be read"),
+            "{unreadable}"
         );
+        assert!(unreadable.contains("step 3 cannot be read"), "{unreadable}");
+        assert!(!unreadable.contains("step 1"), "{unreadable}");
+        assert!(unreadable.contains("other steps are fine"), "{unreadable}");
         assert!(matches!(
             worker.run_plan(&meta, PlanWriteParams::default()).await,
             Err(Refusal::Malformed(_))
@@ -2294,6 +2380,27 @@ mod tests {
         });
         worker.run_plan(&meta, params(stringified)).await.unwrap();
         assert_eq!(pond.repo.list_steps(task.id()).await.unwrap().len(), 1);
+
+        // Fields no step reads are ignored and named, and a misspelt key is taken as its slug.
+        let saved = worker
+            .run_plan(
+                &meta,
+                params(serde_json::json!({"steps": [
+                    {"key": "Find_Events", "role": "r", "instructions": "x", "title": "Find",
+                     "tools": ["giap-system"]},
+                    {"key": "sum", "role": "r", "instructions": "y", "depends_on": ["Find_Events"]},
+                ]})),
+            )
+            .await
+            .unwrap();
+        assert!(saved.contains("`find-events`, `sum`"), "{saved}");
+        assert!(
+            saved.contains("Ignored, as no step reads them: `title`, `tools`"),
+            "{saved}"
+        );
+        assert!(saved.contains("`new_agent`"), "{saved}");
+        let steps = pond.repo.list_steps(task.id()).await.unwrap();
+        assert_eq!(steps[1].depends_on()[0].as_str(), "find-events");
     }
 
     #[test]

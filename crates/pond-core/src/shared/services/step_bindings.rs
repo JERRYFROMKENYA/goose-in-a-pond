@@ -109,6 +109,16 @@ impl StepBindings {
 }
 
 impl StepBindings {
+    /// What the bound run has saved so far, in order; empty once the run has ended.
+    pub fn written_by(&self, root_session_id: &str) -> Vec<String> {
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(root_session_id)
+            .map(|entry| entry.written.clone())
+            .unwrap_or_default()
+    }
+
     /// Records an artifact the bound run saved; ignored once the run has ended.
     pub fn note_artifact(&self, root_session_id: &str, artifact_id: &str) {
         if let Some(entry) = self

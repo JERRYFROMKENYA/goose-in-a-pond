@@ -1,5 +1,6 @@
 //! What a long task runs next, and what each helper is told. Pure: the lane loop in `pond-server`
 //! does the I/O, so every decision here is tested without a model.
+use crate::mcp::domain::tool_group::{group_of_tool, HOUSEHOLD_READ_TOOLS};
 use crate::models::domain::message::Role;
 use crate::shared::domain::long_task::StepAgent;
 use crate::shared::domain::long_task::{
@@ -7,9 +8,10 @@ use crate::shared::domain::long_task::{
     OutcomeKind, PlanStep, StepKey, StepOutcome, StepState,
 };
 use crate::shared::domain::orchestration::{
-    AgentRole, RoleError, RolePersonalData, TaskRun, TaskStatus,
+    AgentRole, DelegationAuthority, RoleError, RolePersonalData, TaskRun, TaskStatus,
 };
 use crate::shared::services::long_task_roles::{self as roles, TASK_WORK_EXTENSION};
+use crate::user_data::domain::profile::ProfileScope;
 use crate::user_data::domain::recipe::AgentRecipe;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
@@ -23,6 +25,28 @@ pub const LONG_TASK_ROOT_GROUPS: &[&str] = &[
     "giap-weather",
     "giap-sensors",
 ];
+
+/// The authority every run of a long task starts from, the prefill compile's included, so both
+/// build the same prompt: the ceiling above plus the house's read-only tools.
+pub fn long_task_authority(session_id: &str, scope: ProfileScope) -> DelegationAuthority {
+    DelegationAuthority::root(
+        session_id,
+        scope,
+        LONG_TASK_ROOT_GROUPS
+            .iter()
+            .map(|group| (*group).to_string())
+            .collect(),
+    )
+    .with_read_tools(HOUSEHOLD_READ_TOOLS.iter().copied())
+}
+
+/// Whether a run of a long task can hold anything of `group`: the whole of it, or its reads.
+pub fn lane_reaches_group(group: &str) -> bool {
+    LONG_TASK_ROOT_GROUPS.contains(&group)
+        || HOUSEHOLD_READ_TOOLS
+            .iter()
+            .any(|tool| group_of_tool(tool) == Some(group))
+}
 
 /// The roles the planner may give a step: the shipped worker first, then the household's own
 /// active roles. The planner and verifier are not offered: neither does a step's work.
@@ -152,9 +176,10 @@ pub fn next_run<'a>(
 /// The rules a made agent works by; a saved role's instructions carry the same in its own words.
 const MADE_AGENT_RULES: &str = "How you work:
 1. Your brief gives the task's goal, your step and your inputs. Use only your tools.
-2. Save what you make with artifact_write, titled as the reader should see it.
-3. Finish with step_report once, last: outcome completed or failed, what you did in a few
-   sentences, and the ids of what you saved.
+2. Save what you make with artifact_write, titled as the reader should see it. On your last
+   save, when the step is done, set finish to true: that reports the step completed.
+3. Otherwise finish with step_report once, last: outcome completed or failed, what you did in a
+   few sentences, and the ids of what you saved.
 Never put a person's name, health or diet in a web search.";
 
 /// The agent a plan made for one step. Its tools are those it asked for within the task's
@@ -167,7 +192,7 @@ pub fn role_for_agent(
     let mut tools: std::collections::BTreeSet<String> = agent
         .tools
         .iter()
-        .filter(|group| LONG_TASK_ROOT_GROUPS.contains(&group.as_str()))
+        .filter(|group| lane_reaches_group(group))
         .cloned()
         .collect();
     tools.insert(TASK_WORK_EXTENSION.to_string());
@@ -292,29 +317,39 @@ fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
 /// single reply has to hold it.
 const RESEARCH_PLAN: &str = "This is deep research the person asked for, and the report can be \
      as long as the question needs: a page for a quick question, many for a trip or a big \
-     decision. Plan it in three parts. First, steps that each look into one part of the question \
-     with search_web or get_wikipedia_article, or recall what the household has said with the \
-     memory tools, and save their findings with their sources. Then one step per section of the \
-     report, each writing its section from the findings it is given and saving it as a draft \
-     artifact titled as the reader should see it. Give every section that is a plan, such as an \
-     itinerary, a meal plan or a packing or shopping list, to long-task-composer. Last, one step \
-     writes the artifact titled \"Result\": a short title on its first line as a \"# \" heading, \
-     then a few paragraphs that answer the question and introduce the sections without repeating \
-     them. Do not plan a step that combines, compiles or merges sections: the pond joins the \
-     Result and the sections, in plan order, into the report itself.\n";
+     decision. First decide where the answer lives. What happened in this house, who the cameras \
+     saw, what the sensors read, what is scheduled and what the household has said live in the \
+     house, and a step reads them with get_recent_camera_events, the sensor, schedule and device \
+     tools, or the memory tools. Only what is outside the house, such as places, prices and facts \
+     about the world, comes from search_web or get_wikipedia_article. Then plan in three parts. \
+     First, steps that each look into one part of the question and save their findings with \
+     their sources. Then one step per section of the report, each writing its section from the \
+     findings it is given and saving it as a draft artifact titled as the reader should see it. \
+     Give every section that is a plan, such as an itinerary, a meal plan or a packing or \
+     shopping list, to long-task-composer. Last, one step writes the artifact titled \"Result\": \
+     a short title on its first line as a \"# \" heading, then a few paragraphs that answer the \
+     question and introduce the sections without repeating them. When part of the answer is out \
+     of every helper's reach, such as old camera footage or a picture, plan no step for it: the \
+     Result says what could not be read and how the person can get it. Do not plan a step that \
+     combines, compiles or merges sections: the pond joins the Result and the sections, in plan \
+     order, into the report itself.\n";
 
 /// A research step works from sources, not from what a small model remembers, and keeps the
 /// household's particulars out of what it sends to a search engine.
-const RESEARCH_STEP: &str = "This is deep research. Look things up with search_web or \
-     get_wikipedia_article rather than from memory, keep only what the sources say, and cite each \
-     source as a Markdown link, [its title](its address), using the address the search gave. If \
-     the sources disagree, say so. If your step writes a section, save it as a draft artifact \
-     titled as the reader should see it, such as \"Getting around\", and write it in full: the \
-     pond puts it in the report as you wrote it. A section is 400 to 900 words of specifics from \
-     the findings: names, prices, times, distances, addresses and what each is good for, not a \
+const RESEARCH_STEP: &str = "This is deep research. Answer from sources, never from memory: the \
+     house's own tools for what happened here, such as get_recent_camera_events, the sensor and \
+     schedule tools and the memory tools, and search_web or get_wikipedia_article only for what \
+     is outside the house. Keep only what the sources say, and cite each web source as a Markdown \
+     link, [its title](its address), using the address the search gave. If the sources disagree, \
+     say so. If what your step needs is out of your tools' reach, do not search the web for it: \
+     save what you could find, say plainly what is missing and how the person could get it, and \
+     report the step completed. If your step writes a section, save it as a draft artifact titled \
+     as the reader should see it, such as \"Getting around\", and write it in full: the pond puts \
+     it in the report as you wrote it. A section is 400 to 900 words of specifics from the \
+     findings: names, prices, times, distances, addresses and what each is good for, not a \
      summary of them. A plan covers every day or item with its times, places and costs. Use no \
-     emoji. Never put a person's name, health \
-     or diet in a web search: search for the place, the dish or the thing.\n";
+     emoji. Never put a person's name, health or diet in a web search: search for the place, the \
+     dish or the thing.\n";
 
 fn date_line(now: DateTime<Utc>) -> String {
     format!("Today is {} (UTC).\n", now.format("%A %-d %B %Y, %H:%M"))
@@ -485,10 +520,13 @@ pub fn worker_brief(
 }
 
 /// What a verifier sees: the check, the worker's report and what the step saved.
+/// `context` is the task's brief: a step can pass its own check and still miss what was asked.
 pub fn verifier_brief(
+    task: &LongTask,
     step: &PlanStep,
     report: &StepOutcome,
     artifacts: &[ArtifactSummary],
+    context: Option<&str>,
     now: DateTime<Utc>,
 ) -> String {
     let saved: Vec<&ArtifactSummary> = artifacts
@@ -496,6 +534,14 @@ pub fn verifier_brief(
         .filter(|a| a.step_key.as_ref() == Some(step.key()) || report.artifacts().contains(&a.id))
         .collect();
     let mut brief = date_line(now);
+    brief.push_str(&format!("The task's goal: {}\n", task.goal()));
+    if let Some(context) = context.and_then(clip_brief) {
+        brief.push_str(&format!("What the person said about it:\n{context}\n"));
+    }
+    brief.push_str(
+        "Fail the step, too, if what it saved does not serve that goal: if it is about something \
+         else, or comes from the web when the goal asks about this house.\n",
+    );
     brief.push_str(&format!("Step {}: {}\n", step.key(), step.instructions()));
     brief.push_str(&format!(
         "Acceptance check: {}\n",
@@ -522,6 +568,11 @@ pub enum RunEnd {
     /// A household turn stopped it; the step reruns without spending an attempt.
     Preempted,
 }
+
+/// What a helper is told when it stops with turns left but has not reported.
+pub const REPORT_NUDGE: &str = "You stopped without calling step_report, so your step is not \
+     finished. Call step_report now: outcome completed or failed, a few sentences on what you did, \
+     and the ids of the artifacts you saved.";
 
 /// One hand-back per run: the reported one; else, when the helper saved work, that work; else one
 /// read from its last text; else a failure that says why there is none.

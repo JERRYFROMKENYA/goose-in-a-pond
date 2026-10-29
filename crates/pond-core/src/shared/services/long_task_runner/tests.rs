@@ -574,7 +574,7 @@ fn a_made_agent_gets_only_the_tasks_tools_and_the_workers_budget() {
         instructions: "Compare matatu and SGR fares.".into(),
         tools: vec![
             "giap-knowledge".into(),
-            "giap-device".into(),
+            "giap-device-control".into(),
             "giap-made-up".into(),
         ],
     };

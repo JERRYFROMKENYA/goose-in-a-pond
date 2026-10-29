@@ -59,6 +59,7 @@ source "${SCRIPT_DIR}/lib/pond-health.sh"
 source "${SCRIPT_DIR}/lib/install-systemd.sh"
 source "${SCRIPT_DIR}/lib/install-desktop.sh"
 source "${SCRIPT_DIR}/lib/setup-code.sh"
+source "${SCRIPT_DIR}/lib/admin-card.sh"
 source "${SCRIPT_DIR}/lib/connect-setup.sh"
 # setup-code.sh and connect-setup.sh talk through giap.sh's names for these.
 ok()   { success "$@"; }
@@ -120,6 +121,8 @@ SETUP_BIN="${REPO_DIR}/target/release/pond-server"
 [ "$MODE" = "dev" ] && SETUP_BIN="${REPO_DIR}/target/debug/pond-server"
 if [ -x "$SETUP_BIN" ]; then
   setup_code_install_card "$SETUP_BIN" "$DATA_DIR" || true
+  # My Pond's admin card, with its recovery copy sealed to this machine.
+  admin_card_run "" "$SETUP_BIN" "$DATA_DIR" "$(id -un)" || true
 else
   warn "no pond-server binary yet, so no setup card: run pond-server setup-code --card \"$DATA_DIR/setup/card.svg\" once it is built"
 fi

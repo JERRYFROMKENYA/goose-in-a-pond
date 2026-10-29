@@ -22,6 +22,7 @@
 #   bash scripts/giap.sh models pairings         # regenerate the vision pairing table from Hugging Face
 #   bash scripts/giap.sh models pairings --check # only compare it (exit 1 if the committed table is stale)
 #   bash scripts/giap.sh wifi-grant [remove|status]  # Linux: let the pond's user join Wi-Fi from the BLE setup channel (sudo)
+#   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
 #   bash scripts/giap.sh --dry-run …  # print every command instead of running it
@@ -71,6 +72,8 @@ source "$HERE/lib/onnxruntime-setup.sh"
 source "$HERE/lib/model-pairings.sh"
 # shellcheck source=lib/setup-code.sh
 source "$HERE/lib/setup-code.sh"
+# shellcheck source=lib/admin-card.sh
+source "$HERE/lib/admin-card.sh"
 # shellcheck source=lib/connect-setup.sh
 source "$HERE/lib/connect-setup.sh"
 REPO_ROOT="$(cd "$HERE/.." && pwd)"
@@ -800,6 +803,8 @@ doctor() {
   # The printed setup card: claimed is a pond in use, unclaimed one waiting for its first phone.
   setup_code_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR"
   [ "$SETUP_CODE_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
+  admin_card_doctor "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR"
+  [ "$ADMIN_CARD_LEVEL" = warn ] && DOC_WARN=$((DOC_WARN+1))
 
   # The BLE setup channel's radios and the Wi-Fi grant. A pond without them still runs, so these
   # warn rather than fail. macOS asks for its own permissions.
@@ -1618,6 +1623,14 @@ action_deploy() {
   run bash scripts/jetson.sh deploy
 }
 
+# My Pond's admin card, made as the account that runs the pond (docs/architecture/pond-administrator.md).
+action_admin_card() {
+  head1 "Admin card (My Pond)"
+  local user
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  admin_card_run "${1:-}" "$(setup_code_bin "$REPO_ROOT")" "$D_DATA_DIR" "$user"
+}
+
 action_jetson_power() {
   head1 "Jetson power and thermals"
   [ "$D_IS_JETSON" = true ] || { bad "not a Jetson"; return 1; }
@@ -1747,7 +1760,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert) ;;
-  models|wifi-grant|onnxruntime|console) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  models|wifi-grant|onnxruntime|console|admin-card) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -1778,5 +1791,6 @@ case "$CMD" in
   onnxruntime) action_onnxruntime "$CMD_SUB" ;;
   models)    action_models "$CMD_SUB" ;;
   wifi-grant) action_wifi_grant "$CMD_SUB" ;;
+  admin-card) action_admin_card "$CMD_SUB" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;
 esac

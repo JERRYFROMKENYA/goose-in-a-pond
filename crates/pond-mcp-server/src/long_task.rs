@@ -852,6 +852,8 @@ pub struct ArtifactWriteParams {
 
 const TITLE_ALIASES: [&str; 1] = ["name"];
 const ANSWER_ALIASES: [&str; 3] = ["answer_shape", "length", "shape"];
+/// The most steps a short answer's plan may have: one to find it, a second for another place.
+const MAX_SHORT_STEPS: usize = 2;
 const FINISH_ALIASES: [&str; 3] = ["done", "final", "last"];
 
 /// A yes from a bool or the words a model writes for one; anything else is no.
@@ -1301,6 +1303,20 @@ impl TaskWorkMcpServer {
             ));
         };
         let current = repo.list_steps(task.id()).await.map_err(store)?;
+        // Told to plan one step for a short answer, the planner still wrote three, and the answer
+        // took minutes more; one refusal costs less.
+        let shape = match task.answer() {
+            AnswerShape::Auto => answer.unwrap_or(AnswerShape::Auto),
+            chosen => chosen,
+        };
+        if shape == AnswerShape::Short && drafts.len() > MAX_SHORT_STEPS {
+            return Err(Refusal::Rejected(format!(
+                "This is a short answer, and you planned {} steps. Plan one step that finds the \
+                 answer and saves it as the Result, or two when it needs two different places \
+                 looked in, then call plan_write again.",
+                drafts.len()
+            )));
+        }
         let plan =
             validate_plan(&task, drafts, &current).map_err(|e| Refusal::Rejected(e.to_string()))?;
         // Before the steps, so the first worker is briefed for the answer the planner chose.
@@ -2557,6 +2573,24 @@ mod tests {
             steps[0].key().as_str(),
             "step-1",
             "a step with no key takes its place"
+        );
+
+        // A short answer's plan is one step, or two; a longer one is sent back with what to do.
+        let long = worker
+            .run_plan(
+                &meta,
+                params(serde_json::json!({"steps": [
+                    {"role": "r", "instructions": "x"},
+                    {"role": "r", "instructions": "y"},
+                    {"role": "r", "instructions": "z"},
+                ]})),
+            )
+            .await
+            .unwrap_err()
+            .message();
+        assert!(
+            long.contains("short answer, and you planned 3 steps"),
+            "{long}"
         );
     }
 

@@ -4093,4 +4093,11 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   | Who did the cameras see in the last hour? | member: report | report | 4.2 min | 3 (3) |
 
   - The same vision report took 23.7 minutes before #717, and 8.9 with #717 alone.
-  - Round three's "anyone at home" answer was right but not titled Result, so the card showed nothing. The fallback and the last-step line are fixed. Round four's results are recorded in #718.
+  - Rounds four to six found, and #718 fixes, five more ways a run lost time or its answer:
+    - a Result not titled as one;
+    - the same question read as short three times and as a report once;
+    - a Result that compiled its sections;
+    - a weekend plan given a meal plan and a packing list nobody asked for (12.9 minutes and 7 steps, then 8.9 minutes and 5);
+    - a short answer left only in a step's summary.
+  - In round five the pond chose correctly in all four asks, and in round six in all three.
+  - Not verified: a made agent's step on the Orin. The planner made one only when its `new_agent` was unreadable, and that is now dropped.

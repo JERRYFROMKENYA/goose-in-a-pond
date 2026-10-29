@@ -3800,6 +3800,14 @@ async fn run_server(
         settings_repo.clone(),
         scheduler.clone(),
     );
+    // Rehydration opened these before phones could be told; ask now, in the background.
+    if let Some(scheduler) = scheduler.clone() {
+        let sender = notification_sender.clone();
+        tokio::spawn(async move {
+            pond_server::system_notices::announce_missed_runs(scheduler.as_ref(), sender.as_ref())
+                .await;
+        });
+    }
     {
         let event_log = event_log.clone();
         let mut events = event_bus.subscribe();

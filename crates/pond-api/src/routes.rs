@@ -538,6 +538,30 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/long-tasks/{id}/report", get(get_long_task_report))
         .route("/long-tasks/{id}/export", get(export_long_task))
+        // My Pond: a member's device, unlocked with the admin card (`pond_admin.rs`).
+        .route("/admin/status", get(crate::pond_admin::status))
+        .route("/admin/unlock", post(crate::pond_admin::unlock))
+        .route("/admin/lock", post(crate::pond_admin::lock))
+        .route("/admin/overview", get(crate::pond_admin::overview))
+        .route(
+            "/admin/files",
+            get(crate::pond_admin::list_files).delete(crate::pond_admin::delete_file),
+        )
+        .route("/admin/caches", get(crate::pond_admin::caches))
+        .route(
+            "/admin/caches/{id}/clear",
+            post(crate::pond_admin::clear_cache),
+        )
+        .route("/admin/tasks", get(crate::pond_admin::tasks))
+        .route("/admin/tasks/{id}", delete(crate::pond_admin::delete_task))
+        .route(
+            "/admin/tasks/{id}/artifacts/{artifact_id}",
+            delete(crate::pond_admin::delete_artifact),
+        )
+        .route("/admin/health", get(crate::pond_admin::health))
+        .route("/admin/power", get(crate::pond_admin::power))
+        .route("/admin/power/mode", put(crate::pond_admin::set_power_mode))
+        .route("/admin/power/restart", post(crate::pond_admin::restart))
         .route("/agents/prefills", get(agent_prefills))
         .route("/agents/prefills/rebuild", post(rebuild_all_prefills))
         .route(
@@ -7119,23 +7143,10 @@ async fn cleanup_models(
     };
 
     // Never delete a blob whose basename matches an assigned model.
-    let mut protected: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(model_repo) = &state.model_repo {
-        if let Ok(assignments) = model_repo.list_assignments().await {
-            for a in &assignments {
-                if let Ok(Some(m)) = model_repo.get_by_id(&a.model_id).await {
-                    if let Some(fname) = m.filename {
-                        protected.insert(fname);
-                    }
-                    // Legacy migrations left blobs named by bare model name.
-                    protected.insert(m.name.clone());
-                    if let Some(cfg) = m.config_filename {
-                        protected.insert(cfg);
-                    }
-                }
-            }
-        }
-    }
+    let protected = match &state.model_repo {
+        Some(model_repo) => crate::cleanup::protected_model_names(model_repo.as_ref()).await,
+        None => std::collections::HashSet::new(),
+    };
 
     let report = crate::cleanup::run_cleanup(&data_dir, &protected)
         .await

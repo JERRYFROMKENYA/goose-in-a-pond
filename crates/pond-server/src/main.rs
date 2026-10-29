@@ -294,6 +294,25 @@ enum Commands {
         rearm: bool,
     },
 
+    /// Make this pond's admin card: the password that unlocks My Pond on a member's phone.
+    ///
+    /// Prints the password once; the pond keeps only a verifier of it. Run it through
+    /// `bash scripts/giap.sh admin-card`, which also seals a copy that only this machine's root
+    /// can print again.
+    AdminCard {
+        /// Replace the card in force; every phone unlocked with the old card locks
+        #[arg(long)]
+        rotate: bool,
+
+        /// Print {"password","card_id"} instead of the card text
+        #[arg(long)]
+        json: bool,
+
+        /// Print only present or missing; never makes a card
+        #[arg(long, conflicts_with_all = ["json", "rotate"])]
+        status: bool,
+    },
+
     /// The BLE setup channel's radio, which the server runs as its own child (macOS).
     #[command(hide = true)]
     BleHelper,
@@ -654,6 +673,11 @@ async fn async_main(cli: Cli) -> Result<()> {
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
         Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::AdminCard {
+            rotate,
+            json,
+            status,
+        }) => run_admin_card(rotate, json, status).await,
         Some(Commands::SetupCode {
             json,
             card,
@@ -4314,6 +4338,26 @@ async fn run_server(
         Arc::new(spoken_code::SpeakerCodeAnnouncer::new(tts.clone()));
     let spoken_codes = Arc::new(pond_api::spoken_code::SpokenCodes::new(Some(announcer)));
 
+    // My Pond: the admin card unlocks it per device; the host adapter does the work.
+    let pond_admin = {
+        let cards = Arc::new(pond_infra::file_admin_card::FileAdminCardStore::new(
+            &data_dir,
+        ));
+        let host = Arc::new(pond_infra::host_pond_admin::HostPondAdministrator::new(
+            &data_dir,
+            db.system.clone(),
+            Some(model_repo.clone()),
+            pond_infra::host_pond_admin::PowerHost::system(),
+        ));
+        let tasks = Arc::new(pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(
+            db.system.clone(),
+        ));
+        Arc::new(pond_api::pond_admin::PondAdmin::new(
+            pond_core::shared::services::pond_admin::PondAdminService::new(host, tasks),
+            pond_core::security::services::admin_elevation::AdminElevation::new(cards),
+        ))
+    };
+
     let state = Arc::new(AppState {
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
@@ -4422,6 +4466,7 @@ async fn run_server(
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
+        pond_admin: Some(pond_admin),
     });
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
@@ -10684,6 +10729,35 @@ fn run_dashboard() -> Result<()> {
     println!(
         "Through an SSH tunnel (ssh -L 9000:127.0.0.1:{port} <pond>), change only the port.\n\
          Anyone with this link can pair devices until the server restarts; do not share it."
+    );
+    Ok(())
+}
+
+/// Works on the data directory directly, so it answers whether or not the server is running;
+/// a running server reads the new card on the next unlock.
+async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
+    use pond_core::security::ports::admin_card::AdminCardStore as _;
+    let store = pond_infra::file_admin_card::FileAdminCardStore::new(default_data_dir());
+    if status {
+        let present = store.current().await?.is_some();
+        println!("{}", if present { "present" } else { "missing" });
+        return Ok(());
+    }
+    let password = store.issue(rotate)?;
+    let card_id = store.current().await?.unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "password": password.grouped(), "card_id": card_id })
+        );
+        return Ok(());
+    }
+    println!(
+        "Admin card for this Pond (administrator: {})\n\n    {}\n\n\
+         Goose On The Go asks for it in My Pond. Keep it with the setup card, where only the\n\
+         household's adults can reach it. The Pond keeps no copy it can show again.",
+        pond_core::security::domain::admin_card::ADMIN_PRINCIPAL,
+        password.grouped()
     );
     Ok(())
 }

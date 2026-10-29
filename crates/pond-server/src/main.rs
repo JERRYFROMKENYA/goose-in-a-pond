@@ -4611,7 +4611,12 @@ async fn run_server(
     // Every lane job: a turn in flight is not quiet, however long it has been answering.
     {
         let runs = state.runs.clone();
-        inference_lane.watch_turns(move || runs.turn_in_flight());
+        // A background subagent outlives its turn and still holds the device: no chore beside it.
+        inference_lane.watch_turns(move || {
+            use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
+            runs.turn_in_flight()
+                || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
+        });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
     tokio::spawn(run_quiet_compaction(
@@ -7078,7 +7083,9 @@ async fn run_long_task_runner(
     const POLL_SECS: u64 = 30;
     // Short, unlike the chores': a member asked for this work and is waiting for it.
     const QUIET_SECS: u64 = 30;
-    const FLOOR_SECS: u64 = 5;
+    // No spacing between runs: the loop asks again at once only after a run that did something,
+    // and a gap is the window in which a chore takes the slot for a minute or two.
+    const FLOOR_SECS: u64 = 0;
 
     let Some(deps) = pond_mcp_server::installed_orchestrator_deps() else {
         tracing::info!("long-task runner: no orchestrator was installed - not starting");
@@ -7114,9 +7121,13 @@ async fn run_long_task_runner(
         "long-task runner active - off unless `long_tasks_enabled` and `ext_orchestrator_enabled`"
     );
 
+    let mut progressed = false;
     loop {
+        // A run that moved a task on is followed at once: the next step is ready now.
+        let poll = if progressed { 0 } else { POLL_SECS };
+        progressed = false;
         let tick = crate::inference_lane_runner::wait_for_tick(
-            std::time::Duration::from_secs(POLL_SECS),
+            std::time::Duration::from_secs(poll),
             &wake,
         )
         .await;
@@ -7237,7 +7248,7 @@ async fn run_long_task_runner(
         let Some(task) = candidate else {
             continue;
         };
-        if let Err(e) = advance_long_task(
+        match advance_long_task(
             &task,
             tasks.as_ref(),
             &helpers,
@@ -7251,7 +7262,10 @@ async fn run_long_task_runner(
         )
         .await
         {
-            tracing::warn!(task = %task.id(), error = %e, "long-task runner: a run did not complete");
+            Ok(moved) => progressed = moved,
+            Err(e) => {
+                tracing::warn!(task = %task.id(), error = %e, "long-task runner: a run did not complete")
+            }
         }
         drop(slot);
     }
@@ -7273,6 +7287,7 @@ impl LongTaskHelpers {
         role: &pond_core::shared::domain::orchestration::AgentRole,
         work: pond_core::shared::services::step_bindings::StepWork,
         brief: String,
+        may_retry: bool,
     ) -> anyhow::Result<pond_core::shared::services::long_task_runner::RunEnd> {
         use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
         use pond_core::shared::services::long_task_runner as runner;
@@ -7352,7 +7367,7 @@ impl LongTaskHelpers {
         drop(lease);
         let reported = binding.take_report();
         let written = binding.take_written();
-        Ok(runner::settle_run(reported, &written, &run?))
+        Ok(runner::settle_run(reported, &written, &run?, may_retry))
     }
 }
 
@@ -7476,7 +7491,7 @@ async fn advance_long_task(
     sender: &pond_infra::broadcast_notification_sender::BroadcastNotificationSender,
     before_hooks: &pond_server::agent_activations::BeforeHookSources,
     prefills: &dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     use pond_core::shared::domain::long_task::{LongTaskState, OutcomeKind, StepState};
     use pond_core::shared::services::agent_activations as activations;
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
@@ -7488,7 +7503,7 @@ async fn advance_long_task(
     let tries = fruitless.get(task.id()).copied().unwrap_or(0);
 
     match runner::next_run(task, &steps, tries, now) {
-        NextRun::Wait => Ok(()),
+        NextRun::Wait => Ok(false),
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)
@@ -7503,7 +7518,7 @@ async fn advance_long_task(
                 )
                 .await;
             }
-            Ok(())
+            Ok(true)
         }
         NextRun::Finish => {
             tasks
@@ -7522,7 +7537,7 @@ async fn advance_long_task(
             if activations::runner_notifies_at_end(task, &steps, offered, true) {
                 notify_long_task_owner(sender, task, true, body).await;
             }
-            Ok(())
+            Ok(true)
         }
         // An activation's one step is its whole plan; it is never handed to the planner.
         NextRun::Plan(_) if activations::is_activation_task(task) => {
@@ -7539,14 +7554,16 @@ async fn advance_long_task(
                 )
                 .await;
             }
-            Ok(())
+            Ok(true)
         }
         NextRun::Plan(reason) => {
             let plannable = activations::plannable_roles(offered);
             let brief = runner::planner_brief(task, &steps, &artifacts, &plannable, &reason, now);
-            let end = helpers.run(task, planner, StepWork::Plan, brief).await?;
+            let end = helpers
+                .run(task, planner, StepWork::Plan, brief, false)
+                .await?;
             if end == RunEnd::Preempted {
-                return Ok(());
+                return Ok(true);
             }
             let replanned = tasks.list_steps(task.id()).await?;
             if task.state() == LongTaskState::Planning && !replanned.is_empty() {
@@ -7563,7 +7580,7 @@ async fn advance_long_task(
             } else {
                 *fruitless.entry(task.id().to_string()).or_insert(0) += 1;
             }
-            Ok(())
+            Ok(true)
         }
         NextRun::Do(step) => {
             let mut step = step.clone();
@@ -7575,32 +7592,42 @@ async fn advance_long_task(
                     chrono::Utc::now(),
                 )?;
                 tasks.update_step(&step).await?;
-                return Ok(());
+                return Ok(true);
             };
             if let Err(why) = activations::step_role_allowed(task, &step, role) {
                 step.start(now)?;
                 tasks.update_step(&step).await?;
                 step.fail(&why, chrono::Utc::now())?;
                 tasks.update_step(&step).await?;
-                return Ok(());
+                return Ok(true);
             }
             step.start(now)?;
             tasks.update_step(&step).await?;
             // A role's use keeps its prefill inside the retention.
             let _ = prefills.note_used(role.name(), now).await;
             let key = step.key().clone();
-            let mut brief = runner::worker_brief(task, &step, &artifacts, now);
+            let mut bodies = std::collections::HashMap::new();
+            for id in runner::inline_ids(&step, &artifacts) {
+                if let Ok(Some(artifact)) = tasks.get_artifact(task.id(), &id).await {
+                    bodies.insert(id, artifact.body().to_string());
+                }
+            }
+            let mut brief = runner::worker_brief(task, &step, &artifacts, &bodies, now);
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
             brief.push_str(&activations::hand_back_offer(role, offered));
+            let role = role
+                .clone()
+                .with_max_turns(runner::turns_for(role.max_turns(), &step));
+            let may_retry = step.attempts() < runner::MAX_STEP_ATTEMPTS;
             let outcome = match helpers
-                .run(task, role, StepWork::Do(key.clone()), brief)
+                .run(task, &role, StepWork::Do(key.clone()), brief, may_retry)
                 .await
             {
                 Ok(RunEnd::Reported(outcome)) => outcome,
                 Ok(RunEnd::Preempted) => {
                     step.preempt()?;
                     tasks.update_step(&step).await?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) => {
                     step.fail(&e.to_string(), chrono::Utc::now())?;
@@ -7615,7 +7642,7 @@ async fn advance_long_task(
                     let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
                     Some(
                         helpers
-                            .run(task, verifier, StepWork::Check(key), brief)
+                            .run(task, verifier, StepWork::Check(key), brief, false)
                             .await?,
                     )
                 } else {
@@ -7636,7 +7663,7 @@ async fn advance_long_task(
             tasks.update_step(&step).await?;
             if step.state() == StepState::Completed {
                 pond_server::agent_activations::apply_after_actions(
-                    &activations::after_hook_actions(task, role, &step, &outcome),
+                    &activations::after_hook_actions(task, &role, &step, &outcome),
                     task,
                     &step,
                     &outcome,
@@ -7658,7 +7685,7 @@ async fn advance_long_task(
                     )
                     .await?;
             }
-            Ok(())
+            Ok(true)
         }
     }
 }

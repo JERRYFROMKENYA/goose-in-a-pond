@@ -146,7 +146,7 @@ impl CronSchedulerAdapter {
             // Memory for every kind (the UI shows it); `durable_fire_stamp` gates only the write.
             entry.last_run = Some(now);
             entry.persisted.last_run = Some(now);
-            if !durable_fire_stamp(&Self::resolve_kind(entry)) {
+            if !durable_fire_stamp(&Self::resolve_kind(entry), entry.persisted.ask_if_missed) {
                 return;
             }
             // Ticket under the lock, as `save` does, so a racing API edit can't land older state.
@@ -530,10 +530,11 @@ fn validate_kind(kind: &TaskKind) -> Result<()> {
     Ok(())
 }
 
-/// Whether a fire alone is worth a file rewrite: only cooldown rules read the stamp back, and
-/// the cooldown caps those writes; other stamps ride along on the next save, sparing flash.
-fn durable_fire_stamp(kind: &TaskKind) -> bool {
-    matches!(kind, TaskKind::SensorTrigger(spec) if spec.cooldown_secs > 0)
+/// Whether a fire alone is worth a file rewrite: only cooldown rules and schedules that ask
+/// about missed runs read the stamp back (a stale one re-fires a rule, or asks about a run that
+/// happened); other stamps ride along on the next save, sparing flash.
+fn durable_fire_stamp(kind: &TaskKind, ask_if_missed: bool) -> bool {
+    ask_if_missed || matches!(kind, TaskKind::SensorTrigger(spec) if spec.cooldown_secs > 0)
 }
 
 /// Publishes `schedules.json`: one writer at a time, each through its own scratch file, and in
@@ -1863,6 +1864,39 @@ mod tests {
             task.fire_at.is_some(),
             "the one-shot instant must survive rehydration"
         );
+    }
+
+    #[tokio::test]
+    async fn a_schedule_that_asks_about_missed_runs_saves_each_fire_at_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+        for (id, ask) in [("asks", true), ("does-not", false)] {
+            sched
+                .create_task(CreateScheduleRequest {
+                    ask_if_missed: ask,
+                    ..create_req(id, "0 30 6 * * *")
+                })
+                .await
+                .unwrap();
+            sched.run_now(id).await.unwrap();
+        }
+        // Each fire stamps before it runs; give both a moment to land.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        drop(sched);
+
+        let reopened = make_scheduler(tmp.path()).await;
+        let stamped: HashMap<_, _> = reopened
+            .list_tasks()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.id, t.last_run.is_some()))
+            .collect();
+        assert!(
+            stamped["asks"],
+            "a stale stamp would ask about a run that happened"
+        );
+        assert!(!stamped["does-not"], "others still wait for the next save");
     }
 
     #[tokio::test]

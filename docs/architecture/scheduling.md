@@ -131,6 +131,18 @@ latest occurrence of its cron after it last fired (`missed_occurrence`) and keep
 before closes as a `Skipped` run, "Nobody answered before the next run", once a newer fire time has
 passed. One-shots, which already fire late, and event rules ignore the setting.
 
+Once notifications are ready, `serve` asks every paired phone about each waiting question
+(`announce_missed_runs` in `pond-server/src/system_notices.rs`): an `action_required` broadcast,
+"Morning routine didn't run at 06:30. Run it now?", in the schedule's time zone, whose tap opens
+that schedule (`OpenScreen::ScheduleDetail`). The question is answered through
+`SchedulerPort::answer_missed_run` (`POST /schedules/{id}/missed/run` or `.../skip`). The answer
+is taken under the scheduler's lock, so the first one settles it and a later one is refused with
+`NoMissedRun`. Run starts it now with `caught_up_from` set; skip records it `Skipped`, "Skipped by
+a household member". A question also closes, as a skipped run, when the schedule's next fire time
+comes first ("Nobody answered before the next run") or when `ask_if_missed` is switched off
+("Asking was turned off"). `asked_through` keeps the latest missed time asked about, so an
+answered question is not asked again after a restart.
+
 The decision reads `last_run`, so a schedule that asks writes it to disk as each run starts
 (`durable_fire_stamp`); otherwise a stale stamp would ask about a run that happened.
 

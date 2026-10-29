@@ -1492,6 +1492,22 @@ re-reading. None removes a check.
 | Inputs | A step's inputs up to `INLINE_ARTIFACT_TOKENS` each and `INLINE_TOTAL_TOKENS` in all go in its brief whole. A worker then spends no turn and no re-prefill calling `artifact_read` first, and a small model can't skip reading them. Larger inputs stay pull-only (rule 2). |
 | Reliability | A helper that runs out of turns fails its first try instead of having half-done work counted as done. Its retry gets half again as many turns (capped at `MAX_ROLE_MAX_TURNS`), with what it saved inlined so it continues. A "completed" report with no artifact and a summary under 20 characters fails as empty and retries. The verifier, the retry and the planner's replan are unchanged. |
 
+### 8.11 Briefs (Jerry, 2026-10-29)
+
+A helper starts in an empty window and saw only the goal, so anything said earlier in the
+conversation was lost. "I'm lactose intolerant", said three messages before the ask, never reached
+the plan.
+
+| Piece | Design |
+|---|---|
+| The brief | A task-level `Brief` artifact (kind `note`, no step), saved when the task starts. It is in the planner's brief and inlined into every step's, ahead of the step's own inputs. No migration: it's an artifact like any other, scoped to the task's owner |
+| Deep research | The pond writes the brief itself from the conversation before the ask, up to `BRIEF_CHARS` (4,000), keeping the newest. The ask itself is the goal. No model call |
+| `task_start` | Takes `brief`. Its description asks for who it is for, dates and places, budget, diets and allergies, and what was decided or ruled out |
+| `delegate` | `instructions` asks for the same: a full brief, since the agent sees nothing of the conversation |
+| Saved or made agents | A plan step names a saved role, or carries `new_agent` (name, instructions, tools) when none fits. It is stored with the step (migration 0071) and named `new:<name>`. `role_for_agent` builds it from the shipped worker's turns and window share. Its tools are those it asked for within `LONG_TASK_ROOT_GROUPS`, always with the task-work tools. It runs on the conversation's model with the task's scope. It has no compiled snapshot, so its first run starts cold |
+| `delegate` with `new_agent` | The prime may make an agent for one request. `made_role` builds it, and `DelegationAuthority::delegate` narrows its tools to the prime's own, as for any delegate. The prime still can't choose a model |
+| Fuller sections | A research step writing a section is asked for 400 to 900 words of specifics, and a plan for every day or item with its times, places and costs. This is in the step's brief, not its role, so no snapshot is rebuilt |
+
 ---
 
 ## 9. Agents are recipes (designed 2026-10-28; P14-P18)

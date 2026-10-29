@@ -4043,3 +4043,19 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
 - **On hardware.** In containers on the nano: the installer's step ran the real `pond-server` as
   `agamemnon`, and a live voice turn ran with Whisper on CUDA and the USB pair. The nano itself
   was not moved. A desktop shell's voice loop, which runs as the login, is the next step.
+
+**2026-10-29 — PAI-6: briefs, made agents and fuller sections (section 8.11).**
+
+- **What landed.**
+  - Every long task carries a `Brief` artifact. The planner sees it, and it's inlined into every step. Deep research writes it from the conversation before the ask, and `task_start` takes one from the prime.
+  - A plan step or a delegation may carry `new_agent` when no saved role fits (migration 0071). The runner and `made_role` hold its tools to the task's ceiling or to the prime's own.
+  - Research steps are asked for 400 to 900 words of specifics per section.
+- **PAI-1.** The brief holds the owner's own conversation and is scoped like any artifact of the task.
+- **PAI-2.** A made agent asks for tools and is given only those within its ceiling: device control and unknown groups are dropped.
+- **PAI-3.** No preamble changed except the planner's, which rebuilds once. The brief and the section guide ride in step briefs.
+- **Verified on the Orin** (branch `feat/descriptive-dispatch`, E4B QAT, 2026-10-29, a member's paired test device). One turn said "four friends, 12 to 15 December, one vegetarian, we'd rather not fly"; the next asked for deep research with "Plan our trip."
+  - The brief carried that turn, and the prime's acknowledgement named the dates and diet.
+  - The plan went by train and road: SGR and road sections, no flights. Vegetarian appears in the dining section, the meal plan, the itinerary and the result.
+  - Sections were 536 to 617 words, where earlier runs gave about 150 to 600.
+  - 8 steps took 18.3 minutes, two of them on a second try. No draft had an emoji.
+  - The planner chose saved roles for every step, so a made agent is verified by tests only.

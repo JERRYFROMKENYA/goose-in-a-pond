@@ -586,8 +586,12 @@ fn suggest_key(raw: &str) -> Option<String> {
 pub struct StepDraft {
     #[serde(alias = "id", alias = "step_key")]
     pub key: String,
-    #[serde(alias = "agent")]
+    /// Empty when the step makes its own agent with `new_agent`.
+    #[serde(default, alias = "agent")]
     pub role: String,
+    /// A new agent for this step, when no saved role fits.
+    #[serde(default, alias = "custom_agent")]
+    pub new_agent: Option<StepAgent>,
     #[serde(alias = "task", alias = "instruction")]
     pub instructions: String,
     /// Artifact ids the step starts from; it is shown their summaries, never their bodies.
@@ -608,6 +612,35 @@ pub struct StepDraft {
     pub depends_on: Vec<String>,
     #[serde(default, alias = "acceptance_check", alias = "check")]
     pub acceptance: Option<String>,
+}
+
+/// An agent a plan makes for one step because no saved role fits. The runner builds it from these
+/// and holds its tools to the task's ceiling, so a plan can ask for no more than a saved role has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepAgent {
+    pub name: String,
+    pub instructions: String,
+    #[serde(default, alias = "tool_groups", deserialize_with = "one_or_many")]
+    pub tools: Vec<String>,
+}
+
+/// A made agent's step names it `new:<name>`, so the card can tell it from a saved role.
+pub const NEW_AGENT_PREFIX: &str = "new:";
+
+/// Longest name a made agent may have; it is shown on the card.
+const AGENT_NAME_CHARS: usize = 40;
+
+impl StepAgent {
+    fn cleaned(self) -> Option<Self> {
+        let name: String = self.name.trim().chars().take(AGENT_NAME_CHARS).collect();
+        let instructions = self.instructions.trim().to_string();
+        let tools = clean_ids(self.tools);
+        (!name.is_empty() && !instructions.is_empty()).then_some(Self {
+            name,
+            instructions,
+            tools,
+        })
+    }
 }
 
 /// A small model writes `"a, b"` or `"a"` where a list belongs; keys and ids never hold commas.
@@ -644,6 +677,8 @@ pub struct PlanStep {
     failure: Option<String>,
     started_at: Option<DateTime<Utc>>,
     finished_at: Option<DateTime<Utc>>,
+    /// Set when the plan made this step's agent rather than naming a saved role.
+    agent: Option<StepAgent>,
 }
 
 /// A stored step's columns, for [`PlanStep::from_parts`]; holding one grants nothing.
@@ -663,6 +698,7 @@ pub struct PlanStepParts {
     pub failure: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub agent: Option<StepAgent>,
 }
 
 impl PlanStep {
@@ -697,11 +733,17 @@ impl PlanStep {
             failure: capped(parts.failure.as_deref()),
             started_at: parts.started_at,
             finished_at: parts.finished_at,
+            agent: parts.agent.and_then(StepAgent::cleaned),
         })
     }
 
     pub fn task_id(&self) -> &str {
         &self.task_id
+    }
+
+    /// The agent this plan made for the step, when it named no saved role.
+    pub fn agent(&self) -> Option<&StepAgent> {
+        self.agent.as_ref()
     }
 
     pub fn key(&self) -> &StepKey {
@@ -990,7 +1032,11 @@ pub fn validate_plan(
     let first_ordinal = kept.last().map_or(1, |step| step.ordinal.saturating_add(1));
     let mut steps = Vec::with_capacity(drafts.len());
     for (offset, (draft, key)) in drafts.into_iter().zip(keys.iter()).enumerate() {
-        let role = draft.role.trim();
+        let agent = draft.new_agent.and_then(StepAgent::cleaned);
+        let made_role = agent
+            .as_ref()
+            .map(|agent| format!("{NEW_AGENT_PREFIX}{}", agent.name));
+        let role = made_role.as_deref().unwrap_or(draft.role.trim());
         if role.is_empty() {
             return Err(PlanError::MissingRole {
                 step: key.to_string(),
@@ -1033,6 +1079,7 @@ pub fn validate_plan(
             failure: None,
             started_at: None,
             finished_at: None,
+            agent,
         });
     }
 
@@ -1126,6 +1173,7 @@ pub fn validate_appended_step(
         failure: None,
         started_at: None,
         finished_at: None,
+        agent: None,
     });
     Ok(ValidatedPlan {
         task_id: task.id.clone(),
@@ -1949,6 +1997,7 @@ mod test_support {
             failure: None,
             started_at: None,
             finished_at: None,
+            agent: None,
         }
     }
 
@@ -2427,6 +2476,7 @@ mod draft_tests {
                 inputs: vec!["a1".into(), "a2".into()],
                 depends_on: vec!["fetch".into()],
                 acceptance: Some("names a winner".into()),
+                new_agent: None,
             }
         );
     }

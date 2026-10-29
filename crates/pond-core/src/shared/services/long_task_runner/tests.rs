@@ -41,6 +41,7 @@ fn step(key: &str, ordinal: u32, deps: &[&str], state: StepState, attempts: u32)
         failure: (state == StepState::Failed).then(|| "the page would not load".to_string()),
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap()
 }
@@ -172,6 +173,7 @@ fn a_worker_sees_its_inputs_and_its_dependencies_output_and_nothing_else() {
         failure: None,
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap();
     let artifacts = [
@@ -202,6 +204,7 @@ fn the_planner_is_told_what_failed_and_why() {
         &[],
         &[],
         &PlanReason::Blocked(Vec::new()),
+        None,
         t(10),
     );
     assert!(brief.contains("a done"));
@@ -214,7 +217,15 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
     let research = task_in(LongTaskState::Running, None).with_kind(LongTaskKind::Research);
     let step_b = step("b", 0, &[], StepState::Pending, 0);
     let plan = |task: &LongTask| {
-        planner_brief(task, &[], &[], &[], &PlanReason::Blocked(Vec::new()), t(10))
+        planner_brief(
+            task,
+            &[],
+            &[],
+            &[],
+            &PlanReason::Blocked(Vec::new()),
+            None,
+            t(10),
+        )
     };
     let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
 
@@ -338,6 +349,7 @@ fn retry_of(key: &str, failure: &str) -> PlanStep {
         failure: Some(failure.to_string()),
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap()
 }
@@ -498,4 +510,120 @@ fn a_run_stopped_after_it_reported_keeps_its_report() {
         RunEnd::Preempted,
         "stopped before reporting, it reruns"
     );
+}
+
+#[test]
+fn the_brief_carries_what_was_said_before_the_ask_to_the_planner_and_every_step() {
+    use crate::models::domain::message::Role;
+    let earlier = [
+        (Role::User, "We're four, and I'm lactose intolerant."),
+        (Role::Tool, "{\"tool\": \"weather\"}"),
+        (Role::Assistant, "Noted. When are you going?"),
+        (Role::User, "  "),
+    ];
+    let text = conversation_brief(&earlier).unwrap();
+    assert_eq!(
+        text,
+        "Earlier in the conversation:\nThe person: We're four, and I'm lactose intolerant.\nThe assistant: Noted. When are you going?"
+    );
+    assert_eq!(conversation_brief(&[]), None);
+    assert_eq!(conversation_brief(&[(Role::User, " ")]), None);
+
+    let long = "x".repeat(BRIEF_CHARS);
+    let many = [(Role::User, "first, dropped"), (Role::User, long.as_str())];
+    let kept = conversation_brief(&many).unwrap();
+    assert!(
+        !kept.contains("first, dropped"),
+        "the end of the conversation is kept"
+    );
+    assert!(kept.chars().count() <= BRIEF_CHARS + 40, "{}", kept.len());
+
+    let task = task_in(LongTaskState::Running, None);
+    let plan = planner_brief(&task, &[], &[], &[], &PlanReason::Fresh, Some(&text), t(10));
+    assert!(plan.contains("lactose intolerant"), "{plan}");
+
+    let mut brief = summary("brief-1", None, BRIEF_TITLE);
+    brief.tokens = 40;
+    let artifacts = [brief, summary("from-z", Some("z"), "Unrelated")];
+    let b = step("b", 1, &["a"], StepState::Pending, 0);
+    assert_eq!(
+        brief_artifact(&artifacts).map(|a| a.id.as_str()),
+        Some("brief-1")
+    );
+    assert_eq!(
+        inline_ids(&b, &artifacts),
+        vec!["brief-1".to_string()],
+        "every step is given the brief"
+    );
+    let bodies = HashMap::from([("brief-1".to_string(), text.clone())]);
+    assert!(worker_brief(&task, &b, &artifacts, &bodies, t(10)).contains("lactose intolerant"));
+
+    assert_eq!(clip_brief("  "), None);
+    assert_eq!(
+        clip_brief(&"y".repeat(BRIEF_CHARS + 10)).unwrap().len(),
+        BRIEF_CHARS
+    );
+}
+
+#[test]
+fn a_made_agent_gets_only_the_tasks_tools_and_the_workers_budget() {
+    use crate::shared::domain::long_task::StepAgent;
+    let worker = crate::shared::services::long_task_roles::worker_role().unwrap();
+    let agent = StepAgent {
+        name: "Fare Checker".into(),
+        instructions: "Compare matatu and SGR fares.".into(),
+        tools: vec![
+            "giap-knowledge".into(),
+            "giap-device".into(),
+            "giap-made-up".into(),
+        ],
+    };
+    let mut step = step("fares", 0, &[], StepState::Pending, 0);
+    step = PlanStep::from_parts(PlanStepParts {
+        role: "new:Fare Checker".into(),
+        agent: Some(agent.clone()),
+        ..step_parts(&step)
+    })
+    .unwrap();
+    let role = role_for_agent(&step, &agent, &worker).unwrap();
+    assert_eq!(role.name(), "new:Fare Checker");
+    let tools: Vec<&str> = role
+        .requested_tool_groups()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        tools,
+        vec!["giap-knowledge", TASK_WORK_EXTENSION],
+        "no device control, nothing made up"
+    );
+    assert!(role
+        .instructions()
+        .contains("Compare matatu and SGR fares."));
+    assert!(role.instructions().contains("Never put a person's name"));
+    assert_eq!(role.max_turns(), worker.max_turns());
+}
+
+fn step_parts(step: &PlanStep) -> PlanStepParts {
+    PlanStepParts {
+        task_id: step.task_id().to_string(),
+        key: step.key().as_str().to_string(),
+        ordinal: step.ordinal(),
+        role: step.role().to_string(),
+        instructions: step.instructions().to_string(),
+        inputs: step.inputs().to_vec(),
+        depends_on: step
+            .depends_on()
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect(),
+        acceptance: step.acceptance().map(str::to_string),
+        state: step.state(),
+        attempts: step.attempts(),
+        summary: step.summary().map(str::to_string),
+        failure: step.failure().map(str::to_string),
+        started_at: step.started_at(),
+        finished_at: step.finished_at(),
+        agent: step.agent().cloned(),
+    }
 }

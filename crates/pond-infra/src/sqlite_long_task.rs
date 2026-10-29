@@ -37,10 +37,10 @@ type TaskRow = (
 
 /// Column order must match `StepRow`.
 const STEP_COLUMNS: &str = "task_id, step_key, ordinal, role, instructions, inputs, depends_on, \
-     acceptance, state, attempts, summary, failure, started_at, finished_at";
+     acceptance, state, attempts, summary, failure, started_at, finished_at, agent";
 
 /// `(task_id, step_key, ordinal, role, instructions, inputs, depends_on, acceptance, state,
-/// attempts, summary, failure, started_at, finished_at)`.
+/// attempts, summary, failure, started_at, finished_at, agent)`.
 type StepRow = (
     String,
     String,
@@ -52,6 +52,7 @@ type StepRow = (
     Option<String>,
     String,
     i64,
+    Option<String>,
     Option<String>,
     Option<String>,
     Option<String>,
@@ -213,6 +214,7 @@ fn row_to_step(row: StepRow) -> Result<PlanStep> {
         failure,
         started_at,
         finished_at,
+        agent,
     ) = row;
     let state = StepState::parse(&state)
         .with_context(|| format!("unreadable state on step {step_key} of {task_id}: {state}"))?;
@@ -230,6 +232,11 @@ fn row_to_step(row: StepRow) -> Result<PlanStep> {
         failure,
         started_at: parse_opt_ts(started_at)?,
         finished_at: parse_opt_ts(finished_at)?,
+        agent: agent
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .with_context(|| format!("unreadable agent on {context}"))?,
         task_id,
         key: step_key,
     };
@@ -439,8 +446,8 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             sqlx::query(
                 "INSERT INTO long_task_steps \
                  (task_id, step_key, ordinal, role, instructions, inputs, depends_on, acceptance, \
-                  state, attempts, summary, failure, started_at, finished_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                  state, attempts, summary, failure, started_at, finished_at, agent) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(step.task_id())
             .bind(step.key().as_str())
@@ -456,6 +463,7 @@ impl LongTaskRepository for SqliteLongTaskRepository {
             .bind(step.failure())
             .bind(step.started_at().map(sql_ts))
             .bind(step.finished_at().map(sql_ts))
+            .bind(step.agent().map(serde_json::to_string).transpose()?)
             .execute(&mut *tx)
             .await
             .with_context(|| format!("storing step {} of long task {task_id}", step.key()))?;
@@ -640,6 +648,31 @@ mod tests {
             at,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_step_keeps_the_agent_its_plan_made() {
+        use pond_core::shared::domain::long_task::StepAgent;
+        let (_tmp, _pool, repo) = repo().await;
+        let task = household_task(t(0));
+        repo.create_task(&task).await.unwrap();
+        let made = StepDraft {
+            role: String::new(),
+            new_agent: Some(StepAgent {
+                name: "Fare Checker".into(),
+                instructions: "Compare matatu and SGR fares.".into(),
+                tools: vec!["giap-knowledge".into()],
+            }),
+            ..draft("fares", &[])
+        };
+        plan(&repo, &task, vec![made, draft("write", &["fares"])]).await;
+        let fares = step(&repo, &task, "fares").await;
+        assert_eq!(fares.role(), "new:Fare Checker");
+        assert_eq!(
+            fares.agent().unwrap().tools,
+            vec!["giap-knowledge".to_string()]
+        );
+        assert!(step(&repo, &task, "write").await.agent().is_none());
     }
 
     #[tokio::test]

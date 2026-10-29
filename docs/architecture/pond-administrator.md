@@ -137,7 +137,8 @@ moves an existing one, and `service-account undo` moves it back. Both live in
 | Data | moved to `/var/lib/goose-in-a-pond` (`0750`, `agamemnon`), with a link at the old path for the tools that look there. The login keeps read access through an ACL, inherited by new files. `setfacl -n` keeps each file's own mask, so what the pond creates with a private mode stays private (`setup/`, `secrets/`, `tls/`, `.runtime_host_credential`); a file it creates under the default umask is readable by the login, as it was when the login owned it |
 | Unit | a system unit, `User=agamemnon`, `POND_DATA_DIR=/var/lib/goose-in-a-pond` |
 | Power and Wi-Fi | the power drop-in and the Wi-Fi polkit grant name `agamemnon`; `connect_pond_user` reads it from the unit's `User=` |
-| Undo | the move keeps the old scope, user, data directory and unit file in `/var/lib/goose-in-a-pond-admin/before-agamemnon/`; undo restores them byte for byte. The account itself stays, locked and owning nothing |
+| The login | `/etc/sudoers.d/goose-in-a-pond-login` (checked by `visudo`) lets the login that installed the pond start, stop and restart `goose-in-a-pond.service` and run commands as `agamemnon`, without a password, and nothing as root. Jerry chose this on 2026-10-29 so deploys, builds and Claude sessions keep working unattended. `jetson.sh deploy`, the console, the ONNX Runtime build, `kiosk.sh` and the bake-off checks use it when the unit's `User=` is `agamemnon` |
+| Undo | the move keeps the old scope, user, data directory and unit file in `/var/lib/goose-in-a-pond-admin/before-agamemnon/`; undo restores them byte for byte and removes the login's drop-in. The account itself stays, locked and owning nothing |
 | Existing ponds | untouched: `giap.sh install` passes `--no-service` when a unit exists, and the installer leaves a unit run by another account alone |
 | Re-running the installer | refused on a pond run by `agamemnon`, because its steps write the data directory as the login. `giap.sh update` updates such a pond |
 
@@ -168,14 +169,10 @@ card and setup code lines ask as `agamemnon` with `sudo -n`, and say so instead 
 ## Not in this change
 
 - **The nano's move.** It waits for Jerry.
-- **A desktop shell on the same board** (the app, or `scripts/jetson/kiosk.sh`). It runs as the
-  login: it starts the voice loop (`pond-server chat --voice`), which opens the data directory
-  itself, and it signs in to the dashboard with the host credential. After a move it can do
-  neither, and `giap.sh service-account` warns when the kiosk unit is installed. The next step is
-  for the shell to start its voice child as `agamemnon`, through a sudoers rule for exactly that
-  command or a voice unit. A phone's voice goes through the server and works.
-- **The dev tools that assume a user unit**: `scripts/jetson.sh deploy` and `jetson-remote.sh`,
-  `console-collect.sh`, the ONNX Runtime build's stop and start, the bake-off scripts and
-  `kiosk.sh`. `giap.sh` itself (install, build, update, service menu) follows the unit's scope.
+- **The desktop app's voice on the same board.** The app runs as the login and starts its voice
+  loop (`pond-server chat --voice`), which opens the data directory itself. After a move that child
+  must run as `agamemnon`: `VoiceChildProcess` should start it with `sudo -n -u agamemnon`, which
+  the login's drop-in allows. `kiosk.sh` already signs in through it. A phone's voice goes through
+  the server and works.
 - **The desktop app.** My Pond is on the phone only; the desktop already reaches the host through
   the host credential.

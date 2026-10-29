@@ -4059,3 +4059,38 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - Sections were 536 to 617 words, where earlier runs gave about 150 to 600.
   - 8 steps took 18.3 minutes, two of them on a second try. No draft had an emoji.
   - The planner chose saved roles for every step, so a made agent is verified by tests only.
+
+**2026-10-29 — PAI-6: plans that read the house (section 8.12, #717).**
+
+- **What landed.**
+  - A long task's helpers may read the house through `HOUSEHOLD_READ_TOOLS`: recent camera events, camera automations, schedules and the device list.
+  - Plans are no longer refused over extra or misspelt fields, and every refused tool call is traced with its message.
+  - The verifier checks relevance to the goal. `artifact_write` can finish a step. A helper that stops without reporting is nudged once in its own session.
+  - A chore waits 30 minutes behind a member's task. Goose#23 raises the snapshot cap to 10,240 tokens.
+- **PAI-1.** The read tools return what a member's own turn would. A guest child gets none of those that guests can't see.
+- **PAI-2.** The read tools are named singly. `with_read_tools` keeps only names on that list, so no caller can grant a tool that sends a picture, acts or schedules. A chat turn's delegations get none.
+- **PAI-3.** The prime's snapshot now holds its whole preamble: 7,418 tokens loaded where 6,144 were before. The worker's preamble grew by its new tools and rebuilt once.
+
+**2026-10-29 — PAI-6: the answer the person wants (section 8.13, #718).**
+
+- **What landed.**
+  - Each task has an answer shape (migration 0073): short, report, or auto. The member chooses it beside the deep-research chip (desktop here, phone in goose-on-the-go#209), or the prime passes it to `task_start`, or the planner reads it from the ask.
+  - A chosen short answer runs one step with no planner, and the card shows it whole.
+  - Waits, keys, string agents and report artifacts that name things loosely are resolved, not refused.
+  - Each helper holds only the task tools its job uses.
+  - The quiet before a task starts is 10 s, re-checked when it is due.
+- **PAI-1.** `answer_text` goes only in the views that already scope a task to its owner.
+- **PAI-2.** `tools_withheld` only narrows a spec, never widens it. The link fix touches only a bare web address in a link's target.
+- **PAI-3.** Each helper's preamble shrank by the tools it no longer holds and rebuilt once. The prefill compile withholds the same, so snapshots match their runs.
+- **Verified on the Orin** (branch `feat/answer-shape`, E4B QAT, 2026-10-29, a member's paired test device). Four rounds of the same five asks, fixing between rounds. Round three:
+
+  | Ask | Chosen by | Shape | Time | Steps (tries) |
+  |---|---|---|---|---|
+  | Who did the cameras see in the last hour? | member: short | short | 1.0 min | 1 (1) |
+  | Is anyone at home right now? | pond | short | 1.2 min | 1 (1) |
+  | Fastest way from Nairobi to Mombasa? | pond | short | 1.5 min | 1 (1) |
+  | Create a report of all vision events | pond | report | 7.5 min | 4 (4) |
+  | Who did the cameras see in the last hour? | member: report | report | 4.2 min | 3 (3) |
+
+  - The same vision report took 23.7 minutes before #717, and 8.9 with #717 alone.
+  - Round three's "anyone at home" answer was right but not titled Result, so the card showed nothing. The fallback and the last-step line are fixed. Round four's results are recorded in #718.

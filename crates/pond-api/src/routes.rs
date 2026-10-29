@@ -15908,7 +15908,12 @@ async fn long_task_report(
     if events.is_empty() {
         events = report::itinerary_events(&markdown, task.created_at().date_naive());
     }
-    Ok((markdown, events, sections.len()))
+    let shown = if report::holds_its_sections(summary.as_deref().unwrap_or(""), &sections) {
+        0
+    } else {
+        sections.len()
+    };
+    Ok((markdown, events, shown))
 }
 
 /// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with

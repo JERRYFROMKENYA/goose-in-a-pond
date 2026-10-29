@@ -407,10 +407,10 @@ const REPORT_PLAN: &str = "The person wants all of it: plan the steps the work n
 
 /// Nobody chose a length, so the planner reads it from the ask; short when unsure, for speed.
 const DECIDE_ANSWER: &str = "Nobody has said how long the answer should be, so decide it from \
-     the goal and what the person said, and pass it as plan_write's answer. short suits a \
-     question with one answer: a fact, a number, a yes or no, a check, what happened, or a choice \
-     among a few named options. report suits a trip, a plan, a comparison of many options, a big \
-     decision, or an ask to be thorough or for a report. When it could be either, choose short.\n";
+     the goal and what the person said, and pass it as plan_write's answer. Choose report only \
+     when the person asked for a report, a plan such as a trip or a meal plan, a comparison of \
+     many options, or to be thorough. Anything else is short, a question with one answer most of \
+     all: a fact, a number, a time, a yes or no, the fastest or best way, or what happened.\n";
 
 /// A research step works from sources, not from what a small model remembers, and keeps the
 /// household's particulars out of what it sends to a search engine.

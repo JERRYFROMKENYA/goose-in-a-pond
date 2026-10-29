@@ -1053,6 +1053,21 @@ impl SchedulerPort for CronSchedulerAdapter {
             validate_kind(kind)?;
         }
 
+        // Switching asking off settles a waiting question; the save below keeps it settled.
+        if req.ask_if_missed == Some(false) {
+            let waiting = {
+                let mut guard = self.tasks.lock().await;
+                guard
+                    .get_mut(id)
+                    .and_then(|e| e.persisted.missed_run.take())
+            };
+            if let Some(missed) = waiting {
+                self.run_history
+                    .record_skipped(id, missed.due_at, SkipReason::AskingTurnedOff.as_str())
+                    .await;
+            }
+        }
+
         // `fire_at` (given, or derived via `once`) makes a one-shot with the `"@once"` cron;
         // a real `cron` alone makes it recurring again and clears `fire_at`.
         // A new zone moves every occurrence, so it re-registers the job as a new cron does.
@@ -2157,6 +2172,33 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, RunStatus::Completed);
         assert_eq!(runs[0].caught_up_from, Some(due));
+    }
+
+    #[tokio::test]
+    async fn turning_asking_off_settles_a_waiting_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sched, due) = asking_about_a_missed_morning(tmp.path()).await;
+
+        sched
+            .update_task(
+                "morning",
+                UpdateScheduleRequest {
+                    ask_if_missed: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let runs = settled_runs(&sched).await;
+        assert_eq!(runs[0].started_at, due);
+        assert_eq!(
+            runs[0].result.as_deref(),
+            Some(SkipReason::AskingTurnedOff.as_str())
+        );
+        drop(sched);
+        let reopened = make_scheduler(tmp.path()).await;
+        assert_eq!(reopened.list_tasks().await.unwrap()[0].missed_run, None);
     }
 
     #[tokio::test]

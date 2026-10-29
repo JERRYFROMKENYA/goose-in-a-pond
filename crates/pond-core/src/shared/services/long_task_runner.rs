@@ -355,10 +355,11 @@ const RESEARCH_SOURCES: &str = "This is research the person asked for. First dec
      be read and how the person can get it.\n";
 
 /// A short answer is one or two steps: a plan with sections is the slow, long kind.
-const SHORT_PLAN: &str = "The person wants a short answer. Plan one step, or two when the \
-     answer needs looking in two places, and no sections. The last step saves the Result: the \
-     answer itself in its first sentence, at most 150 words in all, with its sources, and no \
-     heading.\n";
+const SHORT_PLAN: &str = "The person wants a short answer. Plan one step that finds the answer \
+     and saves it as the Result itself. Plan a second step only when the answer needs two \
+     different places looked in, never a step that only writes or compiles, and no sections. The \
+     Result is the answer in its first sentence, at most 150 words in all, with its sources, and \
+     no heading.\n";
 
 /// A research report gathers, writes a section per part, then the Result that opens it.
 const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the question needs: \

@@ -7,15 +7,16 @@
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
 use pond_core::shared::domain::long_task::{
-    next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact, ArtifactKind,
-    ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused, OutcomeKind,
-    PlanStep, StalePlan, StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
+    match_waits_by_name, next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact,
+    ArtifactKind, ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused,
+    OutcomeKind, PlanStep, StalePlan, StepDraft, StepOutcome, StepState, DEFAULT_LONG_TASK_STEPS,
 };
 use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
 use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
 use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+use pond_core::shared::services::long_task_roles::WORKER_ROLE;
 use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
@@ -34,7 +35,7 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
@@ -1189,6 +1190,7 @@ impl TaskWorkMcpServer {
                 Value::String(text) => text,
                 other => other.to_string(),
             })
+            .map(|text| absolute_links(&text))
             .unwrap_or_default();
         let finish = says_yes(
             params
@@ -1243,27 +1245,19 @@ impl TaskWorkMcpServer {
         if helper.binding.work == StepWork::Plan {
             return Err(Refusal::PlannerDoesNotReport);
         }
-        let outcome = StepOutcome::from_json(&report_object(params))
+        let mut outcome = StepOutcome::from_json(&report_object(params))
             .map_err(|e| Refusal::Rejected(e.to_string()))?;
         if !outcome.artifacts().is_empty() {
-            let held: HashSet<String> = helper
+            let held = helper
                 .deps
                 .repo
                 .list_artifacts(&helper.binding.task_id)
                 .await
-                .map_err(store)?
-                .into_iter()
-                .map(|artifact| artifact.id)
-                .collect();
-            let unknown: Vec<String> = outcome
-                .artifacts()
-                .iter()
-                .filter(|id| !held.contains(*id))
-                .cloned()
-                .collect();
-            if !unknown.is_empty() {
-                return Err(Refusal::UnknownArtifacts(unknown));
-            }
+                .map_err(store)?;
+            let written = self.bindings.written_by(&helper.root);
+            let named = name_artifacts(outcome.artifacts(), &held, &written)
+                .map_err(Refusal::UnknownArtifacts)?;
+            outcome = outcome.with_artifacts(named);
         }
         let said = outcome_phrase(outcome.outcome());
         if !self.bindings.report(&helper.root, outcome) {
@@ -1333,6 +1327,13 @@ impl TaskWorkMcpServer {
                 quoted(&kept)
             ));
         }
+        for wait in plan.relaxed_waits() {
+            text.push_str(&format!(
+                " `{}` waited for `{}`, which is not a step here, so it waits for every step \
+                 before it.",
+                wait.step, wait.missing
+            ));
+        }
         if !ignored.is_empty() {
             text.push_str(&format!(
                 " Ignored, as no step reads them: {}.",
@@ -1395,6 +1396,79 @@ fn outcome_phrase(outcome: OutcomeKind) -> &'static str {
     }
 }
 
+/// A Markdown link whose target is a bare web address, `[Guide](rome2rio.com/x)`, with `https://`
+/// put in front: the model shortens the address the search gave, and the card would open it as a
+/// path on the pond.
+fn absolute_links(body: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 16);
+    let mut rest = body;
+    while let Some(at) = rest.find("](") {
+        let start = at + 2;
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let end = rest.find(')').unwrap_or(rest.len());
+        let target = &rest[..end];
+        let host = target.split('/').next().unwrap_or("");
+        let bare = !target.contains("://")
+            && !target.contains(char::is_whitespace)
+            && !target.starts_with(['/', '#', '.'])
+            && !target.starts_with("mailto:")
+            && host.contains('.')
+            && host
+                .rsplit('.')
+                .next()
+                .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
+        if bare {
+            out.push_str("https://");
+        }
+        out.push_str(target);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A report's artifacts as ids. A model names one by its title, or by a placeholder it made up;
+/// refusing that cost a whole try, so a title is read as its artifact, and anything else as what
+/// this run saved. Only a run that saved nothing is refused, with the names it got wrong.
+fn name_artifacts(
+    asked: &[String],
+    held: &[ArtifactSummary],
+    written: &[String],
+) -> Result<Vec<String>, Vec<String>> {
+    let mut ids = Vec::with_capacity(asked.len());
+    let mut unknown = Vec::new();
+    for raw in asked {
+        let wanted = raw.trim();
+        let found = held
+            .iter()
+            .find(|a| a.id == wanted)
+            .or_else(|| {
+                held.iter()
+                    .filter(|a| a.title.trim().eq_ignore_ascii_case(wanted))
+                    .max_by_key(|a| a.created_at)
+            })
+            .map(|a| a.id.clone());
+        match found {
+            Some(id) if !ids.contains(&id) => ids.push(id),
+            Some(_) => {}
+            None => unknown.push(raw.clone()),
+        }
+    }
+    if unknown.is_empty() {
+        return Ok(ids);
+    }
+    if written.is_empty() {
+        return Err(unknown);
+    }
+    for id in written {
+        if !ids.contains(id) {
+            ids.push(id.clone());
+        }
+    }
+    Ok(ids)
+}
+
 /// Each step parsed on its own, so every unreadable step is named in one refusal. Also returns the
 /// fields no step reads, which are ignored rather than refused.
 fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refusal> {
@@ -1412,7 +1486,7 @@ fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refu
         object @ Value::Object(_) => vec![object],
         _ => return Err(Refusal::Malformed(shape.to_string())),
     };
-    let mut drafts = Vec::with_capacity(items.len());
+    let mut read = Vec::with_capacity(items.len());
     let mut unreadable = Vec::new();
     let mut ignored: Vec<String> = Vec::new();
     for (i, item) in items.into_iter().enumerate() {
@@ -1421,13 +1495,13 @@ fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refu
             .map(|fields| fields.keys().cloned().collect())
             .unwrap_or_default();
         match read_step_draft(item, i + 1) {
-            Ok((draft, skipped)) => {
-                drafts.push(draft);
-                for name in skipped {
-                    if !ignored.contains(&name) {
-                        ignored.push(name);
+            Ok(step) => {
+                for name in &step.ignored {
+                    if !ignored.contains(name) {
+                        ignored.push(name.clone());
                     }
                 }
+                read.push(step);
             }
             Err(e) if had.is_empty() => {
                 unreadable.push(format!("step {} cannot be read: {e}", i + 1))
@@ -1440,7 +1514,7 @@ fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refu
         }
     }
     if !unreadable.is_empty() {
-        let fine = if drafts.is_empty() {
+        let fine = if read.is_empty() {
             String::new()
         } else {
             " The other steps are fine; send them again unchanged with these fixed.".to_string()
@@ -1451,6 +1525,18 @@ fn plan_drafts(raw: Option<Value>) -> Result<(Vec<StepDraft>, Vec<String>), Refu
             capitalised(&unreadable.join("; "))
         )));
     }
+    match_waits_by_name(&mut read);
+    let drafts = read
+        .into_iter()
+        .map(|step| {
+            let mut draft = step.draft;
+            // A step that names neither a role nor an agent is the general hand's.
+            if draft.role.trim().is_empty() && draft.new_agent.is_none() {
+                draft.role = WORKER_ROLE.to_string();
+            }
+            draft
+        })
+        .collect();
     Ok((drafts, ignored))
 }
 
@@ -2428,7 +2514,7 @@ mod tests {
             .unwrap();
         assert!(saved.contains("`find-events`, `sum`"), "{saved}");
         assert!(
-            saved.contains("Ignored, as no step reads them: `title`, `tools`"),
+            saved.contains("Ignored, as no step reads them: `tools`"),
             "{saved}"
         );
         assert!(saved.contains("`new_agent`"), "{saved}");
@@ -2454,6 +2540,62 @@ mod tests {
             steps[0].key().as_str(),
             "step-1",
             "a step with no key takes its place"
+        );
+    }
+
+    #[test]
+    fn a_bare_web_address_in_a_link_gets_its_scheme_and_nothing_else_changes() {
+        assert_eq!(
+            absolute_links("Train [Rome2rio](rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."),
+            "Train [Rome2rio](https://rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."
+        );
+        for kept in [
+            "[snap](/api/v1/camera/porch/snapshot)",
+            "[top](#result)",
+            "[mail](mailto:a@b.co)",
+            "[file](report.v2)",
+            "[odd](not a link)",
+            "no link (rome2rio.com) here",
+        ] {
+            assert_eq!(absolute_links(kept), kept);
+        }
+    }
+
+    #[test]
+    fn a_report_may_name_its_artifacts_by_title_or_fall_back_to_what_the_run_saved() {
+        let summary = |id: &str, title: &str, at: i64| ArtifactSummary {
+            id: id.into(),
+            task_id: "t".into(),
+            step_key: None,
+            kind: ArtifactKind::Draft,
+            title: title.into(),
+            summary: String::new(),
+            tokens: 10,
+            created_at: chrono::DateTime::from_timestamp(1_790_000_000 + at, 0).unwrap(),
+        };
+        let held = [
+            summary("a1", "Draft: Camera Events", 0),
+            summary("a2", "Result", 5),
+        ];
+        let asked = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            name_artifacts(&asked(&["a2", "draft: camera events"]), &held, &[]),
+            Ok(asked(&["a2", "a1"]))
+        );
+        assert_eq!(
+            name_artifacts(
+                &asked(&["the_artifact_id_from_previous_write_call"]),
+                &held,
+                &asked(&["a1"])
+            ),
+            Ok(asked(&["a1"])),
+            "a placeholder reads as what this run saved"
+        );
+        assert_eq!(
+            name_artifacts(&asked(&["made-up"]), &held, &[]),
+            Err(asked(&["made-up"])),
+            "a run that saved nothing is told which names were wrong"
         );
     }
 

@@ -724,7 +724,7 @@ const KEY_FALLBACKS: &[&str] = &["name", "title", "step", "step_name", "step_id"
 pub fn read_step_draft(
     value: serde_json::Value,
     position: usize,
-) -> Result<(StepDraft, Vec<String>), serde_json::Error> {
+) -> Result<ReadStep, serde_json::Error> {
     let squash = |name: &str| -> String {
         name.chars()
             .filter(char::is_ascii_alphanumeric)
@@ -732,6 +732,7 @@ pub fn read_step_draft(
             .collect()
     };
     let mut ignored = Vec::new();
+    let mut names = Vec::new();
     let value = match value {
         serde_json::Value::Object(fields) => {
             // Exact names first, so a field spelt right wins over a near spelling of it.
@@ -744,6 +745,15 @@ pub fn read_step_draft(
                     near.push((name, field));
                 }
             }
+            // A planner writes `new_agent: "Forager Gosling: ..."` meaning a role; only an object
+            // makes an agent, so a string is dropped rather than refusing the plan.
+            if read
+                .get("new_agent")
+                .is_some_and(|agent| !agent.is_object() && !agent.is_null())
+            {
+                read.remove("new_agent");
+                ignored.push("new_agent".to_string());
+            }
             let mut unread = Vec::new();
             for (name, field) in near {
                 match STEP_DRAFT_FIELDS
@@ -754,6 +764,18 @@ pub fn read_step_draft(
                         read.insert((*known).to_string(), field);
                     }
                     _ => unread.push((name, field)),
+                }
+            }
+            for (name, field) in &unread {
+                if KEY_FALLBACKS
+                    .iter()
+                    .any(|fallback| squash(fallback) == squash(name))
+                {
+                    match field {
+                        serde_json::Value::String(text) => names.push(text.trim().to_string()),
+                        serde_json::Value::Number(n) => names.push(format!("step-{n}")),
+                        _ => {}
+                    }
                 }
             }
             let keyed = ["key", "id", "step_key"]
@@ -775,12 +797,57 @@ pub fn read_step_draft(
                 let key = named.unwrap_or_else(|| format!("step-{position}"));
                 read.insert("key".to_string(), serde_json::Value::String(key));
             }
-            ignored.extend(unread.into_iter().map(|(name, _)| name));
+            // A name or title is how other steps' waits may name this one, so it is not ignored.
+            ignored.extend(
+                unread
+                    .into_iter()
+                    .map(|(name, _)| name)
+                    .filter(|name| !KEY_FALLBACKS.iter().any(|f| squash(f) == squash(name))),
+            );
             serde_json::Value::Object(read)
         }
         other => other,
     };
-    Ok((serde_json::from_value(value)?, ignored))
+    Ok(ReadStep {
+        draft: serde_json::from_value(value)?,
+        ignored,
+        names,
+    })
+}
+
+/// One step of a `plan_write` call as read: the draft, the fields it ignored, and the names it
+/// went by besides its key, which another step's wait may use.
+#[derive(Debug, Clone)]
+pub struct ReadStep {
+    pub draft: StepDraft,
+    pub ignored: Vec<String>,
+    pub names: Vec<String>,
+}
+
+/// Point waits that name a step by its name or title at that step's key: the planner often waits
+/// for "Gather camera events" while keying the step `step-1`.
+pub fn match_waits_by_name(steps: &mut [ReadStep]) {
+    let slug = |raw: &str| suggest_key(raw).unwrap_or_else(|| raw.trim().to_ascii_lowercase());
+    let keys: Vec<String> = steps.iter().map(|step| slug(&step.draft.key)).collect();
+    let named: Vec<(String, String)> = steps
+        .iter()
+        .flat_map(|step| {
+            step.names
+                .iter()
+                .map(|name| (slug(name), step.draft.key.clone()))
+        })
+        .collect();
+    for step in steps.iter_mut() {
+        for wait in &mut step.draft.depends_on {
+            let wanted = slug(wait);
+            if keys.contains(&wanted) {
+                continue;
+            }
+            if let Some((_, key)) = named.iter().find(|(name, _)| *name == wanted) {
+                *wait = key.clone();
+            }
+        }
+    }
 }
 
 /// An agent a plan makes for one step because no saved role fits. The runner builds it from these
@@ -1064,6 +1131,14 @@ pub struct ValidatedPlan {
     task_id: String,
     steps: Vec<PlanStep>,
     kept: Vec<StepKey>,
+    relaxed: Vec<RelaxedWait>,
+}
+
+/// A wait for a step the plan does not have, kept as a wait for every step before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaxedWait {
+    pub step: String,
+    pub missing: String,
 }
 
 impl ValidatedPlan {
@@ -1079,6 +1154,11 @@ impl ValidatedPlan {
     /// Steps Completed or Running when checked; new steps may wait for them, so they must stay so.
     pub fn kept_keys(&self) -> &[StepKey] {
         &self.kept
+    }
+
+    /// Waits for steps the plan does not have, each now a wait for every step before it.
+    pub fn relaxed_waits(&self) -> &[RelaxedWait] {
+        &self.relaxed
     }
 
     /// Whether the plan still fits the stored `(key, state)` pairs; a store calls this inside
@@ -1200,6 +1280,7 @@ pub fn validate_plan(
 
     let first_ordinal = kept.last().map_or(1, |step| step.ordinal.saturating_add(1));
     let mut steps = Vec::with_capacity(drafts.len());
+    let mut relaxed = Vec::new();
     for (offset, (draft, key)) in drafts.into_iter().zip(keys.iter()).enumerate() {
         let agent = draft.new_agent.and_then(StepAgent::cleaned);
         let made_role = agent
@@ -1228,10 +1309,18 @@ pub fn validate_plan(
                 .get(raw)
                 .or_else(|| near.as_deref().and_then(|near| known.get(near)))
             else {
-                return Err(PlanError::UnknownDependency {
+                // Refusing the plan over one wait cost the planner its turns: this step waits for
+                // every one before it instead, which keeps the order and hands it all their work.
+                for earlier in &keys[..offset] {
+                    if !depends_on.contains(earlier) {
+                        depends_on.push(earlier.clone());
+                    }
+                }
+                relaxed.push(RelaxedWait {
                     step: key.to_string(),
                     missing: raw.to_string(),
                 });
+                continue;
             };
             if !depends_on.contains(dep) {
                 depends_on.push(dep.clone());
@@ -1263,6 +1352,7 @@ pub fn validate_plan(
         task_id: task.id.clone(),
         steps,
         kept: kept.iter().map(|step| step.key.clone()).collect(),
+        relaxed,
     })
 }
 
@@ -1356,6 +1446,7 @@ pub fn validate_appended_step(
             .filter(|step| step.state.survives_replan())
             .map(|step| step.key.clone())
             .collect(),
+        relaxed: Vec::new(),
     })
 }
 
@@ -1672,6 +1763,11 @@ impl StepOutcome {
 
     pub fn with_asks(mut self, asks: HandBackAsks) -> Self {
         self.asks = asks;
+        self
+    }
+
+    pub fn with_artifacts(mut self, artifacts: Vec<String>) -> Self {
+        self.artifacts = clean_ids(artifacts);
         self
     }
 
@@ -2740,7 +2836,7 @@ mod draft_tests {
     #[test]
     fn a_misspelt_field_is_read_as_the_one_it_means_and_an_unknown_one_is_named() {
         for spelt in ["dependson", "dependsOn", "Depends-On"] {
-            let (draft, ignored) = read_step_draft(
+            let ReadStep { draft, ignored, .. } = read_step_draft(
                 serde_json::json!({
                     "key": "b", "role": "r", "instructions": "go", spelt: ["a"]
                 }),
@@ -2754,7 +2850,7 @@ mod draft_tests {
             );
             assert!(ignored.is_empty(), "{spelt}: {ignored:?}");
         }
-        let (draft, ignored) = read_step_draft(
+        let ReadStep { draft, ignored, .. } = read_step_draft(
             serde_json::json!({
                 "key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"],
                 "depends_on": ["a"], "dependsOn": ["c"]
@@ -2775,7 +2871,10 @@ mod draft_tests {
 
     #[test]
     fn a_step_with_no_key_takes_one_from_its_name_or_its_place() {
-        let read = |value: serde_json::Value| read_step_draft(value, 3).unwrap();
+        let read = |value: serde_json::Value| {
+            let step = read_step_draft(value, 3).unwrap();
+            (step.draft, step.ignored)
+        };
         let (named, ignored) =
             read(serde_json::json!({"name": "Gather Events", "role": "r", "instructions": "go"}));
         assert_eq!(
@@ -2793,7 +2892,35 @@ mod draft_tests {
         let (kept, ignored) =
             read(serde_json::json!({"key": "a", "name": "A", "role": "r", "instructions": "go"}));
         assert_eq!(kept.key, "a");
-        assert_eq!(ignored, vec!["name".to_string()]);
+        assert!(ignored.is_empty(), "a name is kept for waits: {ignored:?}");
+    }
+
+    #[test]
+    fn a_wait_may_name_a_step_by_its_name() {
+        let mut steps = vec![
+            read_step_draft(
+                serde_json::json!({"step": 1, "name": "Gather camera events", "role": "r",
+                                   "instructions": "go"}),
+                1,
+            )
+            .unwrap(),
+            read_step_draft(
+                serde_json::json!({"step": 2, "role": "r", "instructions": "write",
+                                   "depends_on": ["gather-camera-events", "step-1"]}),
+                2,
+            )
+            .unwrap(),
+        ];
+        assert_eq!(steps[0].draft.key, "Gather camera events");
+        match_waits_by_name(&mut steps);
+        assert_eq!(
+            steps[1].draft.depends_on,
+            vec![
+                "gather-camera-events".to_string(),
+                "Gather camera events".to_string()
+            ],
+            "`step: 1` names the step `step-1` too"
+        );
     }
 }
 
@@ -2900,21 +3027,33 @@ mod plan_tests {
     }
 
     #[test]
-    fn a_step_may_wait_only_for_a_step_that_will_exist() {
+    fn a_wait_for_a_step_the_plan_lacks_becomes_a_wait_for_every_step_before_it() {
         let task = task(6);
+        let plan = validate_plan(
+            &task,
+            vec![draft("a", &[]), draft("b", &[]), draft("c", &["gather"])],
+            &[],
+        )
+        .unwrap();
+        let waits: Vec<&str> = plan.steps()[2]
+            .depends_on()
+            .iter()
+            .map(StepKey::as_str)
+            .collect();
+        assert_eq!(waits, vec!["a", "b"]);
         assert_eq!(
-            validate_plan(&task, vec![draft("b", &["a"])], &[]).unwrap_err(),
-            PlanError::UnknownDependency {
-                step: "b".into(),
-                missing: "a".into()
-            }
+            plan.relaxed_waits(),
+            &[RelaxedWait {
+                step: "c".into(),
+                missing: "gather".into()
+            }]
         );
-        // An open step left out of the new plan is deleted, so waiting for it is refused too.
+        // The first step has nothing before it, so its wait is dropped. So is a wait for an open
+        // step left out of the new plan, which is deleted.
         let history = [existing(&task, "a", 1, StepState::Pending, &[])];
-        assert!(matches!(
-            validate_plan(&task, vec![draft("b", &["a"])], &history),
-            Err(PlanError::UnknownDependency { .. })
-        ));
+        let plan = validate_plan(&task, vec![draft("b", &["a"])], &history).unwrap();
+        assert!(plan.steps()[0].depends_on().is_empty());
+        assert_eq!(plan.relaxed_waits().len(), 1);
         // Control: the same wait is fine once `a` is in the plan or finished.
         assert!(validate_plan(&task, vec![draft("a", &[]), draft("b", &["a"])], &[]).is_ok());
         let done = [existing(&task, "a", 1, StepState::Completed, &[])];

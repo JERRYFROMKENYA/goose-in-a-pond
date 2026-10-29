@@ -323,6 +323,33 @@ pub fn result_artifact(artifacts: &[ArtifactSummary]) -> Option<&ArtifactSummary
         .or_else(|| artifacts.iter().rev().find(|a| names_result(&a.title)))
 }
 
+/// A task's answer: its Result, else, for a short answer, the newest thing a step saved. A short
+/// answer's helper titled it "Current Presence and Camera Status" though told to title it "Result",
+/// and the card then had nothing to show.
+pub fn answer_artifact<'a>(
+    task: &LongTask,
+    artifacts: &'a [ArtifactSummary],
+) -> Option<&'a ArtifactSummary> {
+    result_artifact(artifacts).or_else(|| {
+        (task.answer() == AnswerShape::Short)
+            .then(|| artifacts.iter().rev().find(|a| a.step_key.is_some()))
+            .flatten()
+    })
+}
+
+/// The pond's own word to the plan's last step, so the answer is saved where the card finds it
+/// whatever the planner wrote.
+pub fn last_step_line(steps: &[PlanStep], step: &PlanStep) -> Option<&'static str> {
+    let later = steps.iter().any(|other| {
+        other.ordinal() > step.ordinal()
+            && !matches!(other.state(), StepState::Completed | StepState::Skipped)
+    });
+    (!later).then_some(
+        "Your step is the plan's last: save what answers the goal as the artifact titled \
+         \"Result\".\n",
+    )
+}
+
 fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
     if artifacts.is_empty() {
         return "  (none)\n".to_string();

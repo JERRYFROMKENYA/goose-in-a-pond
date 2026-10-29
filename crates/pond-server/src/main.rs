@@ -7601,7 +7601,7 @@ async fn advance_long_task(
                 .await?;
             fruitless.remove(task.id());
             // A short answer is the notification itself; anything longer is a line about it.
-            let short = match runner::result_artifact(&artifacts) {
+            let short = match runner::answer_artifact(task, &artifacts) {
                 Some(result)
                     if task.answer()
                         == pond_core::shared::domain::long_task::AnswerShape::Short =>
@@ -7614,7 +7614,7 @@ async fn advance_long_task(
                 _ => None,
             };
             let body = short
-                .or_else(|| runner::result_artifact(&artifacts).map(|a| a.summary.clone()))
+                .or_else(|| runner::answer_artifact(task, &artifacts).map(|a| a.summary.clone()))
                 .or_else(|| {
                     steps
                         .iter()
@@ -7730,6 +7730,7 @@ async fn advance_long_task(
                 }
             }
             let mut brief = runner::worker_brief(task, &step, &artifacts, &bodies, now);
+            brief.push_str(runner::last_step_line(&steps, &step).unwrap_or_default());
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
             brief.push_str(&activations::hand_back_offer(role, offered));
             let role = role

@@ -1408,21 +1408,30 @@ fn absolute_links(body: &str) -> String {
         rest = &rest[start..];
         let end = rest.find(')').unwrap_or(rest.len());
         let target = &rest[..end];
-        let host = target.split('/').next().unwrap_or("");
-        let bare = !target.contains("://")
-            && !target.contains(char::is_whitespace)
-            && !target.starts_with(['/', '#', '.'])
-            && !target.starts_with("mailto:")
+        // `rome2rio.com, 2023-04-14`: the address, then words the model added to it.
+        let (address, extra) = match target.find([',', ' ']) {
+            Some(at) => (&target[..at], target[at..].trim_start_matches([',', ' '])),
+            None => (target, ""),
+        };
+        let host = address.split('/').next().unwrap_or("");
+        let bare = !address.contains("://")
+            && !address.starts_with(['/', '#', '.'])
+            && !address.starts_with("mailto:")
             && host.contains('.')
             && host
                 .rsplit('.')
                 .next()
                 .is_some_and(|tld| tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic()));
-        if bare {
-            out.push_str("https://");
-        }
-        out.push_str(target);
         rest = &rest[end..];
+        if !bare {
+            out.push_str(target);
+            continue;
+        }
+        out.push_str("https://");
+        out.push_str(address);
+        if !extra.is_empty() && rest.starts_with(')') {
+            out.push_str(&format!(") ({extra}"));
+        }
     }
     out.push_str(rest);
     out
@@ -2575,12 +2584,17 @@ mod tests {
             absolute_links("Train [Rome2rio](rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."),
             "Train [Rome2rio](https://rome2rio.com/s/Nairobi) or [KR](https://krc.co.ke)."
         );
+        assert_eq!(
+            absolute_links("[Guide](rome2rio.com, 2023-04-14) says so."),
+            "[Guide](https://rome2rio.com) (2023-04-14) says so."
+        );
         for kept in [
             "[snap](/api/v1/camera/porch/snapshot)",
             "[top](#result)",
             "[mail](mailto:a@b.co)",
             "[file](report.v2)",
             "[odd](not a link)",
+            "[odd](see rome2rio.com)",
             "no link (rome2rio.com) here",
         ] {
             assert_eq!(absolute_links(kept), kept);

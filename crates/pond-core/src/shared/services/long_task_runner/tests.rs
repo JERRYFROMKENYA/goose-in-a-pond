@@ -679,3 +679,34 @@ fn a_short_answers_notification_reads_its_links_as_words_and_stops_at_a_word() {
     assert!(cut.ends_with("word..."), "{cut}");
     assert!(cut.chars().count() <= NOTIFICATION_CHARS + 3);
 }
+
+#[test]
+fn a_short_answer_without_a_result_title_still_has_an_answer_and_a_report_does_not_guess() {
+    let found = ArtifactSummary {
+        id: "f1".into(),
+        task_id: "task-1".into(),
+        step_key: Some(StepKey::parse("look").unwrap()),
+        kind: ArtifactKind::Findings,
+        title: "Current Presence and Camera Status".into(),
+        summary: "Nobody is in frame.".into(),
+        tokens: 40,
+        created_at: t(5),
+    };
+    let short = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
+    let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
+    assert_eq!(
+        answer_artifact(&short, std::slice::from_ref(&found)).map(|a| a.id.as_str()),
+        Some("f1")
+    );
+    assert!(answer_artifact(&report, std::slice::from_ref(&found)).is_none());
+}
+
+#[test]
+fn only_the_plans_last_open_step_is_told_to_save_the_result() {
+    let a = step("a", 0, &[], StepState::Completed, 1);
+    let b = step("b", 1, &[], StepState::Pending, 0);
+    let c = step("c", 2, &[], StepState::Pending, 0);
+    let steps = [a, b.clone(), c.clone()];
+    assert!(last_step_line(&steps, &b).is_none());
+    assert!(last_step_line(&steps, &c).unwrap().contains("\"Result\""));
+}

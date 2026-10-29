@@ -337,6 +337,34 @@ pub fn answer_artifact<'a>(
     })
 }
 
+/// The Result a finished short answer is missing: its last step's summary, when the step reported
+/// the answer in its summary and saved nothing, so the card still shows it.
+pub fn summary_as_result(
+    task: &LongTask,
+    steps: &[PlanStep],
+    artifacts: &[ArtifactSummary],
+    now: DateTime<Utc>,
+) -> Option<crate::shared::domain::long_task::Artifact> {
+    if task.answer() != AnswerShape::Short || answer_artifact(task, artifacts).is_some() {
+        return None;
+    }
+    let last = steps
+        .iter()
+        .filter(|step| step.state() == StepState::Completed)
+        .max_by_key(|step| step.ordinal())?;
+    let summary = last.summary().map(str::trim).filter(|s| !s.is_empty())?;
+    crate::shared::domain::long_task::Artifact::new(
+        task.id(),
+        Some(last.key().clone()),
+        crate::shared::domain::long_task::ArtifactKind::Draft,
+        RESULT_TITLE,
+        first_line(summary),
+        summary.to_string(),
+        now,
+    )
+    .ok()
+}
+
 /// The pond's own word to the plan's last step, so the answer is saved where the card finds it
 /// whatever the planner wrote.
 pub fn last_step_line(steps: &[PlanStep], step: &PlanStep) -> Option<&'static str> {

@@ -745,12 +745,11 @@ pub fn read_step_draft(
                     near.push((name, field));
                 }
             }
-            // A planner writes `new_agent: "Forager Gosling: ..."` meaning a role; only an object
-            // makes an agent, so a string is dropped rather than refusing the plan.
-            if read
-                .get("new_agent")
-                .is_some_and(|agent| !agent.is_object() && !agent.is_null())
-            {
+            // A planner writes `new_agent: "Forager Gosling: ..."` meaning a role, or an object with
+            // no name; only a readable agent makes one, so anything else is dropped, not refused.
+            if read.get("new_agent").is_some_and(|agent| {
+                !agent.is_null() && serde_json::from_value::<StepAgent>(agent.clone()).is_err()
+            }) {
                 read.remove("new_agent");
                 ignored.push("new_agent".to_string());
             }
@@ -2867,6 +2866,22 @@ mod draft_tests {
         ignored.sort();
         assert_eq!(ignored, vec!["dependsOn".to_string(), "tools".to_string()]);
         assert!(read_step_draft(serde_json::json!({"key": "b", "role": "r"}), 1).is_err());
+    }
+
+    #[test]
+    fn an_unreadable_new_agent_is_dropped_and_the_step_kept() {
+        for agent in [
+            serde_json::json!("Forager Gosling: search the web"),
+            serde_json::json!({"instructions": "search", "tools": ["giap-knowledge"]}),
+        ] {
+            let step = read_step_draft(
+                serde_json::json!({"key": "a", "role": "r", "instructions": "go", "new_agent": agent}),
+                1,
+            )
+            .unwrap();
+            assert!(step.draft.new_agent.is_none());
+            assert_eq!(step.ignored, vec!["new_agent".to_string()]);
+        }
     }
 
     #[test]

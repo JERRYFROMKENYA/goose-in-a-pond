@@ -7596,6 +7596,11 @@ async fn advance_long_task(
             Ok(true)
         }
         NextRun::Finish => {
+            let mut artifacts = artifacts;
+            if let Some(result) = runner::summary_as_result(task, &steps, &artifacts, now) {
+                tasks.insert_artifact(&result).await?;
+                artifacts.push(result.summary_view());
+            }
             tasks
                 .set_task_state(task.id(), LongTaskState::Completed, now)
                 .await?;

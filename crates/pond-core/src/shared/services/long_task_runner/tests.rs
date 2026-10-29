@@ -710,3 +710,25 @@ fn only_the_plans_last_open_step_is_told_to_save_the_result() {
     assert!(last_step_line(&steps, &b).is_none());
     assert!(last_step_line(&steps, &c).unwrap().contains("\"Result\""));
 }
+
+#[test]
+fn a_short_answer_left_only_in_a_summary_becomes_its_result() {
+    let mut done = step("look", 0, &[], StepState::Running, 1);
+    done.record(
+        &StepOutcome::new(
+            OutcomeKind::Completed,
+            "Flying is quickest: about an hour in the air.",
+            Vec::new(),
+            None,
+        ),
+        t(9),
+    )
+    .unwrap();
+    let short = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Short);
+    let result = summary_as_result(&short, std::slice::from_ref(&done), &[], t(10))
+        .expect("the summary is the answer");
+    assert_eq!(result.title(), RESULT_TITLE);
+    assert!(result.body().contains("about an hour"));
+    let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
+    assert!(summary_as_result(&report, std::slice::from_ref(&done), &[], t(10)).is_none());
+}

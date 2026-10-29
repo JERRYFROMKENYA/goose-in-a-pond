@@ -87,6 +87,14 @@ detect_os
 detect_mode
 resolve_data_dir
 
+# Every step below writes the data directory as this login, which a pond run by agamemnon refuses.
+if [ "$OS" = "linux" ] && [ "$(agamemnon_unit_user)" = "$AGAMEMNON" ]; then
+  error "this pond runs as $AGAMEMNON, which alone writes $AGAMEMNON_DATA"
+  log "update it: bash scripts/giap.sh update"
+  log "to run the installer again, first: bash scripts/giap.sh service-account undo"
+  exit 1
+fi
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 MODE_DISPLAY=$(printf "%-12s" "$MODE")
 echo ""

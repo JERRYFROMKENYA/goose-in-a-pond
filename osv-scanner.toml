@@ -105,6 +105,11 @@ id = "RUSTSEC-2026-0369"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0 extract() and ZipStreamReader::extract() apply Unix permissions through symlinks. Same blocker and same non-reachability as RUSTSEC-2026-0367: neither function is called, and pond-server never applies archive permissions."
 
+[[IgnoredVulns]]
+id = "GHSA-m665-v7pm-7grj"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 parser differential ('zip cloaking'): ZipArchive trusts the central directory while ZipStreamReader trusts the local headers, so one archive can name different files to each. Patched only in zip 9.0.5; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: the differential needs both readers on one archive, and nothing in the build uses ZipStreamReader; pond-server's buffalo_l download (model_download.rs) and goose-cli's updater use ZipArchive only."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]

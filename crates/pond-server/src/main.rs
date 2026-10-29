@@ -7609,7 +7609,22 @@ async fn advance_long_task(
         }
         NextRun::Plan(reason) => {
             let plannable = activations::plannable_roles(offered);
-            let brief = runner::planner_brief(task, &steps, &artifacts, &plannable, &reason, now);
+            let context = match runner::brief_artifact(&artifacts) {
+                Some(found) => tasks
+                    .get_artifact(task.id(), &found.id)
+                    .await?
+                    .map(|artifact| artifact.body().to_string()),
+                None => None,
+            };
+            let brief = runner::planner_brief(
+                task,
+                &steps,
+                &artifacts,
+                &plannable,
+                &reason,
+                context.as_deref(),
+                now,
+            );
             let end = helpers
                 .run(task, planner, StepWork::Plan, brief, false)
                 .await?;

@@ -37,7 +37,8 @@ use std::sync::Arc;
 pub struct DelegateParams {
     /// The exact name of the saved role to run.
     pub role: Option<String>,
-    /// What this particular agent is being asked to do, in plain words.
+    /// What this agent is asked to do, as a full brief: it sees nothing of this conversation, so
+    /// say who it is for, the details and limits the person gave, and what was decided or ruled out.
     pub instructions: Option<String>,
     /// Optional structured inputs, passed through to the agent unchanged.
     pub inputs: Option<serde_json::Value>,

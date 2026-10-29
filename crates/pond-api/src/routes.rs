@@ -15394,6 +15394,30 @@ fn long_task_reaches(member: &str, task: &pond_core::shared::domain::long_task::
     pond_core::shared::services::long_task_queue::reaches(Some(member), task)
 }
 
+/// The conversation before a deep-research ask, as the task's brief; the ask itself is the goal.
+async fn deep_research_brief(
+    state: &Arc<AppState>,
+    session_id: &str,
+    question: &str,
+) -> Option<String> {
+    let mut rows = state
+        .session_storage
+        .get_recent_messages(session_id, 24)
+        .await
+        .ok()?;
+    if rows
+        .last()
+        .is_some_and(|row| row.message.content.trim() == question.trim())
+    {
+        rows.pop();
+    }
+    let earlier: Vec<(pond_core::models::domain::message::Role, &str)> = rows
+        .iter()
+        .map(|row| (row.message.role.clone(), row.message.content.as_str()))
+        .collect();
+    pond_core::shared::services::long_task_runner::conversation_brief(&earlier)
+}
+
 /// Every open task, in the order the runner takes them, read once for a request.
 async fn open_long_tasks(
     repo: &pond_infra::sqlite_long_task::SqliteLongTaskRepository,
@@ -15565,6 +15589,19 @@ async fn start_deep_research(
         chrono::Utc::now(),
     )?;
     repo.create_task(&task).await?;
+    // The helpers start in empty windows; what was said before the ask reaches them only here.
+    if let Some(body) = deep_research_brief(state, session_id, question).await {
+        let brief = pond_core::shared::domain::long_task::Artifact::new(
+            task.id(),
+            None,
+            pond_core::shared::domain::long_task::ArtifactKind::Note,
+            pond_core::shared::services::long_task_runner::BRIEF_TITLE,
+            "What the conversation said before the ask",
+            body,
+            chrono::Utc::now(),
+        )?;
+        repo.insert_artifact(&brief).await?;
+    }
     let open = repo
         .list_tasks(LongTaskOwnerFilter::Everyone, false)
         .await?;

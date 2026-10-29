@@ -15,7 +15,7 @@ use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
 use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
-use pond_core::shared::services::long_task_runner::result_artifact;
+use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact, BRIEF_TITLE};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
@@ -294,6 +294,10 @@ fn token_count(value: Option<Value>, field: &str) -> Result<Option<u32>, Refusal
 pub struct TaskStartParams {
     /// What the finished work should give the person, in one or two sentences.
     pub goal: Option<String>,
+    /// Everything from this conversation the helpers need that the goal leaves out: who it is for,
+    /// dates and places, budget, diets and allergies, what was decided or ruled out. They see
+    /// nothing of the conversation but this and the goal.
+    pub brief: Option<String>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -466,6 +470,19 @@ impl TasksMcpServer {
         )
         .map_err(|e| Refusal::Rejected(e.to_string()))?;
         deps.repo.create_task(&task).await.map_err(store)?;
+        if let Some(body) = params.brief.as_deref().and_then(clip_brief) {
+            let brief = Artifact::new(
+                task.id(),
+                None,
+                ArtifactKind::Note,
+                BRIEF_TITLE,
+                "What the conversation said that the goal leaves out",
+                body,
+                Utc::now(),
+            )
+            .map_err(|e| Refusal::Rejected(e.to_string()))?;
+            deps.repo.insert_artifact(&brief).await.map_err(store)?;
+        }
         deps.wake_runner();
         let open = deps
             .repo
@@ -1558,6 +1575,62 @@ mod tests {
             .unwrap()
             .is_empty());
         assert!(!pond.woken().await, "a refused start woke the runner");
+    }
+
+    #[tokio::test]
+    async fn the_primes_brief_is_saved_for_every_helper_and_a_blank_one_is_not() {
+        let pond = Pond::new();
+        let prime = pond.prime();
+        let _liz = pond.turn("engine-liz", "giap-liz", ProfileScope::Owner("liz".into()));
+        let started = prime
+            .run_start(
+                &meta_for("engine-liz"),
+                params(serde_json::json!({
+                    "goal": "a four-day Mombasa plan",
+                    "brief": "Four friends, 12-15 December. Liz is lactose intolerant. No flights."
+                })),
+            )
+            .await
+            .unwrap();
+        let tasks = pond
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, true)
+            .await
+            .unwrap();
+        assert!(started.contains(tasks[0].id()), "{started}");
+        let artifacts = pond.repo.list_artifacts(tasks[0].id()).await.unwrap();
+        let brief = pond_core::shared::services::long_task_runner::brief_artifact(&artifacts)
+            .expect("the brief is saved as the task's own artifact");
+        let body = pond
+            .repo
+            .get_artifact(tasks[0].id(), &brief.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(body.body().contains("lactose intolerant"));
+
+        prime
+            .run_start(
+                &meta_for("engine-liz"),
+                params(serde_json::json!({"goal": "compare plumbers", "brief": "  "})),
+            )
+            .await
+            .unwrap();
+        let tasks = pond
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, true)
+            .await
+            .unwrap();
+        let plumbers = tasks
+            .iter()
+            .find(|t| t.goal() == "compare plumbers")
+            .unwrap();
+        assert!(pond
+            .repo
+            .list_artifacts(plumbers.id())
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

@@ -202,6 +202,7 @@ fn the_planner_is_told_what_failed_and_why() {
         &[],
         &[],
         &PlanReason::Blocked(Vec::new()),
+        None,
         t(10),
     );
     assert!(brief.contains("a done"));
@@ -214,7 +215,15 @@ fn only_a_research_task_is_briefed_to_search_and_cite() {
     let research = task_in(LongTaskState::Running, None).with_kind(LongTaskKind::Research);
     let step_b = step("b", 0, &[], StepState::Pending, 0);
     let plan = |task: &LongTask| {
-        planner_brief(task, &[], &[], &[], &PlanReason::Blocked(Vec::new()), t(10))
+        planner_brief(
+            task,
+            &[],
+            &[],
+            &[],
+            &PlanReason::Blocked(Vec::new()),
+            None,
+            t(10),
+        )
     };
     let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
 
@@ -497,5 +506,58 @@ fn a_run_stopped_after_it_reported_keeps_its_report() {
         settle_run(None, &[], &run(TaskStatus::Cancelled, None), true),
         RunEnd::Preempted,
         "stopped before reporting, it reruns"
+    );
+}
+
+#[test]
+fn the_brief_carries_what_was_said_before_the_ask_to_the_planner_and_every_step() {
+    use crate::models::domain::message::Role;
+    let earlier = [
+        (Role::User, "We're four, and I'm lactose intolerant."),
+        (Role::Tool, "{\"tool\": \"weather\"}"),
+        (Role::Assistant, "Noted. When are you going?"),
+        (Role::User, "  "),
+    ];
+    let text = conversation_brief(&earlier).unwrap();
+    assert_eq!(
+        text,
+        "Earlier in the conversation:\nThe person: We're four, and I'm lactose intolerant.\nThe assistant: Noted. When are you going?"
+    );
+    assert_eq!(conversation_brief(&[]), None);
+    assert_eq!(conversation_brief(&[(Role::User, " ")]), None);
+
+    let long = "x".repeat(BRIEF_CHARS);
+    let many = [(Role::User, "first, dropped"), (Role::User, long.as_str())];
+    let kept = conversation_brief(&many).unwrap();
+    assert!(
+        !kept.contains("first, dropped"),
+        "the end of the conversation is kept"
+    );
+    assert!(kept.chars().count() <= BRIEF_CHARS + 40, "{}", kept.len());
+
+    let task = task_in(LongTaskState::Running, None);
+    let plan = planner_brief(&task, &[], &[], &[], &PlanReason::Fresh, Some(&text), t(10));
+    assert!(plan.contains("lactose intolerant"), "{plan}");
+
+    let mut brief = summary("brief-1", None, BRIEF_TITLE);
+    brief.tokens = 40;
+    let artifacts = [brief, summary("from-z", Some("z"), "Unrelated")];
+    let b = step("b", 1, &["a"], StepState::Pending, 0);
+    assert_eq!(
+        brief_artifact(&artifacts).map(|a| a.id.as_str()),
+        Some("brief-1")
+    );
+    assert_eq!(
+        inline_ids(&b, &artifacts),
+        vec!["brief-1".to_string()],
+        "every step is given the brief"
+    );
+    let bodies = HashMap::from([("brief-1".to_string(), text.clone())]);
+    assert!(worker_brief(&task, &b, &artifacts, &bodies, t(10)).contains("lactose intolerant"));
+
+    assert_eq!(clip_brief("  "), None);
+    assert_eq!(
+        clip_brief(&"y".repeat(BRIEF_CHARS + 10)).unwrap().len(),
+        BRIEF_CHARS
     );
 }

@@ -148,11 +148,20 @@ pub fn next_run<'a>(
 /// The artifact the planner is told to end with, which `task_status` reports as the answer.
 pub const RESULT_TITLE: &str = "Result";
 
+/// The newest artifact titled "Result", else the newest whose title has "result" as a word: a model
+/// told to save "Result" sometimes saves "Arusha Trip Result", and the task then read as having no
+/// answer. "Search results" is not one.
 pub fn result_artifact(artifacts: &[ArtifactSummary]) -> Option<&ArtifactSummary> {
+    let names_result = |title: &str| {
+        title
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case(RESULT_TITLE))
+    };
     artifacts
         .iter()
         .rev()
-        .find(|a| a.title.eq_ignore_ascii_case(RESULT_TITLE))
+        .find(|a| a.title.trim().eq_ignore_ascii_case(RESULT_TITLE))
+        .or_else(|| artifacts.iter().rev().find(|a| names_result(&a.title)))
 }
 
 fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {

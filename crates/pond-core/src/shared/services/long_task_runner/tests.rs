@@ -444,3 +444,33 @@ fn an_empty_result_or_a_run_out_of_turns_fails_so_the_step_retries() {
         other => panic!("expected the saved work, got {other:?}"),
     }
 }
+
+#[test]
+fn a_result_saved_under_a_longer_title_is_still_the_result() {
+    let titled = |id: &str, title: &str| summary(id, Some("s"), title);
+    let exact = [
+        titled("a", "Final Trip Plan Result"),
+        titled("b", "Result"),
+        titled("c", "Notes"),
+    ];
+    assert_eq!(
+        result_artifact(&exact).map(|a| a.id.as_str()),
+        Some("b"),
+        "an exact Result wins"
+    );
+    let drifted = [
+        titled("a", "Search results for hotels"),
+        titled("b", "Arusha Trip Result"),
+        titled("c", "Calendar"),
+    ];
+    assert_eq!(result_artifact(&drifted).map(|a| a.id.as_str()), Some("b"));
+    let none = [
+        titled("a", "Search results"),
+        titled("b", "Resulting costs"),
+    ];
+    assert_eq!(
+        result_artifact(&none),
+        None,
+        "results and resulting are not the result"
+    );
+}

@@ -1255,8 +1255,14 @@ impl TaskWorkMcpServer {
                 .await
                 .map_err(store)?;
             let written = self.bindings.written_by(&helper.root);
-            let named = name_artifacts(outcome.artifacts(), &held, &written)
-                .map_err(Refusal::UnknownArtifacts)?;
+            // Reported before saving anything: say what to do, not only which names were wrong.
+            let named = name_artifacts(outcome.artifacts(), &held, &written).map_err(|_| {
+                Refusal::Rejected(
+                    "You have saved nothing yet, so there is no artifact to name. Save your work \
+                     with artifact_write and finish true: that also reports the step."
+                        .to_string(),
+                )
+            })?;
             outcome = outcome.with_artifacts(named);
         }
         let said = outcome_phrase(outcome.outcome());
@@ -2378,9 +2384,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(
-            phantom,
-            Refusal::UnknownArtifacts(vec!["made-up".to_string()])
+        assert!(
+            phantom.message().contains("saved nothing yet")
+                && phantom.message().contains("finish true"),
+            "{}",
+            phantom.message()
         );
         assert_eq!(run.take_report(), None);
 

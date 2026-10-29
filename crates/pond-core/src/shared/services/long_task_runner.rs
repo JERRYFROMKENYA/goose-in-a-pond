@@ -395,8 +395,8 @@ const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the qu
      First, steps that each look into one part of the question and save their findings with \
      their sources. Then one step per section of the report, each writing its section from the \
      findings it is given and saving it as a draft artifact titled as the reader should see it. \
-     Give every section that is a plan, such as an itinerary, a meal plan or a packing or \
-     shopping list, to long-task-composer. Last, one step writes the artifact titled \"Result\": \
+     Plan only the sections the goal asks for or cannot do without. A section that is itself a \
+     plan, such as an itinerary, goes to long-task-composer. Last, one step writes the artifact titled \"Result\": \
      a short title on its first line as a \"# \" heading, then a few paragraphs that answer the \
      question and introduce the sections without repeating them. Do not plan a step that \
      combines, compiles or merges sections: the pond joins the Result and the sections, in plan \

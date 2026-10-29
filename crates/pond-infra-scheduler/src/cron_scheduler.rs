@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use pond_core::user_data::domain::schedule::{
-    OneShotTimePassed, RunStatus, Schedule, ScheduleRun, TaskKind, CRON_ONCE,
+    MissedRun, OneShotTimePassed, RunStatus, Schedule, ScheduleRun, TaskKind, CRON_ONCE,
 };
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::scheduler::{
@@ -44,6 +44,10 @@ struct PersistedTask {
     /// Fire once at this instant, then delete; `None` for a recurring task.
     #[serde(default)]
     fire_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    ask_if_missed: bool,
+    #[serde(default)]
+    missed_run: Option<MissedRun>,
 }
 
 fn default_timezone() -> String {
@@ -360,8 +364,8 @@ impl CronSchedulerAdapter {
             compute_next_run(&entry.persisted.cron, &entry.persisted.timezone)
         };
         Schedule {
-            ask_if_missed: false,
-            missed_run: None,
+            ask_if_missed: entry.persisted.ask_if_missed,
+            missed_run: entry.persisted.missed_run,
             id: entry.persisted.id.clone(),
             label: entry.persisted.label.clone(),
             cron: entry.persisted.cron.clone(),
@@ -706,6 +710,8 @@ impl SchedulerPort for CronSchedulerAdapter {
             created_at: Some(Utc::now()),
             last_run: None,
             fire_at,
+            ask_if_missed: req.ask_if_missed,
+            missed_run: None,
         };
 
         // Held from registration to insert, so an occurrence due at once finds its entry.
@@ -729,7 +735,7 @@ impl SchedulerPort for CronSchedulerAdapter {
             compute_next_run(&cron, &req.timezone)
         };
         let schedule = Schedule {
-            ask_if_missed: false,
+            ask_if_missed: req.ask_if_missed,
             missed_run: None,
             id: req.id.clone(),
             label: req.label,
@@ -978,6 +984,9 @@ impl SchedulerPort for CronSchedulerAdapter {
             }
             if let Some(kind) = &req.kind {
                 entry.persisted.kind = Some(kind.clone());
+            }
+            if let Some(ask) = req.ask_if_missed {
+                entry.persisted.ask_if_missed = ask;
             }
 
             let old_job_id = entry.job_id;
@@ -1857,6 +1866,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asking_if_missed_is_kept_across_an_edit_and_a_restart() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+        sched
+            .create_task(CreateScheduleRequest {
+                ask_if_missed: true,
+                ..create_req("morning", "0 30 6 * * *")
+            })
+            .await
+            .unwrap();
+        assert!(sched.list_tasks().await.unwrap()[0].ask_if_missed);
+
+        sched
+            .update_task(
+                "morning",
+                UpdateScheduleRequest {
+                    label: Some("Early morning".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        drop(sched);
+        let reopened = make_scheduler(tmp.path()).await;
+        let task = &reopened.list_tasks().await.unwrap()[0];
+        assert!(
+            task.ask_if_missed,
+            "an edit that does not mention it keeps it"
+        );
+
+        reopened
+            .update_task(
+                "morning",
+                UpdateScheduleRequest {
+                    ask_if_missed: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!reopened.list_tasks().await.unwrap()[0].ask_if_missed);
+    }
+
+    #[tokio::test]
     async fn update_with_invalid_cron_preserves_old_schedule() {
         use pond_core::user_data::ports::scheduler::UpdateScheduleRequest;
 
@@ -2033,6 +2086,8 @@ mod tests {
                 paused: false,
                 created_at: Some(Utc::now()),
                 last_run: None,
+                ask_if_missed: false,
+                missed_run: None,
             })
             .collect()
     }

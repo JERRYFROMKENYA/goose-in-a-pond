@@ -7328,11 +7328,13 @@ impl LongTaskHelpers {
             .authorities
             .publish(&session_id, authority, cancel.clone());
 
-        // A household turn stops the run: it holds the only GPU that turn needs.
+        // A household turn stops the run: it holds the only GPU that turn needs. So does the run's
+        // own report: the model's turn after "stop here" is reasoning nothing reads.
         let watcher = {
             let activity = self.last_user_activity.clone();
             let storage = self.storage.clone();
             let cancel = cancel.clone();
+            let reported = binding.report_watch();
             tokio::spawn(async move {
                 use pond_core::user_data::services::proactive_review::cancelled_by_activity;
                 let run_started = std::time::Instant::now();
@@ -7342,6 +7344,10 @@ impl LongTaskHelpers {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if cancel.is_cancelled() {
+                        break;
+                    }
+                    if reported.is_reported() {
+                        cancel.cancel();
                         break;
                     }
                     tick = tick.wrapping_add(1);

@@ -416,9 +416,8 @@ pub fn settle_run(
     run: &TaskRun,
     may_retry: bool,
 ) -> RunEnd {
-    if run.status == TaskStatus::Cancelled {
-        return RunEnd::Preempted;
-    }
+    // A report is the hand-back even when the run was then stopped: the runner ends a run as soon
+    // as it reports, rather than pay for the turn the model takes after "stop here".
     if let Some(outcome) = reported {
         let empty = outcome.outcome() == OutcomeKind::Completed
             && outcome.artifacts().is_empty()
@@ -429,6 +428,9 @@ pub fn settle_run(
         } else {
             outcome
         });
+    }
+    if run.status == TaskStatus::Cancelled {
+        return RunEnd::Preempted;
     }
     if run.status == TaskStatus::TurnBudgetExhausted && may_retry {
         return RunEnd::Reported(failed(OUT_OF_TURNS));

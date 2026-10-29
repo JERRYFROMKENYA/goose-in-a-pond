@@ -474,3 +474,28 @@ fn a_result_saved_under_a_longer_title_is_still_the_result() {
         "results and resulting are not the result"
     );
 }
+
+#[test]
+fn a_run_stopped_after_it_reported_keeps_its_report() {
+    let reported = StepOutcome::new(
+        OutcomeKind::Completed,
+        "Bus B is cheaper by 250 KES a seat.",
+        Vec::new(),
+        None,
+    );
+    assert_eq!(
+        settle_run(
+            Some(reported.clone()),
+            &[],
+            &run(TaskStatus::Cancelled, None),
+            true
+        ),
+        RunEnd::Reported(reported),
+        "the runner stops a run once it reports; that must not throw the report away"
+    );
+    assert_eq!(
+        settle_run(None, &[], &run(TaskStatus::Cancelled, None), true),
+        RunEnd::Preempted,
+        "stopped before reporting, it reruns"
+    );
+}

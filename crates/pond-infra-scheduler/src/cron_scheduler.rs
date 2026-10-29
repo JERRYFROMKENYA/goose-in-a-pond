@@ -637,7 +637,7 @@ impl RecurringJob {
         if let Ok(early) = (at - Utc::now()).to_std() {
             tokio::time::sleep(early).await;
         }
-        {
+        let unanswered = {
             let mut guard = self.tasks.lock().await;
             // A pause, delete or reshape swaps the task's job id; a superseded job stays quiet.
             if guard.get(&self.id).map(|e| e.job_id) != Some(fired) {
@@ -661,6 +661,15 @@ impl RecurringJob {
                      edited or the pond restarts"
                 ),
             }
+            // The next fire time came before an answer; the run below saves the cleared question.
+            guard
+                .get_mut(&self.id)
+                .and_then(|e| e.persisted.missed_run.take())
+        };
+        if let Some(missed) = unanswered {
+            self.run_history
+                .record_skipped(&self.id, missed.due_at, SkipReason::NobodyAnswered.as_str())
+                .await;
         }
         tracing::info!(
             task = %self.id,
@@ -2148,6 +2157,40 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, RunStatus::Completed);
         assert_eq!(runs[0].caught_up_from, Some(due));
+    }
+
+    #[tokio::test]
+    async fn a_question_closes_as_unanswered_when_the_next_run_comes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let every_second = PersistedTask {
+            cron: "* * * * * *".into(),
+            ..daily_since("morning", true, Utc::now() - chrono::Duration::days(2))
+        };
+        let sched = restart_with(tmp.path(), &[every_second]).await;
+        let due = sched.list_tasks().await.unwrap()[0]
+            .missed_run
+            .unwrap()
+            .due_at;
+
+        let mut runs = Vec::new();
+        for _ in 0..150 {
+            runs = sched.get_runs("morning", 10).await.unwrap();
+            if runs.iter().any(|r| r.status == RunStatus::Completed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let skipped: Vec<_> = runs
+            .iter()
+            .filter(|r| r.status == RunStatus::Skipped)
+            .collect();
+        assert_eq!(skipped.len(), 1, "{runs:?}");
+        assert_eq!(skipped[0].started_at, due);
+        assert_eq!(
+            skipped[0].result.as_deref(),
+            Some(SkipReason::NobodyAnswered.as_str())
+        );
+        assert_eq!(sched.list_tasks().await.unwrap()[0].missed_run, None);
     }
 
     #[tokio::test]

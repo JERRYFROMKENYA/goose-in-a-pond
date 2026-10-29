@@ -496,23 +496,7 @@ impl TasksMcpServer {
 
     async fn run_status(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
-        let scope = authority.profile_scope();
-        if let Some(task_id) = task_id_of(params) {
-            let task = reached_task(&deps, scope, &task_id).await?;
-            let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-            let result = result_of(deps.repo.as_ref(), task.id()).await?;
-            return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
-        }
-        let tasks = reached_tasks(&deps, scope).await?;
-        if tasks.is_empty() {
-            return Ok("There are no long tasks running for this person.".to_string());
-        }
-        let mut lines = vec![format!("Long tasks still running: {}", tasks.len())];
-        for task in &tasks {
-            let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-            lines.push(task_line(task, &steps));
-        }
-        Ok(lines.join("\n"))
+        status_text(&deps, authority.profile_scope(), task_id_of(params)).await
     }
 
     async fn run_cancel(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
@@ -554,6 +538,52 @@ impl TasksMcpServer {
 }
 
 /// One task if this scope reaches it; a foreign id and an unknown one read the same.
+/// What `task_status` answers: one task, or every task still running for this person.
+async fn status_text(
+    deps: &LongTaskDeps,
+    scope: &ProfileScope,
+    task_id: Option<String>,
+) -> Result<String, Refusal> {
+    if let Some(task_id) = task_id {
+        let task = reached_task(deps, scope, &task_id).await?;
+        let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
+        let result = result_of(deps.repo.as_ref(), task.id()).await?;
+        return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
+    }
+    let tasks = reached_tasks(deps, scope).await?;
+    if tasks.is_empty() {
+        return Ok(NO_TASKS_RUNNING.to_string());
+    }
+    let mut lines = vec![format!("Long tasks still running: {}", tasks.len())];
+    for task in &tasks {
+        let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
+        lines.push(task_line(task, &steps));
+    }
+    Ok(lines.join("\n"))
+}
+
+const NO_TASKS_RUNNING: &str = "There are no long tasks running for this person.";
+
+/// `task_status`'s answer for a call that reached `check_task` instead: the prime often asks it
+/// about a task `task_start` began. `None` when the id is no long task of theirs, or none runs.
+pub(crate) async fn long_task_status_for(
+    scope: &ProfileScope,
+    task_id: Option<&str>,
+) -> Option<String> {
+    long_task_status_with(&installed_long_task_deps()?, scope, task_id).await
+}
+
+async fn long_task_status_with(
+    deps: &LongTaskDeps,
+    scope: &ProfileScope,
+    task_id: Option<&str>,
+) -> Option<String> {
+    status_text(deps, scope, task_id.map(str::to_string))
+        .await
+        .ok()
+        .filter(|text| text != NO_TASKS_RUNNING)
+}
+
 async fn reached_task(
     deps: &LongTaskDeps,
     scope: &ProfileScope,
@@ -1609,6 +1639,43 @@ mod tests {
             tasks[0].owner_profile_id(),
             None,
             "a household task has no owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_task_asked_about_through_check_task_gets_its_status() {
+        let pond = Pond::new();
+        let deps = pond.deps();
+        let liz = ProfileScope::Owner("liz".into());
+        let hers = pond.task(liz.clone(), "plan the school trip").await;
+        let his = pond
+            .task(ProfileScope::Owner("jerry".into()), "his task")
+            .await;
+
+        let one = long_task_status_with(&deps, &liz, Some(hers.id()))
+            .await
+            .unwrap();
+        assert!(one.contains("plan the school trip"), "{one}");
+        let listed = long_task_status_with(&deps, &liz, None).await.unwrap();
+        assert!(
+            listed.contains(hers.id()) && !listed.contains(his.id()),
+            "{listed}"
+        );
+
+        assert_eq!(
+            long_task_status_with(&deps, &liz, Some(his.id())).await,
+            None,
+            "not hers"
+        );
+        assert_eq!(
+            long_task_status_with(&deps, &liz, Some("no-such-task")).await,
+            None
+        );
+        let nobody = ProfileScope::Owner("ola".into());
+        assert_eq!(
+            long_task_status_with(&deps, &nobody, None).await,
+            None,
+            "with nothing running, check_task keeps its own refusal"
         );
     }
 

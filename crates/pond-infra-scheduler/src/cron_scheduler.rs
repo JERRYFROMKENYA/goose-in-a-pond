@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use pond_core::user_data::domain::schedule::{
-    MissedRun, OneShotTimePassed, RunStatus, Schedule, ScheduleRun, TaskKind, CRON_ONCE,
+    MissedRun, OneShotTimePassed, RunStatus, Schedule, ScheduleRun, SkipReason, TaskKind, CRON_ONCE,
 };
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::scheduler::{
@@ -200,6 +200,9 @@ impl CronSchedulerAdapter {
                 record.created_at = Some(Utc::now());
                 migrated = true;
             }
+            if self.ask_about_a_missed_run(&mut record).await {
+                migrated = true;
+            }
 
             // Paused tasks and event rules get the nil "no job" id. Test `fire_at` before `cron`:
             // parsing a one-shot's `"@once"` fails `rehydrate()` and with it every schedule.
@@ -253,6 +256,44 @@ impl CronSchedulerAdapter {
         }
 
         Ok(())
+    }
+
+    /// At startup, open a question for the latest fire time missed while the pond was down, if
+    /// `record` asks. A question still open from before closes as unanswered once a newer fire
+    /// time has passed. Returns whether `record` changed.
+    async fn ask_about_a_missed_run(&self, record: &mut PersistedTask) -> bool {
+        let recurring = record.fire_at.is_none()
+            && !record
+                .kind
+                .as_ref()
+                .is_some_and(TaskKind::is_event_triggered);
+        if !record.ask_if_missed || record.paused || !recurring {
+            return false;
+        }
+        let since = record
+            .missed_run
+            .map(|m| m.due_at)
+            .or(record.last_run)
+            .or(record.created_at);
+        let Some(since) = since else {
+            return false;
+        };
+        let Some(due_at) = missed_occurrence(&record.cron, &record.timezone, since, Utc::now())
+        else {
+            return false;
+        };
+        if let Some(unanswered) = record.missed_run {
+            self.run_history
+                .record_skipped(
+                    &record.id,
+                    unanswered.due_at,
+                    SkipReason::NobodyAnswered.as_str(),
+                )
+                .await;
+        }
+        tracing::info!(task = %record.id, due_at = %due_at, "a run was missed; asking before running it");
+        record.missed_run = Some(MissedRun { due_at });
+        true
     }
 
     // ── Internal job management ───────────────────────────────────────────────
@@ -410,6 +451,25 @@ fn next_occurrence(
             None
         }
     }
+}
+
+/// The latest occurrence of `cron_expr` after `since` and no later than `now`: a fire time the
+/// pond was down for. Only the latest, however long the outage.
+fn missed_occurrence(
+    cron_expr: &str,
+    timezone: &str,
+    since: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    let cron = parse_cron(cron_expr)?;
+    let tz: chrono_tz::Tz = timezone.parse().unwrap_or(chrono_tz::UTC);
+    // Whole seconds: croner carries the start's fraction of a second into what it finds.
+    let now = chrono::SubsecRound::trunc_subsecs(now, 0);
+    let latest = cron
+        .find_previous_occurrence(&now.with_timezone(&tz), true)
+        .ok()?
+        .with_timezone(&Utc);
+    (latest > since).then_some(latest)
 }
 
 /// Parsed as `tokio-cron-scheduler` parsed it while it fired cron jobs itself: seconds
@@ -1867,6 +1927,148 @@ mod tests {
         assert!(
             task.fire_at.is_some(),
             "the one-shot instant must survive rehydration"
+        );
+    }
+
+    #[test]
+    fn a_power_cut_over_the_morning_misses_only_that_mornings_run() {
+        let daily = "0 30 6 * * *";
+        // Ran at 06:30 on the 27th, down from the evening until 09:00 on the 29th (Nairobi).
+        let last_fired = utc("2026-10-27T03:30:01Z");
+        let back = utc("2026-10-29T06:00:00Z");
+        assert_eq!(
+            missed_occurrence(daily, "Africa/Nairobi", last_fired, back),
+            Some(utc("2026-10-29T03:30:00Z")),
+            "only the latest missed morning, never the 28th as well"
+        );
+    }
+
+    #[test]
+    fn a_missed_time_is_the_occurrence_itself_whatever_the_clock_reads() {
+        assert_eq!(
+            missed_occurrence(
+                "0 30 6 * * *",
+                "UTC",
+                utc("2026-10-28T06:30:01Z"),
+                utc("2026-10-29T09:15:42.437Z"),
+            ),
+            Some(utc("2026-10-29T06:30:00Z"))
+        );
+    }
+
+    #[test]
+    fn nothing_is_missed_when_the_last_fire_was_the_latest_occurrence() {
+        let daily = "0 30 6 * * *";
+        let fired = utc("2026-10-29T03:30:00.010Z");
+        assert_eq!(
+            missed_occurrence(daily, "Africa/Nairobi", fired, utc("2026-10-29T05:00:00Z")),
+            None
+        );
+        assert_eq!(
+            missed_occurrence("not cron", "UTC", fired, utc("2026-10-29T05:00:00Z")),
+            None
+        );
+    }
+
+    /// A restart over `schedules.json` holding `tasks`.
+    async fn restart_with(dir: &std::path::Path, tasks: &[PersistedTask]) -> CronSchedulerAdapter {
+        std::fs::write(
+            dir.join("schedules.json"),
+            serde_json::to_string(tasks).unwrap(),
+        )
+        .unwrap();
+        make_scheduler(dir).await
+    }
+
+    fn daily_since(id: &str, ask: bool, last_run: chrono::DateTime<Utc>) -> PersistedTask {
+        PersistedTask {
+            cron: "0 30 6 * * *".into(),
+            ask_if_missed: ask,
+            last_run: Some(last_run),
+            ..snapshot_of(&[id], 0).remove(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_schedule_that_asks_opens_a_question_for_its_latest_missed_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let two_days_ago = Utc::now() - chrono::Duration::days(2);
+        let paused = PersistedTask {
+            paused: true,
+            ..daily_since("paused", true, two_days_ago)
+        };
+        let sched = restart_with(
+            tmp.path(),
+            &[
+                daily_since("asks", true, two_days_ago),
+                daily_since("does-not", false, two_days_ago),
+                paused,
+            ],
+        )
+        .await;
+
+        let tasks: HashMap<_, _> = sched
+            .list_tasks()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.id.clone(), t))
+            .collect();
+        let expected = missed_occurrence("0 30 6 * * *", "UTC", two_days_ago, Utc::now());
+        assert_eq!(tasks["asks"].missed_run.map(|m| m.due_at), expected);
+        assert_eq!(tasks["does-not"].missed_run, None);
+        assert_eq!(tasks["paused"].missed_run, None);
+        assert!(
+            sched.get_runs("asks", 10).await.unwrap().is_empty(),
+            "nothing ran"
+        );
+
+        // The question is saved, so a second restart keeps asking about the same run.
+        drop(sched);
+        let again = make_scheduler(tmp.path()).await;
+        assert_eq!(
+            again
+                .list_tasks()
+                .await
+                .unwrap()
+                .iter()
+                .find(|t| t.id == "asks")
+                .unwrap()
+                .missed_run
+                .map(|m| m.due_at),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn an_old_question_closes_as_unanswered_when_a_newer_run_is_missed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let three_days_ago = Utc::now() - chrono::Duration::days(3);
+        let old_due = missed_occurrence(
+            "0 30 6 * * *",
+            "UTC",
+            three_days_ago,
+            three_days_ago + chrono::Duration::days(1),
+        )
+        .unwrap();
+        let waiting = PersistedTask {
+            missed_run: Some(MissedRun { due_at: old_due }),
+            ..daily_since("asks", true, three_days_ago)
+        };
+        let sched = restart_with(tmp.path(), &[waiting]).await;
+
+        let task = &sched.list_tasks().await.unwrap()[0];
+        assert!(
+            task.missed_run.unwrap().due_at > old_due,
+            "it asks about the latest one"
+        );
+        let runs = sched.get_runs("asks", 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, RunStatus::Skipped);
+        assert_eq!(runs[0].started_at, old_due);
+        assert_eq!(
+            runs[0].result.as_deref(),
+            Some(SkipReason::NobodyAnswered.as_str())
         );
     }
 

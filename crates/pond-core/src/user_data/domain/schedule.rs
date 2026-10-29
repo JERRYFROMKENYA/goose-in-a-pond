@@ -365,6 +365,27 @@ pub struct Schedule {
     pub missed_run: Option<MissedRun>,
 }
 
+/// Why a missed run did not happen, as its `Skipped` run's result says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Someone answered "skip".
+    ByMember,
+    /// The next fire time came first.
+    NobodyAnswered,
+    /// Asking was switched off while the question waited.
+    AskingTurnedOff,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::ByMember => "Skipped by a household member",
+            SkipReason::NobodyAnswered => "Nobody answered before the next run",
+            SkipReason::AskingTurnedOff => "Asking was turned off",
+        }
+    }
+}
+
 /// A missed fire time the household has been asked about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissedRun {

@@ -22,7 +22,7 @@ use pond_core::mcp::services::system_notices::{
 };
 use pond_core::user_data::domain::proposal::Proposal;
 use pond_core::user_data::domain::schedule::{
-    RunStatus, ScheduleResultEvent, TaskKind, TriggerAction,
+    RunStatus, Schedule, ScheduleResultEvent, TaskKind, TriggerAction,
 };
 use pond_core::user_data::ports::scheduler::SchedulerPort;
 use pond_core::user_data::ports::settings::SettingsRepository;
@@ -187,6 +187,50 @@ fn truncate_goal(goal: &str) -> String {
     match goal.char_indices().nth(MAX) {
         Some((at, _)) => format!("{}...", goal[..at].trim_end()),
         None => goal.to_string(),
+    }
+}
+
+// Missed runs
+
+/// The household's question about a missed run, opening the schedule where it is answered.
+/// `action_required`, not `alert`: it waits for a decision and is not read aloud. The id is the
+/// schedule and the missed time, so asking again after a restart repeats the same notice.
+pub fn missed_run_notification(schedule: &Schedule) -> Option<Notification> {
+    let missed = schedule.missed_run?;
+    let local = pond_core::shared::services::chat::LocalTimeOfDay::in_zone(
+        &schedule.timezone,
+        missed.due_at,
+    );
+    let at = format!("{:02}:{:02}", local.minutes() / 60, local.minutes() % 60);
+    Some(Notification {
+        id: format!("missed-{}-{}", schedule.id, missed.due_at.timestamp()),
+        target: "broadcast".to_string(),
+        category: "action_required".to_string(),
+        title: schedule.label.clone(),
+        body: format!("{} didn't run at {at}. Run it now?", schedule.label),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        data: Some(
+            OpenScreen::ScheduleDetail {
+                schedule_id: schedule.id.clone(),
+            }
+            .data(),
+        ),
+    })
+}
+
+/// Ask every paired phone about each missed run waiting for an answer, as the pond starts.
+pub async fn announce_missed_runs(scheduler: &dyn SchedulerPort, sender: &dyn NotificationSender) {
+    let tasks = match scheduler.list_tasks().await {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            tracing::warn!(kind = "missed_run_notice_failed", error = %e, "could not read schedules to ask about missed runs");
+            return;
+        }
+    };
+    for notification in tasks.iter().filter_map(missed_run_notification) {
+        if let Err(e) = sender.broadcast(notification).await {
+            tracing::warn!(kind = "missed_run_notice_failed", error = %e, "could not ask about a missed run");
+        }
     }
 }
 
@@ -636,6 +680,42 @@ mod tests {
             next_run: None,
             created_at: chrono::Utc::now(),
         })
+    }
+
+    #[tokio::test]
+    async fn a_missed_run_is_asked_about_on_every_phone_at_its_local_time() {
+        let mut missed = task(
+            "morning",
+            TaskKind::AgentPrompt {
+                prompt: "good morning".into(),
+            },
+        );
+        missed.0.label = "Morning routine".into();
+        missed.0.timezone = "Africa/Nairobi".into();
+        missed.0.missed_run = Some(pond_core::user_data::domain::schedule::MissedRun {
+            due_at: "2026-10-29T03:30:00Z".parse().unwrap(),
+        });
+        let sender = MockNotificationSender::new();
+
+        announce_missed_runs(&missed, &sender).await;
+
+        let sent = sender.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(matches!(sent[0].0, Delivery::Broadcast));
+        let n = &sent[0].1;
+        assert_eq!(n.category, "action_required");
+        assert_eq!(n.body, "Morning routine didn't run at 06:30. Run it now?");
+        assert_eq!(
+            n.data,
+            Some(serde_json::json!({"open": "schedule", "schedule_id": "morning"}))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_schedule_with_nothing_missed_asks_nothing() {
+        let sender = MockNotificationSender::new();
+        announce_missed_runs(&task("morning", rule(vec![])), &sender).await;
+        assert!(sender.sent().is_empty());
     }
 
     #[tokio::test]

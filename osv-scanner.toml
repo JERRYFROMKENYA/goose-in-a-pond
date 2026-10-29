@@ -117,6 +117,11 @@ id = "RUSTSEC-2023-0071"
 ignoreUntil = 2027-03-31
 reason = "rsa: Marvin Attack, key recovery through timing side channels (CVSS 5.9). No fixed version exists -- the fix requires a constant-time rewrite upstream. Reached transitively; GIAP does not perform RSA private-key operations on attacker-controlled timing paths. Named in security.yml's own comment. Re-check whether a fixed rsa release exists at the review date."
 
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+ignoreUntil = 2027-01-31
+reason = "crypto-bigint 0.5.5: some operations meant to be constant-time branch on secret data. Fixed only in 0.7.6, a new major. Reached only through pond-adapters-lightning (pond-server's optional `lightning` feature, off by default and absent from the shipped binary), via breez-sdk-spark's k256 and elliptic-curve 0.13; breez-sdk-spark 0.27.2, its latest release, still locks crypto-bigint 0.5.5. Also in goose/Cargo.lock through the same RustCrypto 0.13 stack. Remove when breez-sdk-spark moves to elliptic-curve 0.14."
+
 # ── Go: present in the module graph, not in the build ────────────────────────
 
 [[IgnoredVulns]]

@@ -8,6 +8,7 @@ use crate::shared::domain::orchestration::{AgentRole, TaskRun, TaskStatus};
 use crate::shared::services::long_task_roles::{self as roles, TASK_WORK_EXTENSION};
 use crate::user_data::domain::recipe::AgentRecipe;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 /// Tool-group ceiling for a long task's runs, which have no parent turn to inherit one from.
 /// Read-only beyond the ledger: until approvals exist, no step may act on the world.
@@ -45,6 +46,21 @@ pub fn step_roles(household: &[AgentRecipe]) -> Vec<AgentRole> {
 
 /// A failed step is tried this many times before the planner is asked to plan around it.
 pub const MAX_STEP_ATTEMPTS: u32 = 2;
+
+/// The failure a helper that used up its turns leaves; its retry gets more of them.
+pub const OUT_OF_TURNS: &str = "the helper ran out of turns before reporting";
+
+/// The failure a helper that reported done with nothing to show leaves.
+pub const CAME_BACK_EMPTY: &str = "the helper reported done but gave no result";
+
+/// A summary shorter than this, with nothing saved, is no result at all.
+const MIN_RESULT_CHARS: usize = 20;
+
+/// An input this small is put in the brief whole: a helper that must first call `artifact_read`
+/// spends a model turn and a re-prefill before it starts the work, and a small model sometimes
+/// never reads it at all. Larger inputs, and any past the total, stay pull-only.
+pub const INLINE_ARTIFACT_TOKENS: u32 = 1_500;
+pub const INLINE_TOTAL_TOKENS: u32 = 3_000;
 
 /// Plans in a row that leave nothing runnable before the task is given up.
 pub const MAX_FRUITLESS_PLANS: u32 = 3;
@@ -132,11 +148,20 @@ pub fn next_run<'a>(
 /// The artifact the planner is told to end with, which `task_status` reports as the answer.
 pub const RESULT_TITLE: &str = "Result";
 
+/// The newest artifact titled "Result", else the newest whose title has "result" as a word: a model
+/// told to save "Result" sometimes saves "Arusha Trip Result", and the task then read as having no
+/// answer. "Search results" is not one.
 pub fn result_artifact(artifacts: &[ArtifactSummary]) -> Option<&ArtifactSummary> {
+    let names_result = |title: &str| {
+        title
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case(RESULT_TITLE))
+    };
     artifacts
         .iter()
         .rev()
-        .find(|a| a.title.eq_ignore_ascii_case(RESULT_TITLE))
+        .find(|a| a.title.trim().eq_ignore_ascii_case(RESULT_TITLE))
+        .or_else(|| artifacts.iter().rev().find(|a| names_result(&a.title)))
 }
 
 fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
@@ -250,21 +275,56 @@ pub fn planner_brief(
 }
 
 /// What a worker sees: its step, the artifacts it was given and what its dependencies saved.
+/// What a step is given: its named inputs, what the steps it depends on saved, and on a retry what
+/// its own last try saved, so the retry continues that work rather than starting again.
+fn given_artifacts<'a>(
+    step: &PlanStep,
+    artifacts: &'a [ArtifactSummary],
+) -> Vec<&'a ArtifactSummary> {
+    artifacts
+        .iter()
+        .filter(|a| {
+            step.inputs().contains(&a.id)
+                || a.step_key.as_ref().is_some_and(|key| {
+                    step.depends_on().contains(key) || (step.attempts() > 0 && key == step.key())
+                })
+        })
+        .collect()
+}
+
+/// The given artifacts whose bodies go in the brief, in order, within the inline budget.
+pub fn inline_ids(step: &PlanStep, artifacts: &[ArtifactSummary]) -> Vec<String> {
+    let mut total = 0;
+    let mut ids = Vec::new();
+    for artifact in given_artifacts(step, artifacts) {
+        if artifact.tokens <= INLINE_ARTIFACT_TOKENS
+            && total + artifact.tokens <= INLINE_TOTAL_TOKENS
+        {
+            total += artifact.tokens;
+            ids.push(artifact.id.clone());
+        }
+    }
+    ids
+}
+
+/// The turn budget for a step's run: a retry after running out of turns gets half again as many.
+pub fn turns_for(role_max_turns: u32, step: &PlanStep) -> u32 {
+    if step.attempts() > 0 && step.failure() == Some(OUT_OF_TURNS) {
+        role_max_turns + role_max_turns.div_ceil(2)
+    } else {
+        role_max_turns
+    }
+}
+
+/// `bodies` holds the text of the inputs [`inline_ids`] chose, read by the caller.
 pub fn worker_brief(
     task: &LongTask,
     step: &PlanStep,
     artifacts: &[ArtifactSummary],
+    bodies: &HashMap<String, String>,
     now: DateTime<Utc>,
 ) -> String {
-    let given: Vec<&ArtifactSummary> = artifacts
-        .iter()
-        .filter(|a| {
-            step.inputs().contains(&a.id)
-                || a.step_key
-                    .as_ref()
-                    .is_some_and(|key| step.depends_on().contains(key))
-        })
-        .collect();
+    let given = given_artifacts(step, artifacts);
     let mut brief = date_line(now);
     brief.push_str(&format!("The task's goal: {}\n", task.goal()));
     if task.kind() == LongTaskKind::Research {
@@ -283,8 +343,27 @@ pub fn worker_brief(
             brief.push_str(&format!("The last try failed: {failure}\n"));
         }
     }
-    brief.push_str("\nArtifacts you may read:\n");
-    brief.push_str(&artifact_lines(&given));
+    let (inline, pull): (Vec<&ArtifactSummary>, Vec<&ArtifactSummary>) =
+        given.into_iter().partition(|a| bodies.contains_key(&a.id));
+    if !inline.is_empty() {
+        brief.push_str(
+            "\nYour inputs, already read for you (do not call artifact_read for these):\n",
+        );
+        for artifact in &inline {
+            brief.push_str(&format!(
+                "--- {} \"{}\" ---\n{}\n",
+                artifact.id,
+                artifact.title,
+                bodies[&artifact.id].trim()
+            ));
+        }
+    }
+    brief.push_str(if inline.is_empty() {
+        "\nArtifacts you may read:\n"
+    } else {
+        "\nOther artifacts you may read:\n"
+    });
+    brief.push_str(&artifact_lines(&pull));
     brief
 }
 
@@ -329,12 +408,32 @@ pub enum RunEnd {
 
 /// One hand-back per run: the reported one; else, when the helper saved work, that work; else one
 /// read from its last text; else a failure that says why there is none.
-pub fn settle_run(reported: Option<StepOutcome>, written: &[String], run: &TaskRun) -> RunEnd {
+/// `may_retry` says the step has a try left: a helper that ran out of turns then fails, so its
+/// retry gets more turns and what it saved, rather than its half-done work counting as done.
+pub fn settle_run(
+    reported: Option<StepOutcome>,
+    written: &[String],
+    run: &TaskRun,
+    may_retry: bool,
+) -> RunEnd {
+    // A report is the hand-back even when the run was then stopped: the runner ends a run as soon
+    // as it reports, rather than pay for the turn the model takes after "stop here".
+    if let Some(outcome) = reported {
+        let empty = outcome.outcome() == OutcomeKind::Completed
+            && outcome.artifacts().is_empty()
+            && written.is_empty()
+            && outcome.summary().trim().chars().count() < MIN_RESULT_CHARS;
+        return RunEnd::Reported(if empty {
+            failed(CAME_BACK_EMPTY)
+        } else {
+            outcome
+        });
+    }
     if run.status == TaskStatus::Cancelled {
         return RunEnd::Preempted;
     }
-    if let Some(outcome) = reported {
-        return RunEnd::Reported(outcome);
+    if run.status == TaskStatus::TurnBudgetExhausted && may_retry {
+        return RunEnd::Reported(failed(OUT_OF_TURNS));
     }
     // Small models often save their work and stop without reporting; the work is the evidence.
     if !written.is_empty() {
@@ -353,7 +452,7 @@ pub fn settle_run(reported: Option<StepOutcome>, written: &[String], run: &TaskR
         ));
     }
     if run.status == TaskStatus::TurnBudgetExhausted {
-        return RunEnd::Reported(failed("the helper ran out of turns before reporting"));
+        return RunEnd::Reported(failed(OUT_OF_TURNS));
     }
     match run.result_for_parent().map(StepOutcome::parse) {
         Some(Ok(outcome)) => RunEnd::Reported(outcome),

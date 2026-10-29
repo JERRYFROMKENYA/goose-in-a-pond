@@ -128,7 +128,35 @@ pub struct StepBindingLease {
     root: String,
 }
 
+/// Whether a run has reported, readable while it is still going.
+#[derive(Clone)]
+pub struct ReportWatch {
+    bindings: Weak<StepBindings>,
+    root: String,
+}
+
+impl ReportWatch {
+    pub fn is_reported(&self) -> bool {
+        self.bindings.upgrade().is_some_and(|bindings| {
+            bindings
+                .entries
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&self.root)
+                .is_some_and(|entry| entry.report.is_some())
+        })
+    }
+}
+
 impl StepBindingLease {
+    /// A handle that says when the run has reported, for a watcher that ends the run there.
+    pub fn report_watch(&self) -> ReportWatch {
+        ReportWatch {
+            bindings: self.bindings.clone(),
+            root: self.root.clone(),
+        }
+    }
+
     /// The run's hand-back, taken once.
     pub fn take_report(&self) -> Option<StepOutcome> {
         self.bindings.upgrade().and_then(|bindings| {

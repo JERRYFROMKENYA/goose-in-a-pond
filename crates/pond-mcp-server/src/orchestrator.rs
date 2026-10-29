@@ -500,8 +500,8 @@ and is refused when the model runs on this device (one agent at a time).")]
     }
 
     #[tool(description = "\
-Check a background delegation by `task_id`: what the agent is doing, or its findings if \
-finished. Only tasks started in this conversation.")]
+Check a background delegation or a long task by `task_id`: what it is doing, or its findings \
+if finished. Without a `task_id`, lists the person's long tasks still running.")]
     async fn check_task(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -541,14 +541,28 @@ finished. Only tasks started in this conversation.")]
         };
         let authority = authorise(deps.authorities.authority_for_engine_session(&session))?;
 
-        let task_id = check_task_id(params)?;
+        // A long task's id, or no id while long tasks run, gets task_status's answer: the prime
+        // reaches for this tool for both, and every such call used to be refused.
+        let scope = authority.profile_scope();
+        let task_id = match check_task_id(params) {
+            Ok(id) => id,
+            Err(refusal) => {
+                return crate::long_task::long_task_status_for(scope, None)
+                    .await
+                    .ok_or(refusal)
+            }
+        };
         let run = deps
             .orchestrator
             .poll(&task_id)
             .await
             .map_err(|e| Refusal::TaskLookupFailed(e.to_string()))?;
-        let run = authorise_task(run, authority.session_id(), &task_id)?;
-        Ok(describe_run(&run))
+        match authorise_task(run, authority.session_id(), &task_id) {
+            Ok(run) => Ok(describe_run(&run)),
+            Err(refusal) => crate::long_task::long_task_status_for(scope, Some(&task_id))
+                .await
+                .ok_or(refusal),
+        }
     }
 }
 

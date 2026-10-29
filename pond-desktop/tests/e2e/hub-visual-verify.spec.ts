@@ -30,8 +30,10 @@ test("Hub visual screenshot", async ({ page }) => {
   console.log(`Drawer width: ${drawerWidth}px (expected 344)`);
   await page.keyboard.press("Escape");
 
-  const hasVoiceButton = await page.locator(".dash__voice").isVisible();
-  console.log(`Talk-to-Goose button visible: ${hasVoiceButton}`);
+  // Above 1100px the composer's mic replaces the dock's, so exactly one shows.
+  const hasTalkButton = await page.locator(".hcomposer__talk").isVisible();
+  const hasDockVoice = await page.locator(".dash__voice").isVisible();
+  console.log(`Hold-to-talk visible: ${hasTalkButton}, dock mic visible: ${hasDockVoice}`);
 
   const hasPills = await page.locator(".rpills").isVisible();
   console.log(`Room pills visible: ${hasPills} (expected false -- removed in dbdf02a1)`);
@@ -87,7 +89,8 @@ test("Hub visual screenshot", async ({ page }) => {
   // 344px declared, plus up to 2px of border a side depending on box-sizing.
   expect(drawerWidth).toBeGreaterThanOrEqual(344);
   expect(drawerWidth).toBeLessThanOrEqual(348);
-  expect(hasVoiceButton).toBe(true);
+  expect(hasTalkButton).toBe(true);
+  expect(hasDockVoice).toBe(false);
   // Every offer meets the hub's 44px tap floor and carries the fact behind it.
   for (let i = 0; i < offerCount; i++) {
     const box = await offers.nth(i).boundingBox();

@@ -7661,6 +7661,19 @@ async fn advance_long_task(
                 Some(RunEnd::Reported(_)) | None => step.record(&outcome, chrono::Utc::now())?,
             }
             tasks.update_step(&step).await?;
+            // A retry clears its failure from the row once it succeeds; the reason lives on here.
+            tracing::info!(
+                target: "giap::trace",
+                kind = "long_task_step_settled",
+                task_id = %task.id(),
+                step = %step.key(),
+                state = step.state().as_str(),
+                attempt = step.attempts(),
+                turns = role.max_turns(),
+                inlined_inputs = bodies.len(),
+                failure = step.failure().unwrap_or(""),
+                "a long-task step settled"
+            );
             if step.state() == StepState::Completed {
                 pond_server::agent_activations::apply_after_actions(
                     &activations::after_hook_actions(task, &role, &step, &outcome),

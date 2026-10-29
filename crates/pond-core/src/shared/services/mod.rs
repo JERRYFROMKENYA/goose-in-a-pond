@@ -11,6 +11,7 @@ pub mod long_task_queue;
 pub mod long_task_roles;
 pub mod long_task_runner;
 pub mod passages;
+pub mod pond_admin;
 pub mod prefill_progress;
 pub mod print_output;
 pub mod research_report;

@@ -4008,3 +4008,38 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   turn behind another task and that the task card can stop the person's tasks. Stopping the first
   moved the second to the front. Both were stopped and the device and its chats removed afterwards.
   The phone's queue card (goose-on-the-go #204) is not checked on a device.
+
+**2026-10-29 — PAI-1 and PAI-2: My Pond and the admin card ([pond administrator](../pond-administrator.md)).**
+
+- **Why.** Jerry asked for a phone area to administer the pond: storage, files, caches, long-task
+  artifacts and reports, health and power. Each of those deletes or reveals something, and being
+  paired was the only proof any route asked for.
+- **What landed.** `/api/v1/admin/*` answers only a member's device (`DeviceRung::Member`; a
+  guest's or an unattributed device gets `403 admin_members_only`) that unlocked it with the admin
+  card in the last 15 minutes (`AdminElevation`, `pond-core/src/security/services/`). The card is
+  made on the device by `giap.sh admin-card`, which keeps only a verifier on the pond and seals the
+  plaintext to the TPM. Wrong cards are slowed like the setup code.
+- **PAI-1.** A long task of another member shows its state, dates and artifact count, never its goal
+  or artifact titles, as the run queue already shows it. The unlock binds to the device, not to the
+  household.
+- **PAI-2.** The file browser never lists `setup/`, `tls/`, `secrets*`, `embedded-network/`,
+  `lightning/` or `.runtime_*`, and refuses `..`, absolute paths and paths through a symlink. Every
+  unlock, refusal and change is an `admin.*` audit event, with a file's top-level area only, and
+  every unlock is pushed to the household. Nothing new reaches `Settings` or leaves the device.
+- **Invariants.** No preamble or prompt change, no egress, no LLM call on the path.
+- **Not verified on the Orin yet.** The TPM seal and the `nvpmodel` switch need the board and
+  Jerry's sudo password; the deploy waits for his go-ahead.
+
+**2026-10-29 — PAI-2: the pond's own account, `agamemnon` ([pond administrator](../pond-administrator.md#the-service-account)).**
+
+- **What landed.** `install.sh` offers a new pond its own locked system account; `giap.sh
+  service-account [undo|status]` moves an existing one and back. The service runs as `agamemnon`
+  from `/var/lib/goose-in-a-pond`, with its own PulseAudio from a lingering user manager.
+- **PAI-2.** The data directory is `0750` and other local users lose the group read they had
+  through the login's home. The login keeps read access through an ACL that leaves every file's own
+  mask alone, so `setup/`, `secrets/`, `tls/` and the host credential stay the service account's.
+  Nothing new leaves the device; the scripts change only who owns the data.
+- **Invariants.** No server code, preamble, prompt or setting changed.
+- **On hardware.** In containers on the nano: the installer's step ran the real `pond-server` as
+  `agamemnon`, and a live voice turn ran with Whisper on CUDA and the USB pair. The nano itself
+  was not moved. A desktop shell's voice loop, which runs as the login, is the next step.

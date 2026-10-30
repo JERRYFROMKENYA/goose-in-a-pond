@@ -36,7 +36,8 @@ use pond_core::shared::services::chat::ChatService;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
 use pond_core::user_data::domain::profile::CreateProfileRequest;
 use pond_core::user_data::domain::schedule::{
-    OneShotTimePassed, Schedule, SensorTriggerSpec, TaskKind,
+    routine_rejection, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule,
+    SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
 use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
@@ -354,6 +355,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/schedules/{id}/pause", post(pause_schedule))
         .route("/schedules/{id}/resume", post(resume_schedule))
         .route("/schedules/{id}/run-now", post(run_schedule_now))
+        .route("/schedules/{id}/missed/run", post(run_missed_schedule))
+        .route("/schedules/{id}/missed/skip", post(skip_missed_schedule))
         .route("/schedules/{id}/runs", get(list_schedule_runs))
         .route("/schedules/events", get(schedule_events_sse))
         // ── Sensor rules ───────────────────────────────────────────────────
@@ -903,7 +906,8 @@ async fn emit_pairing_outcome(
     } else {
         tracing::warn!(
             kind = "pairing_rejected",
-            device = device_name.unwrap_or("unnamed"),
+            // A phone's name is often its owner's ("Amina's iPhone").
+            named = device_name.is_some(),
             reason = reason.unwrap_or("unspecified"),
             method,
             "pairing rejected"
@@ -1527,7 +1531,8 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             device = device.unwrap_or("unknown"),
             error = %why,
             "onboarding completed, but the device that claimed this pond was not attributed \
-             to its owner; it stays unattributed until a pairing code or Devices binds it"
+             to its owner; it stays unattributed until it pairs again with a code issued for a \
+             member"
         );
     };
     let claimant = match claims.claimed_by().await {
@@ -3099,7 +3104,10 @@ async fn drive_turn(
                                     }
                                 }
                             } else {
-                                tracing::warn!("Unrecognised tool-call envelope: {body}");
+                                tracing::warn!(
+                                    body_chars = body.chars().count(),
+                                    "Unrecognised tool-call envelope"
+                                );
                             }
                         }
                     }
@@ -4351,7 +4359,7 @@ async fn retitle_session(
                 kind = "session_retitled",
                 trigger = "manual_one",
                 session_id = %session_id,
-                title = %title,
+                title_chars = title.chars().count(),
             );
             json!({ "session_id": session_id, "outcome": "retitled", "title": title })
         }
@@ -5766,6 +5774,64 @@ fn geocode_target(
     (name_changed || coords_unset).then(|| name.to_string())
 }
 
+/// `primary_profile_id` must name a household member or be cleared (`null` or `""`).
+///
+/// It is a key-value row, not a foreign key, so nothing else stops a display name landing in it,
+/// and a dashboard once offered it as a free-text box: one household typed its owner's name, and
+/// every reader that looks the id up (the claimant's attribution at onboarding completion, the
+/// `Household` prompt particulars) then found nobody, without a word.
+async fn refuse_primary_profile_that_is_not_a_member(
+    state: &Arc<AppState>,
+    patch: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(id) = patch
+        .get("primary_profile_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    match state.profile_repo.get(id).await {
+        Ok(Some(member)) => {
+            tracing::info!(
+                kind = "primary_profile_set",
+                profile_id = %member.id,
+                "the household's primary member is set"
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::warn!(
+                kind = "primary_profile_refused",
+                value = %id,
+                "refused a primary_profile_id that names no household member"
+            );
+            let message = "Choose a household member. This takes a member's id from \
+                           GET /api/v1/profiles, not a name.";
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("primary_profile_id: {message}"),
+                    "fields": [{ "field": "primary_profile_id", "message": message }],
+                })),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                kind = "primary_profile_unverified",
+                error = %e,
+                "could not read the household members, so primary_profile_id was not saved"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Could not check that household member, so nothing was saved.",
+                })),
+            ))
+        }
+    }
+}
+
 async fn update_settings(
     State(state): State<Arc<AppState>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
@@ -5809,6 +5875,8 @@ async fn update_settings(
             })),
         ));
     }
+
+    refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));
@@ -10412,6 +10480,9 @@ struct ApiCreateScheduleRequest {
     /// Fire once at `cron`'s next occurrence instead of recurring; ignored if `fire_at` is set.
     #[serde(default)]
     once: bool,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    ask_if_missed: bool,
 }
 
 /// `POST /api/v1/schedules` — create a new scheduled task.
@@ -10489,6 +10560,7 @@ async fn create_schedule(
     }
 
     let req = CreateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         fire_at: api_req.fire_at,
         once: api_req.once,
         id: api_req
@@ -10548,9 +10620,26 @@ async fn update_schedule(
         }
     };
 
-    let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
+    // Refused here, not by the store, so a 404 still means only that there is no such task.
+    match &api_req.kind {
+        Some(TaskKind::SensorTrigger(spec)) => {
+            if let Some((status, body)) = rule_spec_rejection(spec) {
+                return (status, Json(body));
+            }
+        }
+        Some(TaskKind::Routine { actions }) => {
+            if let Some(why) = routine_rejection(actions) {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": why})));
+            }
+        }
+        _ => {}
+    }
+    let kind = api_req
+        .kind
+        .or_else(|| api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p }));
 
     let req = UpdateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         label: api_req.name,
         cron: api_req.cron,
         timezone: api_req.timezone,
@@ -10572,12 +10661,15 @@ struct ApiUpdateScheduleRequest {
     cron: Option<String>,
     timezone: Option<String>,
     prompt: Option<String>,
+    /// Replaces the task's kind, such as a routine's actions; wins over `prompt`.
+    kind: Option<TaskKind>,
     /// Fire once at this instant instead of recurring.
     #[serde(default)]
     fire_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Fire once at `cron`'s next occurrence instead of recurring.
     #[serde(default)]
     once: bool,
+    ask_if_missed: Option<bool>,
 }
 
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
@@ -10632,6 +10724,47 @@ async fn run_schedule_now(
     };
     match scheduler.run_now(&id).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+        Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+/// `POST /api/v1/schedules/:id/missed/run` — run the missed run being asked about, now.
+async fn run_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Run).await
+}
+
+/// `POST /api/v1/schedules/:id/missed/skip` — record the missed run being asked about skipped.
+async fn skip_missed_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<Value>) {
+    answer_missed_schedule(&state, &id, MissedRunAnswer::Skip).await
+}
+
+/// The first answer settles a missed run; a later one is `409`, as is answering none.
+async fn answer_missed_schedule(
+    state: &AppState,
+    id: &str,
+    answer: MissedRunAnswer,
+) -> (StatusCode, Json<Value>) {
+    let Some(scheduler) = &state.scheduler else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "scheduler not configured"})),
+        );
+    };
+    match scheduler.answer_missed_run(id, answer).await {
+        Ok(()) => match answer {
+            MissedRunAnswer::Run => (StatusCode::ACCEPTED, Json(json!({"fired": id}))),
+            MissedRunAnswer::Skip => (StatusCode::OK, Json(json!({"skipped": id}))),
+        },
+        Err(e) if e.downcast_ref::<NoMissedRun>().is_some() => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": e.to_string(), "code": "no_missed_run"})),
+        ),
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e.to_string()}))),
     }
 }
@@ -10836,6 +10969,7 @@ async fn create_rule(
 
     // Duplicate ids and the cron are the scheduler's to reject, not this handler's.
     let create = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: None,
         once: false,
         id: req.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -10908,6 +11042,7 @@ async fn update_rule(
     }
 
     let update = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: Some(req.name),
         cron: None,
         timezone: None,
@@ -11687,7 +11822,10 @@ async fn agent_chat_stream(
                                 }
                             }
                         } else {
-                            tracing::warn!("Unrecognised tool-call envelope: {body}");
+                            tracing::warn!(
+                                body_chars = body.chars().count(),
+                                "Unrecognised tool-call envelope"
+                            );
                         }
                     }
                 }
@@ -19586,6 +19724,8 @@ mod tests {
 
         fn schedule(id: &str, kind: TaskKind) -> Schedule {
             Schedule {
+                ask_if_missed: false,
+                missed_run: None,
                 fire_at: None,
                 id: id.into(),
                 label: format!("label of {id}"),

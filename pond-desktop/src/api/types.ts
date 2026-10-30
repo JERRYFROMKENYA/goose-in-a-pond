@@ -418,21 +418,30 @@ export interface Schedule {
   prompt: string;
   enabled: boolean;
   timezone?: string;
-  kind?: { type: "agent_prompt"; prompt: string } | { type: "webhook"; webhook_url: string };
+  kind?:
+    | { type: "agent_prompt"; prompt: string }
+    | { type: "webhook"; webhook_url: string }
+    | { type: "routine"; actions: Array<{ type: string } & Record<string, unknown>> };
   last_run?: string;
   next_run?: string;
   created_at?: string;
+  /** Ask before running a fire time missed while the Pond was down. */
+  ask_if_missed?: boolean;
+  /** The missed fire time waiting for an answer. */
+  missed_run?: { due_at: string } | null;
 }
 
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result?: string;
   error?: string;
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /** Set on a missed run someone chose to make late: when it was originally due. */
+  caught_up_from?: string;
 }
 
 /** Enriched schedule run for UI notification display. */
@@ -440,7 +449,7 @@ export interface ScheduleRunNotification {
   id: string;
   scheduleId: string;
   scheduleName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result: string | null;
   error: string | null;
   startedAt: string;
@@ -1297,9 +1306,14 @@ export interface RecoveryRequest {
 export interface PairingCodeResponse {
   code: string | null;
   expires_at?: string;
+  /** The household member a device pairing with this code becomes; null binds it to nobody. */
+  profile_id?: string | null;
   /** Where a phone connects and which key it pins; sent only on this host-only route. */
   pairing: PairingMaterial;
 }
+
+/** Whose a device pairing with a new code becomes: a named member, or explicitly nobody. */
+export type PairingCodeBinding = { profile_id: string } | { unattributed: true };
 
 export interface PairingMaterial {
   hostname: string;

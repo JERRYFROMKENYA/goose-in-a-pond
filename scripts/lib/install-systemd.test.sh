@@ -13,9 +13,10 @@ trap 'rm -rf "$SCRATCH"' EXIT
 
 ORIG_PATH="$PATH"
 PASSED=0; FAILED=0
+# Every assertion counts: a test stops at the first one that fails, not only at its last line.
 t() {
   local name="$1" fn="$2" out rc
-  out="$( ( "$fn" ) 2>&1 )"; rc=$?
+  out="$( ( set -e; "$fn" ) 2>&1 )"; rc=$?
   if [ "$rc" -eq 0 ]; then PASSED=$((PASSED + 1))
   else
     FAILED=$((FAILED + 1)); printf 'FAIL: %s\n' "$name"
@@ -45,7 +46,7 @@ OLD_DATA="/home/nano/.local/share/goose-in-a-pond"
 # shellcheck disable=SC2016  # the fakes' own shells expand their bodies
 world() {
   W="$SCRATCH/w.$RANDOM$RANDOM"; R="$W/root"
-  mkdir -p "$W/bin" "$W/etc" "$R/etc/systemd/system" "$R/var/lib" "$R/etc/polkit-1/rules.d" \
+  mkdir -p "$W/bin" "$W/etc" "$R/etc/systemd/system" "$R/etc/sudoers.d" "$R/var/lib" "$R/etc/polkit-1/rules.d" \
     "$R$OLD_DATA/logs" "$(dirname "$R$BIN")"
   export PATH="$W/bin:$ORIG_PATH" FAKE_CALLS="$W/calls" FAKE_ETC="$W/etc" FAKE_USER_UNIT="$W/no-user-unit"
   export AGAMEMNON_ROOT="$R" AGAMEMNON_SUDO="" CONNECT_ROOT="$R"
@@ -88,6 +89,7 @@ done
 if [ "$dir" = true ]; then mkdir -p "$1" && { [ -z "$m" ] || chmod "$m" "$1"; }
 else rm -f "$2"; cp "$1" "$2" && { [ -z "$m" ] || chmod "$m" "$2"; }; fi'
   fake pkaction 'echo "pkaction version 124"'
+  fake visudo '[ -z "${VISUDO_FAILS:-}" ]'
   # shellcheck source=admin-card.sh
   . "$HERE/admin-card.sh"
   # shellcheck source=connect-setup.sh
@@ -96,9 +98,8 @@ else rm -f "$2"; cp "$1" "$2" && { [ -z "$m" ] || chmod "$m" "$2"; }; fi'
   . "$HERE/install-systemd.sh"
 }
 
-fake_jetson() { # nvpmodel and a visudo that passes
+fake_jetson() { # nvpmodel; the world's visudo already passes
   fake nvpmodel 'exit 0'
-  fake visudo 'exit 0'
 }
 
 calls() { cat "$FAKE_CALLS"; }
@@ -338,6 +339,38 @@ test_the_move_runs_under_install_sh_strict_mode() {
   ) || { echo "strict mode broke the round trip"; return 1; }
   contains "$(calls)" "--groups video,render,audio agamemnon"
   eq "$(cat "$R$OLD_DATA/pond_system.db")" "chat history"
+}
+
+test_the_login_keeps_running_the_pond_and_nothing_more() {
+  world
+  local text
+  text="$(agamemnon_login_dropin_text nano /usr/bin/systemctl)"
+  contains "$text" "nano ALL=(root) NOPASSWD: /usr/bin/systemctl start goose-in-a-pond.service, /usr/bin/systemctl stop goose-in-a-pond.service, /usr/bin/systemctl restart goose-in-a-pond.service"
+  contains "$text" "nano ALL=(agamemnon) NOPASSWD: ALL"
+  lacks "$text" "(ALL)"
+  lacks "$text" "daemon-reload"
+  lacks "$text" "enable"
+}
+
+test_the_move_lets_the_login_run_the_pond_and_undo_takes_it_back() {
+  world
+  user_unit
+  agamemnon_move user "$U" "$OLD_DATA" nano /home/nano/goose-in-a-pond >/dev/null || return 1
+  local f="$R/etc/sudoers.d/goose-in-a-pond-login"
+  contains "$(cat "$f")" "nano ALL=(agamemnon) NOPASSWD: ALL"
+  contains "$(cat "$f")" "$W/bin/systemctl restart goose-in-a-pond.service"
+  eq "$(mode "$f")" "-r--r-----"
+  agamemnon_undo nano /home/nano/goose-in-a-pond >/dev/null || return 1
+  [ ! -e "$f" ] || { echo "the login's rule outlived undo"; return 1; }
+}
+
+test_a_login_rule_visudo_refuses_is_never_installed() {
+  world
+  local out
+  out="$(VISUDO_FAILS=1 agamemnon_take_over "$BIN serve --port 8080" /home/nano/goose-in-a-pond "$OLD_DATA" nano)" || return 1
+  contains "$out" "did not pass visudo"
+  contains "$out" "needs sudo's password"
+  [ ! -e "$R/etc/sudoers.d/goose-in-a-pond-login" ] || { echo "a refused rule was installed"; return 1; }
 }
 
 for fn in $(declare -F | awk '{print $3}' | grep '^test_'); do

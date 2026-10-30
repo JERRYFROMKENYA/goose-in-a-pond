@@ -19,7 +19,7 @@ the hardware in every row.
 
 | Workstream | Done | Partial | Open or removed | On hardware | Next concrete step |
 |---|---|---|---|---|---|
-| [PAI-1 Identity and profile boundaries](./01-identity-and-profile-boundaries.md) | 10: P1-P10 | 0 | No open phase. Three gaps outside the phase list: `get_session_messages` and `get_session_attachment` (`pond-api/src/routes.rs`) take no `Principal`, so any paired client reads any conversation by id; the `giap-memory` tools search at `ProfileScope::Household` (`pond-mcp-server/src/memory.rs`), so on a pond of two members one member's turn can read the other's memories (guests are not offered the group); `language` is collected by the onboarding locale step and never written to `profiles.preferences` (`buildProfilePatch` in `useOnboardingPersist.ts`) | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-1); the 2026-09-24 scope fixes are Mac-only | Scope `get_session_messages` and `get_session_attachment` by the caller's `Principal`, as `/reminders` and `/suggestions` already are |
+| [PAI-1 Identity and profile boundaries](./01-identity-and-profile-boundaries.md) | 10: P1-P10 | 0 | No open phase. Four gaps outside the phase list. **2026-10-28, from a household on the Orin:** a device paired to nobody stays nobody's, because nothing re-attributes a device after pairing (`PUT /devices/{id}` takes no member) and, until `fix/profile-attribution`, neither the dashboard nor `pond-server pairing` could issue a member-bound code, so on a pond of two members every newly paired phone resolved `Guest` and a phone paired before the first member existed could never be linked; that branch adds the issuing side (Pairing-page member picker, `pairing --member`) and refuses a `primary_profile_id` that names no member, and linking still means pairing the phone again (section 4c of the PAI-1 document). The others: `get_session_messages` and `get_session_attachment` (`pond-api/src/routes.rs`) take no `Principal`, so any paired client reads any conversation by id; the `giap-memory` tools search at `ProfileScope::Household` (`pond-mcp-server/src/memory.rs`), so on a pond of two members one member's turn can read the other's memories (guests are not offered the group); `language` is collected by the onboarding locale step and never written to `profiles.preferences` (`buildProfilePatch` in `useOnboardingPersist.ts`) | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-1); the 2026-09-24 scope fixes are Mac-only | Scope `get_session_messages` and `get_session_attachment` by the caller's `Principal`, as `/reminders` and `/suggestions` already are |
 | [PAI-2 Privacy and security guardrails](./02-privacy-and-security-guardrails.md) | 9: P0-P5 (P3's third chokepoint and P5's last senders arrived with P6a and P6b), P6a, P7, P8a | 1: P6b (its outbound-connector-action gate) | Open: P8b, the enforce flip (`security_policy_mode` still defaults to `audit`). Regressed: the staged-action gate went with `giap-draft` on 2026-09-10 (`793556b1`, section 3.6); the one outbound connector action, `book_ride`, is confirmed on the member's own phone instead | VERIFIED on the Orin 2026-08-12 (pai-bench PAI-2) | Fill `Principal.proven_profile_id` from the paired device's member in the auth middleware (it is `None` on every path today), which P8b waits on |
 | [PAI-3 Context governor](./03-context-governor.md) | 7: P1, P2, P3 with P3b, P4, P5, P6, and 4b's completeness check (`goal_check_enabled`) | 0 | None open. Since 2026-09-11 (`465373df`) goose trims and compacts the live conversation: the window reaches it as `GOOSE_CONTEXT_LIMIT`, and `CompactionProfile`'s history budget and output reserve size only `plan_replay` (hydrating a conversation goose's store lost) | VERIFIED on the Orin 2026-08-12, for code before the 2026-09-11 hand-over and the 2026-09-24 `device_budget` move; 4b is NOT VERIFIED on the Orin | Re-run `scripts/pai-bench.sh` PAI-3 on the Orin against the current binary |
 | [PAI-4 Smart compaction](./04-smart-compaction.md) | 4: P5 (`prefix_cache.rs`), P6 (now `run_quiet_compaction` in `pond-server/src/main.rs`), P7a (the compact route calls goose through the `Agent` port's `compact_session`), P7b (`ContextPressureNote`) | 2: P1 (`ModelClass` has no production consumer), P3 (the age rung runs only in `plan_replay`) | Removed 2026-09-11 (`75ba0747`): P2 re-summarisation, P4 compact-on-resume, and the claim and cooldown P7b-fix added (`claim_manual_compaction` has no caller). Open: P5's second clause | VERIFIED on the Orin 2026-08-12 for the code before the hand-over; quiet compaction measured on the Orin 2026-10-04/05 (section 4); pai-bench PAI-4 not re-run since | Re-run pai-bench PAI-4 on the Orin, and settle P5's second clause from a TTFT trace of the deployed binary |
@@ -3841,6 +3841,34 @@ not a PAI milestone).**
   (`cargo test --release -p goose-local-inference --features cuda --lib`): 197 passed, 0 failed,
   9 ignored.
 
+**2026-10-27 — The camera follows people (touches PAI-7 and PAI-8 through camera events and
+presence; not a PAI milestone).**
+
+- **What landed.** With YOLOX loaded, `pond-adapters-vision` looks five times a second while anyone
+  is in view or for 5 s after a 2% change of the picture, below the motion events' threshold (the
+  nano's is 0.5). Person boxes become tracks by overlap (`tracker.rs`): one `person` event when a
+  track starts, one more when its face is first recognised, faces tried once a second up to five
+  times. A face counts for the person whose box holds it. Events carry `track_id`. Motion with
+  nobody in view is named by the same look. On a Jetson the capture sends a 416-wide RGBA picture
+  of every frame on fd 0, a stream of its own, and the pond keeps five a second.
+- **Two capture bugs found on the way.** An HTTP MJPEG camera ran at 1 fps since the any-camera
+  capture: jpegparse claims 1/1 on a stream with no frame rate and videorate held it there. A
+  videorate in the detector's branch held every branch of the C920 to the picture rate. Both are
+  fixed, and the device test now checks the frame rate.
+- **What it changes for rules and context.** A person standing in view is one event, not one per
+  cooldown; presence `Arrived` is published once a track's face is known. While anyone is
+  followed no motion events are raised. The rules engine and the context ingest read events as
+  before.
+- **Invariants.** No migration, no setting, no prompt change, no egress; frames stay on the
+  device.
+- **Verified on the Orin** (E4B QAT at 16,384, YOLOX, SCRFD and AdaFace on TensorRT, 19:45–19:55Z).
+  A looping 14 s pedestrian clip served as a network MJPEG camera: 54 tracks in 60 s, an event per
+  track at a median 146 ms from the frame (163 ms at most), YOLOX 7–10 ms a look, one face match a
+  look at 123–141 ms; the pond 25% of a core, gst-launch 15%, GPU 8.6%. The quiet room on the
+  C920 at its own 14 fps: the pond 5%, gst-launch 7%, GPU 2.5%. LLM decode with the clip playing
+  33.2, 33.6 and 40.1 tok/s against 36.0, 35.7 and 40.7 in the quiet room. A walk past the real
+  camera by an enrolled member is owed.
+
 **2026-10-28 — `search_web` on Brave LLM Context, and its results kept out of history (touches
 PAI-2, PAI-3 and PAI-4; not a PAI milestone).** Design and store audit:
 [small-model-tools.md §8.10](../small-model-tools.md).
@@ -4101,6 +4129,27 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
     - a short answer left only in a step's summary.
   - In round five the pond chose correctly in all four asks, and in round six in all three.
   - Not verified: a made agent's step on the Orin. The planner made one only when its `new_agent` was unreadable, and that is now dropped.
+
+**2026-10-28, re-planned 2026-10-30 — the context space, designed; no code.**
+
+- [`context-space.md`](../context-space.md) proposes one item store, one multimodal index
+  (EmbeddingGemma 2) and context agents in place of memories, summaries, the three corpora,
+  suggestions and proactive review. It touches PAI-1, -2, -3, -6, -7 and -8. Status: `DESIGNED`,
+  re-checked against `0309bf0d`.
+- The re-plan builds on what landed on 28 and 29 October rather than beside it:
+  - the context agents are shipped recipes (PAI-6 section 9), with two activations and three hooks
+    added to the catalog;
+  - planning is the existing long-task composer;
+  - the embedding slot sits below member tasks in the lane's order;
+  - the data key is sealed to the nano's fTPM the way the admin card is.
+- It reverses the personal-context index's "one index, separate stores" deliberately, in writing
+  (its section 2). Decision 1 in its section 12 is Jerry's.
+- Found while checking the tree:
+  - MCP `save_memory` writes `profile_id: None`, so a member's own save is household-visible;
+  - turn recall reads vector BLOBs on source rows, not the index;
+  - the `SuggestionGeneration` lane job has no cancel watcher.
+- Corrected PAI-2 section 3.4, which said an Orin Nano devkit exposes no fTPM. The nano has an
+  OP-TEE fTPM (`pond-administrator.md`). It does not guard a whole stolen board until OemK1 is fused.
 
 **2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
 

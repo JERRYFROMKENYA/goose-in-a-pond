@@ -52,6 +52,7 @@ import {
   type ModelEngine,
   type ModelMemoryStatus,
   type OllamaModel,
+  type PairingCodeBinding,
   type PairingCodeResponse,
   type PrefillReport,
   type PromptTemplate,
@@ -1377,12 +1378,17 @@ export class PondApiClient {
     );
   }
 
-  /** Issue a fresh pairing code, replacing any existing one. Host-only. */
-  issuePairingCode(): Promise<PairingCodeResponse> {
+  /**
+   * Issue a fresh pairing code, replacing any existing one. Host-only.
+   *
+   * `binding` decides whose the device that pairs with it becomes. Omitted, the Pond decides: a
+   * household of one binds to that member, any other binds to nobody.
+   */
+  issuePairingCode(binding?: PairingCodeBinding): Promise<PairingCodeResponse> {
     return this.handshakeFetch<PairingCodeResponse>(
       "POST",
       "/api/v1/handshake/pairing-code",
-      undefined,
+      binding,
       true,
     );
   }

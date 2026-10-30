@@ -269,6 +269,10 @@ enum Commands {
         /// Force a fresh code even if one is still active
         #[arg(long)]
         refresh: bool,
+        /// Issue a fresh code whose device becomes this household member's (a profile id from
+        /// `GET /api/v1/profiles`). Pairing an already-paired phone again with it links that phone.
+        #[arg(long, value_name = "PROFILE_ID")]
+        member: Option<String>,
     },
 
     /// Show this pond's printed setup code, its claim state, and a QR to put on its card.
@@ -672,7 +676,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             whisper_url,
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
-        Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::Pairing { refresh, member }) => run_pairing(refresh, member).await,
         Some(Commands::AdminCard {
             rotate,
             json,
@@ -2479,7 +2483,7 @@ async fn run_server(
                                 target: "giap::trace",
                                 kind = "session_retitled",
                                 session_id = %session.id,
-                                title = %title,
+                                title_chars = title.chars().count(),
                             );
                         }
                         Ok(RetitleOutcome::Cancelled) => {
@@ -3612,7 +3616,29 @@ async fn run_server(
     > = Some(Arc::new(SqliteOperationalLog::new(db.logs.clone())));
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
-    let _file_guard = drain_handle.drain_into(operational_log.clone());
+    let household_names = tracing_setup::HouseholdNames::default();
+    let _file_guard = drain_handle.drain_into(
+        operational_log.clone(),
+        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+    );
+    // A new or renamed member is hidden from the Logs viewer within a minute.
+    {
+        let profiles = profile_repo.clone();
+        tokio::spawn(async move {
+            let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                every_minute.tick().await;
+                match profiles.list().await {
+                    Ok(members) => {
+                        household_names.set(members.iter().map(|m| m.display_name.as_str()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not read members' names to hide from the logs")
+                    }
+                }
+            }
+        });
+    }
 
     let telemetry: Option<Arc<dyn pond_core::security::ports::telemetry::TelemetryPort>> =
         match SqliteTelemetry::new(db.logs.clone()).await {
@@ -3824,6 +3850,14 @@ async fn run_server(
         settings_repo.clone(),
         scheduler.clone(),
     );
+    // Rehydration opened these before phones could be told; ask now, in the background.
+    if let Some(scheduler) = scheduler.clone() {
+        let sender = notification_sender.clone();
+        tokio::spawn(async move {
+            pond_server::system_notices::announce_missed_runs(scheduler.as_ref(), sender.as_ref())
+                .await;
+        });
+    }
     {
         let event_log = event_log.clone();
         let mut events = event_bus.subscribe();
@@ -10936,7 +10970,7 @@ async fn run_setup_code(request: pond_server::setup_code::SetupCodeRequest) -> R
     pond_server::setup_code::run(&store, &request, &mut out, &mut err).await
 }
 
-async fn run_pairing(refresh: bool) -> Result<()> {
+async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
     let data_dir = default_data_dir();
     let port = runtime_api_port(&data_dir);
     let credential = pond_server::host_credential::read(&data_dir)?;
@@ -10953,8 +10987,14 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         .default_headers(headers)
         .build()?;
 
-    // GET returns the current unconsumed code; POST mints a fresh one.
-    let resp = if refresh {
+    // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
+    let resp = if let Some(member) = &member {
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "profile_id": member }))
+            .send()
+            .await
+    } else if refresh {
         client.post(&base).send().await
     } else {
         client.get(&base).send().await
@@ -10967,9 +11007,10 @@ async fn run_pairing(refresh: bool) -> Result<()> {
     })?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "server returned {} for pairing-code request",
-            resp.status()
+            "server returned {status} for pairing-code request: {detail}"
         ));
     }
 
@@ -10979,12 +11020,15 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         expires_at: Option<String>,
         /// Where the phone connects and which key it pins.
         pairing: serde_json::Value,
+        /// The member a device pairing with this code becomes; `None` is nobody.
+        #[serde(default)]
+        profile_id: Option<String>,
     }
     let body: CodeResp = resp.json().await?;
 
     // A GET can return {"code": null} when no live code exists — mint one via POST.
-    let (code, expires_at, info) = match (body.code, body.expires_at) {
-        (Some(c), Some(e)) => (c, e, body.pairing),
+    let (code, expires_at, info, owner) = match (body.code, body.expires_at) {
+        (Some(c), Some(e)) => (c, e, body.pairing, body.profile_id),
         _ => {
             let minted: CodeResp = client
                 .post(&base)
@@ -10999,6 +11043,7 @@ async fn run_pairing(refresh: bool) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("server did not return a pairing code"))?,
                 minted.expires_at.unwrap_or_default(),
                 minted.pairing,
+                minted.profile_id,
             )
         }
     };
@@ -11021,6 +11066,13 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         info["tailnet_address"].as_str(),
     );
     println!("Pairing code: {code} (expires: {expires_at})");
+    match &owner {
+        Some(id) => println!("A device pairing with it becomes household member {id}'s."),
+        None => println!(
+            "A device pairing with it belongs to nobody, so with two or more members it is a \
+             guest. `--member <PROFILE_ID>` issues one for a member."
+        ),
+    }
     println!("Pond public-key fingerprint: {pin}");
     print_pairing_qr(&pair_url);
     println!("\n  URL: {pair_url}\n");

@@ -421,8 +421,9 @@ const SHORT_PLAN: &str = "The person wants a short answer. You only write the pl
 /// A research report gathers, writes a section per part, then the Result that opens it.
 const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the question needs: \
      a page for a narrow question, many for a trip or a big decision. Plan it in three parts. \
-     First, steps that each look into one part of the question and save their findings with \
-     their sources. Then one step per section of the report, each writing its section from the \
+     First, one step for each thing the question is about, such as each option a comparison \
+     weighs, that looks into all of it and saves its findings with their sources: not a step \
+     for each question about one thing. Then one step per section of the report, each writing its section from the \
      findings it is given and saving it as a draft artifact titled as the reader should see it. \
      Plan only the sections the goal asks for or cannot do without. A section that is itself a \
      plan, such as an itinerary, goes to long-task-composer. Last, one step writes the artifact titled \"Result\": \
@@ -448,8 +449,8 @@ const RESEARCH_STEP: &str = "This is research. Answer from sources, never from m
      schedule tools and the memory tools, and search_web or get_wikipedia_article only for what \
      is outside the house. Before you write a number, price, time or date from the web, read the \
      page it came from with read_web_page: give the source's domain as search_web showed it, or \
-     the link the goal gives, and the question; ask for another part by its number when the \
-     answer is not in the lines it returned. Keep only what the sources say, and cite each web \
+     the link the goal gives, and the question. One page for a fact is enough, and one more part \
+     of it at most; then save what you found. Keep only what the sources say, and cite each web \
      source as a Markdown link, [its title](its address), using the address read_web_page gave, \
      or the search's domain. If the sources disagree, say so. Write only what your tools returned or your inputs say: never write that the house \
      has nothing of something unless the house's own tool said so. If what your step needs is \

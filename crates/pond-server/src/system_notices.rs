@@ -69,10 +69,16 @@ enum ResultSilence {
     RuleSpokeForItself,
 }
 
-/// Whether `kind` is a rule that tells the household itself.
+/// Whether `kind` is a rule or routine that tells the household itself.
 fn notifies_itself(kind: &TaskKind) -> bool {
-    matches!(kind, TaskKind::SensorTrigger(spec)
-        if spec.actions.iter().any(|a| matches!(a, TriggerAction::Notify { .. })))
+    let actions = match kind {
+        TaskKind::SensorTrigger(spec) => &spec.actions,
+        TaskKind::Routine { actions } => actions,
+        _ => return false,
+    };
+    actions
+        .iter()
+        .any(|a| matches!(a, TriggerAction::Notify { .. }))
 }
 
 async fn result_silence(
@@ -99,7 +105,7 @@ async fn result_silence(
 }
 
 /// Announce each finished schedule or rule run to the household's phones, unless the household
-/// switched that off or the run was a rule that already notified.
+/// switched that off or the run was a rule or routine that already notified.
 pub fn spawn_schedule_result_notices(
     mut results: tokio::sync::broadcast::Receiver<ScheduleResultEvent>,
     sender: Arc<dyn NotificationSender>,
@@ -594,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_rule_with_a_notify_action_speaks_for_itself() {
+    fn only_a_rule_or_routine_with_a_notify_action_speaks_for_itself() {
         assert!(notifies_itself(&rule(vec![TriggerAction::Notify {
             title: "Someone at the door".into(),
             body: "front camera".into(),
@@ -605,6 +611,12 @@ mod tests {
         }])));
         assert!(!notifies_itself(&TaskKind::AgentPrompt {
             prompt: "water the plants".into()
+        }));
+        assert!(notifies_itself(&TaskKind::Routine {
+            actions: vec![TriggerAction::Notify {
+                title: "Lights off".into(),
+                body: "kitchen".into(),
+            }]
         }));
     }
 

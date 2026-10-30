@@ -51,6 +51,13 @@ const HOUSEHOLD_CONTENT_FIELDS: &[&str] = &[
 /// household's Pond, shown where a developer may see content.
 const DEVELOPER_ONLY_FIELDS: &[&str] = &["tool_error"];
 
+/// Ids the Pond and its engine generate (`session_id`, `tool_id`, `goose_sid`): never anything a
+/// household said, and what a developer follows a turn by. A random id can look like a key or a
+/// phone number to the rule redactor, which would leave a turn's lines with nothing in common.
+fn is_generated_id(field: &str) -> bool {
+    field == "id" || field.ends_with("_id") || field.ends_with("_sid")
+}
+
 const NAME_PLACEHOLDER: &str = "[redacted:name]";
 
 /// The household's members' names, kept current by the server. Matched as whole words in the
@@ -147,7 +154,10 @@ impl LogScrubber {
         let message = if self.show_household_content {
             message.to_string()
         } else {
-            for value in fields.values_mut() {
+            for (name, value) in fields.iter_mut() {
+                if is_generated_id(name) {
+                    continue;
+                }
                 if let Some(text) = value.as_str() {
                     let named = self.names.redact(text);
                     if named != text {
@@ -161,7 +171,10 @@ impl LogScrubber {
         let Some(redactor) = &self.redactor else {
             return message.to_string();
         };
-        for value in fields.values_mut() {
+        for (name, value) in fields.iter_mut() {
+            if is_generated_id(name) {
+                continue;
+            }
             if let Some(text) = value.as_str() {
                 let redacted = redactor.redact(text, RedactionLevel::Full);
                 if !redacted.findings.is_empty() {
@@ -420,6 +433,23 @@ mod tests {
 
         assert_eq!(message, "sign-in failed for [redacted:email]");
         assert_eq!(f["error"], "no account for [redacted:email]");
+    }
+
+    #[test]
+    fn a_generated_id_is_kept_even_where_it_looks_like_a_key_or_a_phone_number() {
+        let scrubber =
+            LogScrubber::household(Arc::new(RuleRedactor::new()), HouseholdNames::default());
+        // A tool call's id and a session's, as a Pond logged them and the redactor took them.
+        let ids = json!({
+            "tool_id": "k4EaZ7ZbU8YZAGuHOaXhOhueinXyb0FQ",
+            "session_id": "ede1e522-194e-4f72-a020-7946095858c563b0",
+            "goose_sid": "20261030_1",
+        });
+        let mut f = fields(ids.clone());
+
+        scrubber.scrub("", &mut f);
+
+        assert_eq!(Value::Object(f), ids);
     }
 
     #[test]

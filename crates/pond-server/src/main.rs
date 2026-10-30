@@ -59,7 +59,6 @@ use pond_core::user_data::services::onboarding::OnboardingService;
 use pond_infra::db::Database;
 use pond_infra::onboarding::SqlxOnboardingRepository;
 use pond_infra::sqlite_device_registry::SqliteDeviceRegistry;
-use pond_infra::sqlite_room_registry::SqliteRoomRegistry;
 use pond_infra::sqlite_event_log::{SqliteEventLog, SqliteOperationalLog};
 use pond_infra::sqlite_handshake::SqliteHandshakeAdapter;
 use pond_infra::sqlite_mcp_servers::SqliteMcpServerRepository;
@@ -69,6 +68,7 @@ use pond_infra::sqlite_profile::SqliteProfileRepository;
 use pond_infra::sqlite_prompt_extra::SqlitePromptExtraRepository;
 use pond_infra::sqlite_prompt_template::SqlitePromptTemplateRepository;
 use pond_infra::sqlite_recipe::SqliteRecipeRepository;
+use pond_infra::sqlite_room_registry::SqliteRoomRegistry;
 use pond_infra::sqlite_sensor::{SqliteCameraStorage, SqliteSensorStorage};
 use pond_infra::sqlite_session_storage::SqliteSessionStorage;
 use pond_infra::sqlite_settings::SqliteSettingsRepository;
@@ -292,6 +292,25 @@ enum Commands {
         /// Accept the same printed card again; devices already paired keep working
         #[arg(long)]
         rearm: bool,
+    },
+
+    /// Make this pond's admin card: the password that unlocks My Pond on a member's phone.
+    ///
+    /// Prints the password once; the pond keeps only a verifier of it. Run it through
+    /// `bash scripts/giap.sh admin-card`, which also seals a copy that only this machine's root
+    /// can print again.
+    AdminCard {
+        /// Replace the card in force; every phone unlocked with the old card locks
+        #[arg(long)]
+        rotate: bool,
+
+        /// Print {"password","card_id"} instead of the card text
+        #[arg(long)]
+        json: bool,
+
+        /// Print only present or missing; never makes a card
+        #[arg(long, conflicts_with_all = ["json", "rotate"])]
+        status: bool,
     },
 
     /// The BLE setup channel's radio, which the server runs as its own child (macOS).
@@ -654,6 +673,11 @@ async fn async_main(cli: Cli) -> Result<()> {
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
         Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::AdminCard {
+            rotate,
+            json,
+            status,
+        }) => run_admin_card(rotate, json, status).await,
         Some(Commands::SetupCode {
             json,
             card,
@@ -1534,8 +1558,9 @@ async fn run_server(
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
-    let room_registry: Arc<dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync> =
-        Arc::new(SqliteRoomRegistry::new(db.system.clone()));
+    let room_registry: Arc<
+        dyn pond_core::user_data::ports::room_registry::RoomRegistry + Send + Sync,
+    > = Arc::new(SqliteRoomRegistry::new(db.system.clone()));
     // Deterministic, rule-based redactor (no model in the loop), shared by both chokepoints below.
     let redactor: Arc<dyn pond_core::security::ports::redactor::Redactor> =
         Arc::new(pond_infra::rule_redactor::RuleRedactor::new());
@@ -4313,6 +4338,26 @@ async fn run_server(
         Arc::new(spoken_code::SpeakerCodeAnnouncer::new(tts.clone()));
     let spoken_codes = Arc::new(pond_api::spoken_code::SpokenCodes::new(Some(announcer)));
 
+    // My Pond: the admin card unlocks it per device; the host adapter does the work.
+    let pond_admin = {
+        let cards = Arc::new(pond_infra::file_admin_card::FileAdminCardStore::new(
+            &data_dir,
+        ));
+        let host = Arc::new(pond_infra::host_pond_admin::HostPondAdministrator::new(
+            &data_dir,
+            db.system.clone(),
+            Some(model_repo.clone()),
+            pond_infra::host_pond_admin::PowerHost::system(),
+        ));
+        let tasks = Arc::new(pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(
+            db.system.clone(),
+        ));
+        Arc::new(pond_api::pond_admin::PondAdmin::new(
+            pond_core::shared::services::pond_admin::PondAdminService::new(host, tasks),
+            pond_core::security::services::admin_elevation::AdminElevation::new(cards),
+        ))
+    };
+
     let state = Arc::new(AppState {
         tts_control: tts_control.clone(),
         // Before `db`: fields evaluate in source order and `db` is moved below.
@@ -4421,6 +4466,7 @@ async fn run_server(
         setup_claims: Some(setup_claims.clone()),
         spoken_codes,
         voice_samples: Default::default(),
+        pond_admin: Some(pond_admin),
     });
 
     // OAuth refresh updates secrets only; restarting extensions would break in-flight tool calls.
@@ -4610,7 +4656,12 @@ async fn run_server(
     // Every lane job: a turn in flight is not quiet, however long it has been answering.
     {
         let runs = state.runs.clone();
-        inference_lane.watch_turns(move || runs.turn_in_flight());
+        // A background subagent outlives its turn and still holds the device: no chore beside it.
+        inference_lane.watch_turns(move || {
+            use pond_adapters_goose::orchestrator::{process_subagent_permits, SUBAGENT_PERMITS};
+            runs.turn_in_flight()
+                || process_subagent_permits().available_permits() < SUBAGENT_PERMITS
+        });
     }
     // Compacts a conversation near the edge of its window while the household is quiet.
     tokio::spawn(run_quiet_compaction(
@@ -7067,7 +7118,7 @@ async fn run_long_task_runner(
     before_hooks: Arc<pond_server::agent_activations::BeforeHookSources>,
     prefills: Arc<dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry>,
 ) {
-    use pond_core::shared::domain::long_task::{LongTaskState, StepState};
+    use pond_core::shared::domain::long_task::StepState;
     use pond_core::shared::ports::long_task::LongTaskOwnerFilter;
     use pond_core::shared::services::long_task_roles as roles;
     use pond_core::shared::services::long_task_runner as runner;
@@ -7077,7 +7128,9 @@ async fn run_long_task_runner(
     const POLL_SECS: u64 = 30;
     // Short, unlike the chores': a member asked for this work and is waiting for it.
     const QUIET_SECS: u64 = 30;
-    const FLOOR_SECS: u64 = 5;
+    // No spacing between runs: the loop asks again at once only after a run that did something,
+    // and a gap is the window in which a chore takes the slot for a minute or two.
+    const FLOOR_SECS: u64 = 0;
 
     let Some(deps) = pond_mcp_server::installed_orchestrator_deps() else {
         tracing::info!("long-task runner: no orchestrator was installed - not starting");
@@ -7113,9 +7166,13 @@ async fn run_long_task_runner(
         "long-task runner active - off unless `long_tasks_enabled` and `ext_orchestrator_enabled`"
     );
 
+    let mut progressed = false;
     loop {
+        // A run that moved a task on is followed at once: the next step is ready now.
+        let poll = if progressed { 0 } else { POLL_SECS };
+        progressed = false;
         let tick = crate::inference_lane_runner::wait_for_tick(
-            std::time::Duration::from_secs(POLL_SECS),
+            std::time::Duration::from_secs(poll),
             &wake,
         )
         .await;
@@ -7126,11 +7183,10 @@ async fn run_long_task_runner(
             .list_tasks(LongTaskOwnerFilter::Everyone, false)
             .await
             .unwrap_or_default();
-        // The task waited on longest goes next, so two tasks take turns.
-        let candidate = open
-            .into_iter()
-            .filter(|t| matches!(t.state(), LongTaskState::Planning | LongTaskState::Running))
-            .min_by_key(|t| t.updated_at());
+        // The same line the chat card and the phone show, so where a task waits is never a guess.
+        let candidate = pond_core::shared::services::long_task_queue::run_order(&open)
+            .first()
+            .map(|t| (*t).clone());
 
         let household = recipes.list().await.unwrap_or_default();
         let offered = runner::step_roles(&household);
@@ -7237,7 +7293,7 @@ async fn run_long_task_runner(
         let Some(task) = candidate else {
             continue;
         };
-        if let Err(e) = advance_long_task(
+        match advance_long_task(
             &task,
             tasks.as_ref(),
             &helpers,
@@ -7251,7 +7307,10 @@ async fn run_long_task_runner(
         )
         .await
         {
-            tracing::warn!(task = %task.id(), error = %e, "long-task runner: a run did not complete");
+            Ok(moved) => progressed = moved,
+            Err(e) => {
+                tracing::warn!(task = %task.id(), error = %e, "long-task runner: a run did not complete")
+            }
         }
         drop(slot);
     }
@@ -7273,6 +7332,7 @@ impl LongTaskHelpers {
         role: &pond_core::shared::domain::orchestration::AgentRole,
         work: pond_core::shared::services::step_bindings::StepWork,
         brief: String,
+        may_retry: bool,
     ) -> anyhow::Result<pond_core::shared::services::long_task_runner::RunEnd> {
         use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
         use pond_core::shared::services::long_task_runner as runner;
@@ -7313,11 +7373,13 @@ impl LongTaskHelpers {
             .authorities
             .publish(&session_id, authority, cancel.clone());
 
-        // A household turn stops the run: it holds the only GPU that turn needs.
+        // A household turn stops the run: it holds the only GPU that turn needs. So does the run's
+        // own report: the model's turn after "stop here" is reasoning nothing reads.
         let watcher = {
             let activity = self.last_user_activity.clone();
             let storage = self.storage.clone();
             let cancel = cancel.clone();
+            let reported = binding.report_watch();
             tokio::spawn(async move {
                 use pond_core::user_data::services::proactive_review::cancelled_by_activity;
                 let run_started = std::time::Instant::now();
@@ -7327,6 +7389,10 @@ impl LongTaskHelpers {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if cancel.is_cancelled() {
+                        break;
+                    }
+                    if reported.is_reported() {
+                        cancel.cancel();
                         break;
                     }
                     tick = tick.wrapping_add(1);
@@ -7352,7 +7418,7 @@ impl LongTaskHelpers {
         drop(lease);
         let reported = binding.take_report();
         let written = binding.take_written();
-        Ok(runner::settle_run(reported, &written, &run?))
+        Ok(runner::settle_run(reported, &written, &run?, may_retry))
     }
 }
 
@@ -7476,7 +7542,7 @@ async fn advance_long_task(
     sender: &pond_infra::broadcast_notification_sender::BroadcastNotificationSender,
     before_hooks: &pond_server::agent_activations::BeforeHookSources,
     prefills: &dyn pond_core::shared::ports::agent_prefill::AgentPrefillRegistry,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     use pond_core::shared::domain::long_task::{LongTaskState, OutcomeKind, StepState};
     use pond_core::shared::services::agent_activations as activations;
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
@@ -7488,7 +7554,7 @@ async fn advance_long_task(
     let tries = fruitless.get(task.id()).copied().unwrap_or(0);
 
     match runner::next_run(task, &steps, tries, now) {
-        NextRun::Wait => Ok(()),
+        NextRun::Wait => Ok(false),
         NextRun::GiveUp(reason) => {
             tasks
                 .set_task_state(task.id(), LongTaskState::Failed, now)
@@ -7503,7 +7569,7 @@ async fn advance_long_task(
                 )
                 .await;
             }
-            Ok(())
+            Ok(true)
         }
         NextRun::Finish => {
             tasks
@@ -7522,7 +7588,7 @@ async fn advance_long_task(
             if activations::runner_notifies_at_end(task, &steps, offered, true) {
                 notify_long_task_owner(sender, task, true, body).await;
             }
-            Ok(())
+            Ok(true)
         }
         // An activation's one step is its whole plan; it is never handed to the planner.
         NextRun::Plan(_) if activations::is_activation_task(task) => {
@@ -7539,14 +7605,31 @@ async fn advance_long_task(
                 )
                 .await;
             }
-            Ok(())
+            Ok(true)
         }
         NextRun::Plan(reason) => {
             let plannable = activations::plannable_roles(offered);
-            let brief = runner::planner_brief(task, &steps, &artifacts, &plannable, &reason, now);
-            let end = helpers.run(task, planner, StepWork::Plan, brief).await?;
+            let context = match runner::brief_artifact(&artifacts) {
+                Some(found) => tasks
+                    .get_artifact(task.id(), &found.id)
+                    .await?
+                    .map(|artifact| artifact.body().to_string()),
+                None => None,
+            };
+            let brief = runner::planner_brief(
+                task,
+                &steps,
+                &artifacts,
+                &plannable,
+                &reason,
+                context.as_deref(),
+                now,
+            );
+            let end = helpers
+                .run(task, planner, StepWork::Plan, brief, false)
+                .await?;
             if end == RunEnd::Preempted {
-                return Ok(());
+                return Ok(true);
             }
             let replanned = tasks.list_steps(task.id()).await?;
             if task.state() == LongTaskState::Planning && !replanned.is_empty() {
@@ -7563,11 +7646,25 @@ async fn advance_long_task(
             } else {
                 *fruitless.entry(task.id().to_string()).or_insert(0) += 1;
             }
-            Ok(())
+            Ok(true)
         }
         NextRun::Do(step) => {
             let mut step = step.clone();
-            let Some(role) = offered.iter().find(|r| r.name() == step.role()) else {
+            // A step names a saved role, or carries an agent its plan made when none fit.
+            let made = match (
+                offered.iter().any(|r| r.name() == step.role()),
+                step.agent(),
+            ) {
+                (false, Some(agent)) => offered
+                    .iter()
+                    .find(|r| r.name() == pond_core::shared::services::long_task_roles::WORKER_ROLE)
+                    .and_then(|worker| runner::role_for_agent(&step, agent, worker).ok()),
+                _ => None,
+            };
+            let Some(role) = made
+                .as_ref()
+                .or_else(|| offered.iter().find(|r| r.name() == step.role()))
+            else {
                 step.start(now)?;
                 tasks.update_step(&step).await?;
                 step.fail(
@@ -7575,32 +7672,42 @@ async fn advance_long_task(
                     chrono::Utc::now(),
                 )?;
                 tasks.update_step(&step).await?;
-                return Ok(());
+                return Ok(true);
             };
             if let Err(why) = activations::step_role_allowed(task, &step, role) {
                 step.start(now)?;
                 tasks.update_step(&step).await?;
                 step.fail(&why, chrono::Utc::now())?;
                 tasks.update_step(&step).await?;
-                return Ok(());
+                return Ok(true);
             }
             step.start(now)?;
             tasks.update_step(&step).await?;
             // A role's use keeps its prefill inside the retention.
             let _ = prefills.note_used(role.name(), now).await;
             let key = step.key().clone();
-            let mut brief = runner::worker_brief(task, &step, &artifacts, now);
+            let mut bodies = std::collections::HashMap::new();
+            for id in runner::inline_ids(&step, &artifacts) {
+                if let Ok(Some(artifact)) = tasks.get_artifact(task.id(), &id).await {
+                    bodies.insert(id, artifact.body().to_string());
+                }
+            }
+            let mut brief = runner::worker_brief(task, &step, &artifacts, &bodies, now);
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
             brief.push_str(&activations::hand_back_offer(role, offered));
+            let role = role
+                .clone()
+                .with_max_turns(runner::turns_for(role.max_turns(), &step));
+            let may_retry = step.attempts() < runner::MAX_STEP_ATTEMPTS;
             let outcome = match helpers
-                .run(task, role, StepWork::Do(key.clone()), brief)
+                .run(task, &role, StepWork::Do(key.clone()), brief, may_retry)
                 .await
             {
                 Ok(RunEnd::Reported(outcome)) => outcome,
                 Ok(RunEnd::Preempted) => {
                     step.preempt()?;
                     tasks.update_step(&step).await?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) => {
                     step.fail(&e.to_string(), chrono::Utc::now())?;
@@ -7615,7 +7722,7 @@ async fn advance_long_task(
                     let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
                     Some(
                         helpers
-                            .run(task, verifier, StepWork::Check(key), brief)
+                            .run(task, verifier, StepWork::Check(key), brief, false)
                             .await?,
                     )
                 } else {
@@ -7634,9 +7741,22 @@ async fn advance_long_task(
                 Some(RunEnd::Reported(_)) | None => step.record(&outcome, chrono::Utc::now())?,
             }
             tasks.update_step(&step).await?;
+            // A retry clears its failure from the row once it succeeds; the reason lives on here.
+            tracing::info!(
+                target: "giap::trace",
+                kind = "long_task_step_settled",
+                task_id = %task.id(),
+                step = %step.key(),
+                state = step.state().as_str(),
+                attempt = step.attempts(),
+                turns = role.max_turns(),
+                inlined_inputs = bodies.len(),
+                failure = step.failure().unwrap_or(""),
+                "a long-task step settled"
+            );
             if step.state() == StepState::Completed {
                 pond_server::agent_activations::apply_after_actions(
-                    &activations::after_hook_actions(task, role, &step, &outcome),
+                    &activations::after_hook_actions(task, &role, &step, &outcome),
                     task,
                     &step,
                     &outcome,
@@ -7658,7 +7778,7 @@ async fn advance_long_task(
                     )
                     .await?;
             }
-            Ok(())
+            Ok(true)
         }
     }
 }
@@ -10178,6 +10298,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                 tool_group_allowlist: None,
                 warmup: false,
                 suggestion_context: None,
+                deep_research_task: None,
             };
             stream_agent_response(&agent, request).await?;
         }
@@ -10250,6 +10371,7 @@ async fn run_agent_cmd(action: AgentAction) -> Result<()> {
                     tool_group_allowlist: None,
                     warmup: false,
                     suggestion_context: None,
+                    deep_research_task: None,
                 };
                 if let Err(e) = stream_agent_response(&agent, request).await {
                     eprintln!("\n  error: {e}");
@@ -10682,6 +10804,35 @@ fn run_dashboard() -> Result<()> {
     println!(
         "Through an SSH tunnel (ssh -L 9000:127.0.0.1:{port} <pond>), change only the port.\n\
          Anyone with this link can pair devices until the server restarts; do not share it."
+    );
+    Ok(())
+}
+
+/// Works on the data directory directly, so it answers whether or not the server is running;
+/// a running server reads the new card on the next unlock.
+async fn run_admin_card(rotate: bool, json: bool, status: bool) -> Result<()> {
+    use pond_core::security::ports::admin_card::AdminCardStore as _;
+    let store = pond_infra::file_admin_card::FileAdminCardStore::new(default_data_dir());
+    if status {
+        let present = store.current().await?.is_some();
+        println!("{}", if present { "present" } else { "missing" });
+        return Ok(());
+    }
+    let password = store.issue(rotate)?;
+    let card_id = store.current().await?.unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "password": password.grouped(), "card_id": card_id })
+        );
+        return Ok(());
+    }
+    println!(
+        "Admin card for this Pond (administrator: {})\n\n    {}\n\n\
+         Goose On The Go asks for it in My Pond. Keep it with the setup card, where only the\n\
+         household's adults can reach it. The Pond keeps no copy it can show again.",
+        pond_core::security::domain::admin_card::ADMIN_PRINCIPAL,
+        password.grouped()
     );
     Ok(())
 }

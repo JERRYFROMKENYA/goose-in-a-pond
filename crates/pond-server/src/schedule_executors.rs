@@ -112,6 +112,7 @@ impl AgentScheduleExecutor {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         tracing::info!("[scheduler] executing prompt for task {task_id} (speak={should_speak})");

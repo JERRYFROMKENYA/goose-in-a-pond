@@ -139,7 +139,7 @@ describe("the built-in agents", () => {
   it("lists the pond's own agents with their state, and not the household's", () => {
     render(<BuiltInAgents prefills={fakePrefills({ report: readyReport("greeter") })} variant="classic" />);
     const group = screen.getByRole("region", { name: "Built-in agents" });
-    for (const name of ["Long-task planner", "Long-task worker", "Long-task verifier"]) {
+    for (const name of ["Point Gander", "Forager Gosling", "Sentinel Goose"]) {
       const row = within(group).getByRole("listitem", { name });
       expect(within(row).getByText("Ready")).toBeTruthy();
       expect(within(row).getByText("Built 2 days ago. Last used 3 hours ago.")).toBeTruthy();
@@ -158,7 +158,7 @@ describe("the built-in agents", () => {
   it("still lets a built-in be rebuilt", () => {
     const rebuild = vi.fn(async () => true);
     render(<BuiltInAgents prefills={fakePrefills({ report: readyReport(), rebuild })} variant="classic" />);
-    fireEvent.click(screen.getByRole("button", { name: "Rebuild Long-task worker" }));
+    fireEvent.click(screen.getByRole("button", { name: "Rebuild Forager Gosling" }));
     expect(rebuild).toHaveBeenCalledWith("long-task-worker");
   });
 
@@ -169,9 +169,9 @@ describe("the built-in agents", () => {
       agentRow("long-task-verifier", { status: "queued" }),
     ]);
     render(<BuiltInAgents prefills={fakePrefills({ report })} variant="classic" />);
-    expect(within(screen.getByRole("listitem", { name: "Long-task planner" })).getByText("Couldn't build")).toBeTruthy();
-    expect(within(screen.getByRole("listitem", { name: "Long-task worker" })).getByText(/^Resting: unused for 20 days/)).toBeTruthy();
-    expect(within(screen.getByRole("listitem", { name: "Long-task verifier" })).getByText("Waiting to be rebuilt")).toBeTruthy();
+    expect(within(screen.getByRole("listitem", { name: "Point Gander" })).getByText("Couldn't build")).toBeTruthy();
+    expect(within(screen.getByRole("listitem", { name: "Forager Gosling" })).getByText(/^Resting: unused for 20 days/)).toBeTruthy();
+    expect(within(screen.getByRole("listitem", { name: "Sentinel Goose" })).getByText("Waiting to be rebuilt")).toBeTruthy();
   });
 
   it("is not there when the pond lists no built-ins, or cannot say", () => {

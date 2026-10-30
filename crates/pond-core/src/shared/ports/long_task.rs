@@ -71,4 +71,7 @@ pub trait LongTaskRepository: Send + Sync {
 
     /// Delete a task with its steps and artifacts; `Ok(false)` if there was none.
     async fn delete_task(&self, id: &str) -> Result<bool>;
+
+    /// Delete one artifact, only if it belongs to `task_id`; `Ok(false)` if there was none.
+    async fn delete_artifact(&self, task_id: &str, artifact_id: &str) -> Result<bool>;
 }

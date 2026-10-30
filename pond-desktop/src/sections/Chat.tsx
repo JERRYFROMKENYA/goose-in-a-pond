@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { WarmupBanner } from "../components/WarmupBanner";
-import { ArrowLeft, ArrowUp, Brain, Check, Copy, Loader2, Paperclip, Pencil, PenSquare, PlayCircle, RefreshCw, ThumbsDown, ThumbsUp, Wand2, Wrench, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, Brain, Check, Copy, Loader2, Pencil, PenSquare, PlayCircle, RefreshCw, ThumbsDown, ThumbsUp, Wand2, Wrench, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import { useAppState, useAppDispatch } from "../state/useAppContext";
 import {
@@ -23,6 +23,8 @@ import { ChatHistory, type OpenOrigin } from "./ChatHistory";
 import { ThinkingPlaceholder } from "../components/ThinkingPlaceholder";
 import { ThinkingDisclosure } from "../hub/views/chat/ThinkingDisclosure";
 import { AttachmentTray } from "../components/AttachmentTray";
+import { ComposerMenu } from "../components/ComposerMenu";
+import { ResearchModeChip } from "../components/ResearchModeChip";
 import { ImageSupportStatus } from "../components/ImageSupportStatus";
 import {
   ATTACH_BLOCKED_COPY,
@@ -30,6 +32,7 @@ import {
   NOT_DECLARED_COPY,
   refusalClientClause,
 } from "../components/imageSupportCopy";
+import { ADD_PICTURES, PICTURES_NOT_IN_RESEARCH, RESEARCH_PLACEHOLDER, RESEARCH_SEND, RESEARCH_WAITS } from "../components/deepResearchCopy";
 import { useVisionStatus } from "../api/useVisionStatus";
 import { TypingIndicator } from "../hub/views/chat/TypingIndicator";
 import { Goose } from "../components/Goose";
@@ -47,6 +50,7 @@ import { prepareImage, validateAttachmentSet } from "../lib/imageAttach";
 import type { PreparedImage } from "../lib/imageAttach";
 import { useSuggestedPrompts } from "../hooks/useSuggestedPrompts";
 import { useConversationModel } from "../hooks/useConversationModel";
+import { useDeepResearch } from "../hooks/useDeepResearch";
 import { ModelSwitcher } from "../components/ModelSwitcher";
 import { NoModelPicks } from "../components/models/NoModelPicks";
 
@@ -97,6 +101,8 @@ export function Chat() {
   // Used only to personalise the greeting; blank is fine and handled there.
   const [userName, setUserName]                   = useState<string>("");
   const conversationModel = useConversationModel();
+  const deepResearch = useDeepResearch(state.serverOnline);
+  const { leave: leaveResearch } = deepResearch;
 
   const bottomRef        = useRef<HTMLDivElement>(null);
   const textareaRef      = useRef<HTMLTextAreaElement>(null);
@@ -104,7 +110,7 @@ export function Chat() {
 
   // The primary attach decision; `capabilities.vision` is the fallback while this is unknown.
   const { status: visionStatus, refresh: refreshVisionStatus } = useVisionStatus();
-  // Set on a paperclip tap or paste, the only time a permanent reason earns a line (see ImageSupportStatus).
+  // Set on an Add pictures press or a paste, the only time a permanent reason earns a line (see ImageSupportStatus).
   const [attachReasonShown, setAttachReasonShown] = useState(false);
 
   const visionKind = visionStatus?.state.kind;
@@ -113,7 +119,7 @@ export function Chat() {
     ? visionKind !== "ready"
     : capabilitiesKnown && !visionCapable;
   const attachTitle = !gateBlocked
-    ? "Attach image"
+    ? ADD_PICTURES
     : (visionStatus?.message ??
         (visionKind === "not_declared" ? NOT_DECLARED_COPY : ATTACH_BLOCKED_COPY));
 
@@ -182,6 +188,10 @@ export function Chat() {
     const files = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
     if (files.length === 0) return;
     e.preventDefault();
+    if (deepResearch.on) {
+      setAttachError(PICTURES_NOT_IN_RESEARCH);
+      return;
+    }
     if (gateBlocked) {
       setAttachReasonShown(true);
       setAttachError(COMPOSER_GATE_LINE);
@@ -207,6 +217,12 @@ export function Chat() {
     setAttachments(draft.attachments);
     setAttachError(draft.message + refusalClientClause(draft.code));
     if (draft.code === "no_model") conversationModel.markNone();
+    if (draft.code === "deep_research_off" || draft.code === "deep_research_unidentified") {
+      deepResearch.refused(draft.code);
+    } else if (draft.deepResearch) {
+      // Refused for another reason: the question goes back as it was, mode included.
+      deepResearch.enter();
+    }
     refreshVisionStatus();
     // `input` excluded: once per refusal, not per keystroke.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -221,8 +237,18 @@ export function Chat() {
     lastExternalIdRef.current = newId;
     if (!newId || newId === run.sessionId) return;
     clearAttachments();
+    leaveResearch();
     void followExternalSession(newId);
-  }, [state.sessionId, run.sessionId, clearAttachments]);
+  }, [state.sessionId, run.sessionId, clearAttachments, leaveResearch]);
+
+  // The mode belongs to one message in one conversation. A first id arriving for a new chat is
+  // that same conversation getting saved, so only a change from one id to another ends it.
+  const lastSessionRef = useRef(run.sessionId);
+  useEffect(() => {
+    const before = lastSessionRef.current;
+    lastSessionRef.current = run.sessionId;
+    if (before !== undefined && before !== run.sessionId) leaveResearch();
+  }, [run.sessionId, leaveResearch]);
 
   const refreshSessions = useCallback(() => {
     api.listSessions().then(setSessions).catch(() => {});
@@ -274,9 +300,10 @@ export function Chat() {
     acknowledgeCompletion();
     dispatch({ type: "SET_SESSION_ID", payload: id });
     dispatch({ type: "CLEAR_CONTEXT_CARDS" });
+    leaveResearch();
     // Opening another conversation stops the current turn rather than let it answer unseen.
     void openSession(id, { stopCurrentRun: true });
-  }, [dispatch]);
+  }, [dispatch, leaveResearch]);
 
   const beginTitleEdit = useCallback(() => {
     if (!getChatRun().sessionId) return;
@@ -298,8 +325,9 @@ export function Chat() {
     setOpenOrigin(null);
     setView("history");
     acknowledgeCompletion();
+    leaveResearch();
     refreshSessions();
-  }, [refreshSessions]);
+  }, [refreshSessions, leaveResearch]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -323,6 +351,7 @@ export function Chat() {
     dispatch({ type: "SET_SESSION_ID", payload: null });
     dispatch({ type: "CLEAR_CONTEXT_CARDS" });
     clearAttachments();
+    leaveResearch();
     textareaRef.current?.focus();
   }
 
@@ -379,6 +408,11 @@ export function Chat() {
     const text = (directText ?? input).trim();
     if ((!text && attachments.length === 0) || !state.serverOnline) return;
 
+    // A chip, Continue or a tool card's action sends its own words: only the box's text is the question.
+    const asResearch = directText === undefined && deepResearch.on;
+    // Held, not queued: the queue holds text only, so research would go out as an ordinary message.
+    if (asResearch && (busy || !text)) return;
+
     // While busy the store queues the text, but not attachments (they'd pair an image with the wrong
     // question), so a busy send with an empty box is a no-op that keeps the tray.
     if (busy && !text) return;
@@ -397,11 +431,18 @@ export function Chat() {
       return;
     }
 
+    if (asResearch) {
+      sendTurn({ text, deepResearch: true });
+      leaveResearch();
+      setAttachError(null);
+      return;
+    }
+
     // The store owns these previews: clear the tray without revoking, or the sent thumbnail blanks.
     sendTurn({ text, attachments });
     setAttachments([]);
     setAttachError(null);
-  }, [input, attachments, busy, state.serverOnline, gateBlocked]);
+  }, [input, attachments, busy, state.serverOnline, gateBlocked, deepResearch.on, leaveResearch]);
 
   // On the busy -> idle edge: refresh the list (it carries the server-derived title) and refocus.
   const prevBusyRef = useRef(busy);
@@ -513,7 +554,28 @@ export function Chat() {
       e.preventDefault();
       sendMessage();
     }
+    // An open menu has already taken this Escape (and marked it handled).
+    if (e.key === "Escape" && deepResearch.on && !e.defaultPrevented) {
+      e.preventDefault();
+      leaveResearch();
+    }
   }
+
+  function onLeaveResearch() {
+    leaveResearch();
+    textareaRef.current?.focus();
+  }
+
+  function onToggleResearch() {
+    if (deepResearch.on) {
+      leaveResearch();
+      return;
+    }
+    deepResearch.enter();
+    textareaRef.current?.focus();
+  }
+
+  const researchSendBlocked = deepResearch.on && (busy || !input.trim());
 
   function onInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
     setInput(e.target.value);
@@ -893,19 +955,20 @@ export function Chat() {
           reply queues the message instead of being swallowed. */}
       {busy && <TypingIndicator seed={turnSeed} />}
 
+      {deepResearch.on && <ResearchModeChip variant="classic" waiting={busy} onLeave={onLeaveResearch} />}
+
       <div className={`chat2__composer${busy ? " is-busy" : ""}`}>
-        <button
-          className="ch-icon-btn"
-          onClick={onAttachClick}
+        <ComposerMenu
+          variant="classic"
           disabled={!state.serverOnline}
-          aria-disabled={gateBlocked || undefined}
-          aria-label="Attach image"
-          onMouseDown={(e) => e.preventDefault()}
-          title={attachTitle}
-          type="button"
-        >
-          <Paperclip size={17} aria-hidden="true" />
-        </button>
+          picturesTitle={attachTitle}
+          picturesBlocked={gateBlocked}
+          hasPictures={attachments.length > 0}
+          access={deepResearch.access}
+          researchOn={deepResearch.on}
+          onAddPictures={onAttachClick}
+          onToggleResearch={onToggleResearch}
+        />
         <input
           ref={fileInputRef}
           type="file"
@@ -921,7 +984,7 @@ export function Chat() {
           onChange={onInput}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={busy ? "Queue a message…" : "Message Goose…"}
+          placeholder={deepResearch.on ? RESEARCH_PLACEHOLDER : busy ? "Queue a message…" : "Message Goose…"}
           disabled={!state.serverOnline}
           aria-label="Message input"
           rows={1}
@@ -940,9 +1003,9 @@ export function Chat() {
           className="ch-send"
           onClick={() => sendMessage()}
           onMouseDown={(e) => e.preventDefault()}
-          disabled={(!input.trim() && attachments.length === 0) || !state.serverOnline}
-          aria-label={busy ? "Queue message" : "Send message"}
-          title={busy ? "Queue message" : "Send message"}
+          disabled={(!input.trim() && attachments.length === 0) || !state.serverOnline || researchSendBlocked}
+          aria-label={deepResearch.on ? RESEARCH_SEND : busy ? "Queue message" : "Send message"}
+          title={deepResearch.on ? (busy ? RESEARCH_WAITS : RESEARCH_SEND) : busy ? "Queue message" : "Send message"}
           type="button"
         >
           <ArrowUp size={18} strokeWidth={2.5} aria-hidden="true" />

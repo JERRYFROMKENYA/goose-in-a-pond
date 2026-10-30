@@ -1,13 +1,18 @@
 //! What a long task runs next, and what each helper is told. Pure: the lane loop in `pond-server`
 //! does the I/O, so every decision here is tested without a model.
+use crate::models::domain::message::Role;
+use crate::shared::domain::long_task::StepAgent;
 use crate::shared::domain::long_task::{
-    blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskState, OutcomeKind,
-    PlanStep, StepKey, StepOutcome, StepState,
+    blocked_steps, next_ready_step, ArtifactSummary, LongTask, LongTaskKind, LongTaskState,
+    OutcomeKind, PlanStep, StepKey, StepOutcome, StepState,
 };
-use crate::shared::domain::orchestration::{AgentRole, TaskRun, TaskStatus};
+use crate::shared::domain::orchestration::{
+    AgentRole, RoleError, RolePersonalData, TaskRun, TaskStatus,
+};
 use crate::shared::services::long_task_roles::{self as roles, TASK_WORK_EXTENSION};
 use crate::user_data::domain::recipe::AgentRecipe;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 /// Tool-group ceiling for a long task's runs, which have no parent turn to inherit one from.
 /// Read-only beyond the ledger: until approvals exist, no step may act on the world.
@@ -22,7 +27,10 @@ pub const LONG_TASK_ROOT_GROUPS: &[&str] = &[
 /// The roles the planner may give a step: the shipped worker first, then the household's own
 /// active roles. The planner and verifier are not offered: neither does a step's work.
 pub fn step_roles(household: &[AgentRecipe]) -> Vec<AgentRole> {
-    let mut offered: Vec<AgentRole> = roles::worker_role().into_iter().collect();
+    let mut offered: Vec<AgentRole> = roles::worker_role()
+        .into_iter()
+        .chain(roles::composer_role())
+        .collect();
     for recipe in household.iter().filter(|r| r.active) {
         if [
             roles::PLANNER_ROLE,
@@ -42,6 +50,21 @@ pub fn step_roles(household: &[AgentRecipe]) -> Vec<AgentRole> {
 
 /// A failed step is tried this many times before the planner is asked to plan around it.
 pub const MAX_STEP_ATTEMPTS: u32 = 2;
+
+/// The failure a helper that used up its turns leaves; its retry gets more of them.
+pub const OUT_OF_TURNS: &str = "the helper ran out of turns before reporting";
+
+/// The failure a helper that reported done with nothing to show leaves.
+pub const CAME_BACK_EMPTY: &str = "the helper reported done but gave no result";
+
+/// A summary shorter than this, with nothing saved, is no result at all.
+const MIN_RESULT_CHARS: usize = 20;
+
+/// An input this small is put in the brief whole: a helper that must first call `artifact_read`
+/// spends a model turn and a re-prefill before it starts the work, and a small model sometimes
+/// never reads it at all. Larger inputs, and any past the total, stay pull-only.
+pub const INLINE_ARTIFACT_TOKENS: u32 = 1_500;
+pub const INLINE_TOTAL_TOKENS: u32 = 3_000;
 
 /// Plans in a row that leave nothing runnable before the task is given up.
 pub const MAX_FRUITLESS_PLANS: u32 = 3;
@@ -126,14 +149,124 @@ pub fn next_run<'a>(
     NextRun::Wait
 }
 
+/// The rules a made agent works by; a saved role's instructions carry the same in its own words.
+const MADE_AGENT_RULES: &str = "How you work:
+1. Your brief gives the task's goal, your step and your inputs. Use only your tools.
+2. Save what you make with artifact_write, titled as the reader should see it.
+3. Finish with step_report once, last: outcome completed or failed, what you did in a few
+   sentences, and the ids of what you saved.
+Never put a person's name, health or diet in a web search.";
+
+/// The agent a plan made for one step. Its tools are those it asked for within the task's
+/// ceiling, always with the task-work tools, and it takes the shipped worker's turns and window.
+pub fn role_for_agent(
+    step: &PlanStep,
+    agent: &StepAgent,
+    worker: &AgentRole,
+) -> Result<AgentRole, RoleError> {
+    let mut tools: std::collections::BTreeSet<String> = agent
+        .tools
+        .iter()
+        .filter(|group| LONG_TASK_ROOT_GROUPS.contains(&group.as_str()))
+        .cloned()
+        .collect();
+    tools.insert(TASK_WORK_EXTENSION.to_string());
+    AgentRole::new(
+        step.role(),
+        format!(
+            "You are {}, an agent made for one step of a longer task. {}\n\n{MADE_AGENT_RULES}",
+            agent.name, agent.instructions
+        ),
+        tools,
+        RolePersonalData::Inherit,
+        worker.max_turns(),
+        worker.context_fraction(),
+    )
+}
+
+/// The task-level note every helper is given: what the conversation said that the goal leaves out.
+/// A helper starts in an empty window, so without it "I'm lactose intolerant" said three messages
+/// before the ask never reaches the plan.
+pub const BRIEF_TITLE: &str = "Brief";
+
+/// A brief longer than this keeps its end, which is what was said last.
+pub const BRIEF_CHARS: usize = 4_000;
+
+/// The task's brief, if it has one: saved when the task started, belonging to no step.
+pub fn brief_artifact(artifacts: &[ArtifactSummary]) -> Option<&ArtifactSummary> {
+    artifacts
+        .iter()
+        .find(|a| a.step_key.is_none() && a.title == BRIEF_TITLE)
+}
+
+/// A brief made from the conversation before the ask, oldest first, kept to [`BRIEF_CHARS`] from
+/// its end. `None` when nothing came before it.
+pub fn conversation_brief(earlier: &[(Role, &str)]) -> Option<String> {
+    let lines: Vec<String> = earlier
+        .iter()
+        .filter_map(|(role, text)| {
+            let text = text.trim();
+            let who = match role {
+                Role::User => "The person",
+                Role::Assistant => "The assistant",
+                Role::System | Role::Tool => return None,
+            };
+            (!text.is_empty()).then(|| format!("{who}: {text}"))
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut total = 0;
+    for line in lines.iter().rev() {
+        if total + line.len() + 1 > BRIEF_CHARS {
+            if kept.is_empty() {
+                let tail: String = line
+                    .chars()
+                    .rev()
+                    .take(BRIEF_CHARS)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                return Some(format!("Earlier in the conversation:\n...{tail}"));
+            }
+            break;
+        }
+        total += line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+    Some(format!("Earlier in the conversation:\n{}", kept.join("\n")))
+}
+
+/// Cut a brief the prime wrote to [`BRIEF_CHARS`], keeping its start: it leads with what matters.
+pub fn clip_brief(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.chars().take(BRIEF_CHARS).collect())
+}
+
 /// The artifact the planner is told to end with, which `task_status` reports as the answer.
 pub const RESULT_TITLE: &str = "Result";
 
+/// The newest artifact titled "Result", else the newest whose title has "result" as a word: a model
+/// told to save "Result" sometimes saves "Arusha Trip Result", and the task then read as having no
+/// answer. "Search results" is not one.
 pub fn result_artifact(artifacts: &[ArtifactSummary]) -> Option<&ArtifactSummary> {
+    let names_result = |title: &str| {
+        title
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|word| word.eq_ignore_ascii_case(RESULT_TITLE))
+    };
     artifacts
         .iter()
         .rev()
-        .find(|a| a.title.eq_ignore_ascii_case(RESULT_TITLE))
+        .find(|a| a.title.trim().eq_ignore_ascii_case(RESULT_TITLE))
+        .or_else(|| artifacts.iter().rev().find(|a| names_result(&a.title)))
 }
 
 fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
@@ -155,21 +288,60 @@ fn artifact_lines(artifacts: &[&ArtifactSummary]) -> String {
         .collect()
 }
 
+/// A research report is as long as its plan: the pond joins the sections steps drafted, so no
+/// single reply has to hold it.
+const RESEARCH_PLAN: &str = "This is deep research the person asked for, and the report can be \
+     as long as the question needs: a page for a quick question, many for a trip or a big \
+     decision. Plan it in three parts. First, steps that each look into one part of the question \
+     with search_web or get_wikipedia_article, or recall what the household has said with the \
+     memory tools, and save their findings with their sources. Then one step per section of the \
+     report, each writing its section from the findings it is given and saving it as a draft \
+     artifact titled as the reader should see it. Give every section that is a plan, such as an \
+     itinerary, a meal plan or a packing or shopping list, to long-task-composer. Last, one step \
+     writes the artifact titled \"Result\": a short title on its first line as a \"# \" heading, \
+     then a few paragraphs that answer the question and introduce the sections without repeating \
+     them. Do not plan a step that combines, compiles or merges sections: the pond joins the \
+     Result and the sections, in plan order, into the report itself.\n";
+
+/// A research step works from sources, not from what a small model remembers, and keeps the
+/// household's particulars out of what it sends to a search engine.
+const RESEARCH_STEP: &str = "This is deep research. Look things up with search_web or \
+     get_wikipedia_article rather than from memory, keep only what the sources say, and cite each \
+     source as a Markdown link, [its title](its address), using the address the search gave. If \
+     the sources disagree, say so. If your step writes a section, save it as a draft artifact \
+     titled as the reader should see it, such as \"Getting around\", and write it in full: the \
+     pond puts it in the report as you wrote it. A section is 400 to 900 words of specifics from \
+     the findings: names, prices, times, distances, addresses and what each is good for, not a \
+     summary of them. A plan covers every day or item with its times, places and costs. Use no \
+     emoji. Never put a person's name, health \
+     or diet in a web search: search for the place, the dish or the thing.\n";
+
 fn date_line(now: DateTime<Utc>) -> String {
     format!("Today is {} (UTC).\n", now.format("%A %-d %B %Y, %H:%M"))
 }
 
 /// What the planner sees: the goal, who can do steps, what is done and why anything failed.
+/// `context` is the task's brief, read by the caller.
 pub fn planner_brief(
     task: &LongTask,
     steps: &[PlanStep],
     artifacts: &[ArtifactSummary],
     roles: &[AgentRole],
     reason: &PlanReason,
+    context: Option<&str>,
     now: DateTime<Utc>,
 ) -> String {
     let mut brief = date_line(now);
     brief.push_str(&format!("Goal: {}\n", task.goal()));
+    if let Some(context) = context {
+        brief.push_str(&format!(
+            "What the person said that the goal leaves out (every step is given this too):\n{}\n",
+            context.trim()
+        ));
+    }
+    if task.kind() == LongTaskKind::Research {
+        brief.push_str(RESEARCH_PLAN);
+    }
     brief.push_str(&format!(
         "At most {} steps in all.\n\nRoles that can do a step:\n",
         task.budget().max_steps()
@@ -219,23 +391,62 @@ pub fn planner_brief(
 }
 
 /// What a worker sees: its step, the artifacts it was given and what its dependencies saved.
+/// What a step is given: its named inputs, what the steps it depends on saved, and on a retry what
+/// its own last try saved, so the retry continues that work rather than starting again.
+fn given_artifacts<'a>(
+    step: &PlanStep,
+    artifacts: &'a [ArtifactSummary],
+) -> Vec<&'a ArtifactSummary> {
+    artifacts
+        .iter()
+        .filter(|a| {
+            step.inputs().contains(&a.id)
+                || (a.step_key.is_none() && a.title == BRIEF_TITLE)
+                || a.step_key.as_ref().is_some_and(|key| {
+                    step.depends_on().contains(key) || (step.attempts() > 0 && key == step.key())
+                })
+        })
+        .collect()
+}
+
+/// The given artifacts whose bodies go in the brief, in order, within the inline budget.
+pub fn inline_ids(step: &PlanStep, artifacts: &[ArtifactSummary]) -> Vec<String> {
+    let mut total = 0;
+    let mut ids = Vec::new();
+    for artifact in given_artifacts(step, artifacts) {
+        if artifact.tokens <= INLINE_ARTIFACT_TOKENS
+            && total + artifact.tokens <= INLINE_TOTAL_TOKENS
+        {
+            total += artifact.tokens;
+            ids.push(artifact.id.clone());
+        }
+    }
+    ids
+}
+
+/// The turn budget for a step's run: a retry after running out of turns gets half again as many.
+pub fn turns_for(role_max_turns: u32, step: &PlanStep) -> u32 {
+    if step.attempts() > 0 && step.failure() == Some(OUT_OF_TURNS) {
+        role_max_turns + role_max_turns.div_ceil(2)
+    } else {
+        role_max_turns
+    }
+}
+
+/// `bodies` holds the text of the inputs [`inline_ids`] chose, read by the caller.
 pub fn worker_brief(
     task: &LongTask,
     step: &PlanStep,
     artifacts: &[ArtifactSummary],
+    bodies: &HashMap<String, String>,
     now: DateTime<Utc>,
 ) -> String {
-    let given: Vec<&ArtifactSummary> = artifacts
-        .iter()
-        .filter(|a| {
-            step.inputs().contains(&a.id)
-                || a.step_key
-                    .as_ref()
-                    .is_some_and(|key| step.depends_on().contains(key))
-        })
-        .collect();
+    let given = given_artifacts(step, artifacts);
     let mut brief = date_line(now);
     brief.push_str(&format!("The task's goal: {}\n", task.goal()));
+    if task.kind() == LongTaskKind::Research {
+        brief.push_str(RESEARCH_STEP);
+    }
     brief.push_str(&format!(
         "Your step ({}): {}\n",
         step.key(),
@@ -249,8 +460,27 @@ pub fn worker_brief(
             brief.push_str(&format!("The last try failed: {failure}\n"));
         }
     }
-    brief.push_str("\nArtifacts you may read:\n");
-    brief.push_str(&artifact_lines(&given));
+    let (inline, pull): (Vec<&ArtifactSummary>, Vec<&ArtifactSummary>) =
+        given.into_iter().partition(|a| bodies.contains_key(&a.id));
+    if !inline.is_empty() {
+        brief.push_str(
+            "\nYour inputs, already read for you (do not call artifact_read for these):\n",
+        );
+        for artifact in &inline {
+            brief.push_str(&format!(
+                "--- {} \"{}\" ---\n{}\n",
+                artifact.id,
+                artifact.title,
+                bodies[&artifact.id].trim()
+            ));
+        }
+    }
+    brief.push_str(if inline.is_empty() {
+        "\nArtifacts you may read:\n"
+    } else {
+        "\nOther artifacts you may read:\n"
+    });
+    brief.push_str(&artifact_lines(&pull));
     brief
 }
 
@@ -295,12 +525,32 @@ pub enum RunEnd {
 
 /// One hand-back per run: the reported one; else, when the helper saved work, that work; else one
 /// read from its last text; else a failure that says why there is none.
-pub fn settle_run(reported: Option<StepOutcome>, written: &[String], run: &TaskRun) -> RunEnd {
+/// `may_retry` says the step has a try left: a helper that ran out of turns then fails, so its
+/// retry gets more turns and what it saved, rather than its half-done work counting as done.
+pub fn settle_run(
+    reported: Option<StepOutcome>,
+    written: &[String],
+    run: &TaskRun,
+    may_retry: bool,
+) -> RunEnd {
+    // A report is the hand-back even when the run was then stopped: the runner ends a run as soon
+    // as it reports, rather than pay for the turn the model takes after "stop here".
+    if let Some(outcome) = reported {
+        let empty = outcome.outcome() == OutcomeKind::Completed
+            && outcome.artifacts().is_empty()
+            && written.is_empty()
+            && outcome.summary().trim().chars().count() < MIN_RESULT_CHARS;
+        return RunEnd::Reported(if empty {
+            failed(CAME_BACK_EMPTY)
+        } else {
+            outcome
+        });
+    }
     if run.status == TaskStatus::Cancelled {
         return RunEnd::Preempted;
     }
-    if let Some(outcome) = reported {
-        return RunEnd::Reported(outcome);
+    if run.status == TaskStatus::TurnBudgetExhausted && may_retry {
+        return RunEnd::Reported(failed(OUT_OF_TURNS));
     }
     // Small models often save their work and stop without reporting; the work is the evidence.
     if !written.is_empty() {
@@ -319,7 +569,7 @@ pub fn settle_run(reported: Option<StepOutcome>, written: &[String], run: &TaskR
         ));
     }
     if run.status == TaskStatus::TurnBudgetExhausted {
-        return RunEnd::Reported(failed("the helper ran out of turns before reporting"));
+        return RunEnd::Reported(failed(OUT_OF_TURNS));
     }
     match run.result_for_parent().map(StepOutcome::parse) {
         Some(Ok(outcome)) => RunEnd::Reported(outcome),

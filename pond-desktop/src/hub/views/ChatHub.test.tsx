@@ -228,13 +228,14 @@ describe("ChatHubView — picture support", () => {
 });
 
 /** With none chosen the pond refuses a turn and picks nothing, so the screen offers its suggestions. */
-describe("ChatHubView — the paperclip's reason", () => {
+describe("ChatHubView — Add pictures' reason", () => {
   it("names Pictures included when the model cannot look at pictures", async () => {
     vi.mocked(api.getVisionStatus).mockResolvedValue({
       model: "x", state: { kind: "not_declared" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
     render(<ChatHubView />);
-    const clip = await screen.findByRole("button", { name: "Attach image" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add to message" }));
+    const clip = await screen.findByRole("menuitem", { name: "Add pictures" });
     await waitFor(() => expect(clip.getAttribute("title")).toBe(NOT_DECLARED_COPY));
     expect(clip.getAttribute("title")).not.toMatch(/Reads pictures/);
   });
@@ -244,7 +245,8 @@ describe("ChatHubView — the paperclip's reason", () => {
       model: "x", state: { kind: "absent" }, size_bytes: null, message: null,
     } satisfies VisionStatus);
     render(<ChatHubView />);
-    const clip = await screen.findByRole("button", { name: "Attach image" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add to message" }));
+    const clip = await screen.findByRole("menuitem", { name: "Add pictures" });
     await waitFor(() => expect(clip.getAttribute("title")).toBe(ATTACH_BLOCKED_COPY));
   });
 });

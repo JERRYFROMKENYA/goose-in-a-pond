@@ -397,6 +397,12 @@ impl AgentRole {
         self.max_turns
     }
 
+    /// The same role with a different turn budget, kept within [`MAX_ROLE_MAX_TURNS`].
+    pub fn with_max_turns(mut self, max_turns: u32) -> Self {
+        self.max_turns = max_turns.clamp(1, MAX_ROLE_MAX_TURNS);
+        self
+    }
+
     pub fn context_fraction(&self) -> f32 {
         self.context_fraction
     }

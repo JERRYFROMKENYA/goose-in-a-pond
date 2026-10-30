@@ -3915,9 +3915,150 @@ PAI-4 and PAI-7).** Design: [06 sections 8 and 9](./06-multi-agent-orchestration
   - the status, rebuild and long-task routes answered as designed, 401, 404 and 409 included;
   - the engine's tests (205 passed) and its two real-model tests, the suspend file (a 2,500-token
     turn resumed in 447 ms) and the compile with two shapes sharing an opening.
-- **Still open.** Boot's first prewarm call is preceded by a goose side call of about 750 tokens
-  under the compile scope, whose system prompt is not GIAP's (`system_appendix_dropped`); it is
-  harmless to the compile and its caller is unidentified.
+- **Found the same day.** Boot's first prewarm call was preceded by a goose side call of about 750
+  tokens under the compile scope (`system_appendix_dropped`): a recovery compaction. See the next
+  entry.
+
+**2026-10-28 — the side call before every boot's first prefill compile (touches PAI-3 and PAI-6;
+not a PAI milestone).**
+
+- **What it was.** goose's recovery compaction. The engine refused any prompt longer than half
+  the free memory divided by an estimated KV cost per token, even under a window the host had
+  set. The estimate charges every layer a full-width f16 cache: 168 KiB a token for Gemma 4 E4B,
+  where its windowed q8_0 cache holds about 9.5 KiB. The first call after a model load has no
+  retained window to credit back. So the boot warm-up's 7,816-token prompt got
+  `ContextLengthExceeded`, and goose summarised the one-message conversation: the 755-token call,
+  run under the compile scope and its one-token cap. That call's context then let the retry
+  through.
+- **How it was found.** On the Orin, with `GIAP_CAPTURE_PAYLOAD` and the shim at trace level. The
+  side call's system prompt is goose's `compaction.md` ("## Task Context ..."), with no tools. It
+  is logged after `Performing message compaction` and before a byte-identical second copy of the
+  warm-up's payload.
+- **The fix** (goose `fix/admit-prompt-by-window`): a prompt is checked against its window only.
+  Every context is created at the window's size whatever the prompt's length, so the per-prompt
+  memory check never bounded an allocation. With no window set, the estimate still sizes it.
+- **PAI-6.** The compile pair is again the warm-up's own two calls (06 section 9.3). Before the
+  fix, the warm-up's first prompt was judged against the compaction prompt (`TooShort`, 5 tokens
+  shared), and only the second warm-up call judged the snapshot Valid.
+- **PAI-3.** A real turn that is the first call after a model load, such as a scheduled task
+  that fires before the warm-up, is no longer refused, so goose no longer compacts its
+  conversation.
+- **Verified on the Orin** (E4B QAT with its MTP drafter, 16,384 context, one boot each of main
+  `f8831d73` and this branch):
+  - before: the engine's first call was the 755-token compaction, 3.0 s between the model loading
+    and the warm-up's compile; verdicts Unobserved (755), TooShort (7,816), Valid;
+  - after: the first call is the 7,816-token warm-up, 0.24 s after the model loads; verdicts
+    Unobserved then Valid with the 6,144-token preamble, and every role Valid; no compaction and
+    no `system_appendix_dropped` in the boot;
+  - `cargo test --release -p goose-local-inference --features cuda --lib`: 208 passed (three of
+    them new, for the window check) and 12 ignored.
+
+**2026-10-28 — deep research, long reports, plans and export (PAI-6 8.8; touches PAI-1, PAI-2,
+PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
+
+- **What landed.** The chat composer's + menu, on the desktop and the phone, offers Deep research.
+  The pond starts a research task on the message itself, owned by the member asking, and opens
+  the turn's stream with the same `task_start` call the prime would make, so the card follows
+  it. Research is planned as gathering, then a step per section, then a summary. The pond joins
+  those into one report, as long as its plan, which exports as Markdown, a printable page or an
+  iCalendar file. A shipped composer role writes itineraries, meal plans and lists.
+- **PAI-1.** The task belongs to the caller the long-task routes answer, so its card is always
+  readable by whoever asked. A guest or an unattributed device is refused before anything is
+  saved (403).
+- **PAI-2.** Research and plan steps are told never to put a person's name, health or diet in a
+  web search. The exported page escapes everything the model wrote and fetches nothing when
+  opened.
+- **PAI-3 and PAI-4.** The prime's preamble is unchanged: the deep research note rides the
+  turn's `<system-context>`. The composer is a fifth default agent, so boot compiles one more
+  snapshot.
+- **Verified on the Orin** (E4B QAT with its MTP drafter, 16,384 context, 2026-10-28, a member's
+  paired test device): Deep research on "Plan a four-day trip to Mombasa for me and three
+  friends" started a research task from the turn. The prime acknowledged it from its cached
+  preamble, with the first token at 4.4 s, and the task finished in 13 minutes: two research
+  steps, then an itinerary, a meal plan and a shopping list from the composer, then the
+  summary, which passed on its second try. The joined report has three sections, links to the
+  pages it read, and a calendar of 15 timed events taken from the itinerary. It exports as
+  Markdown, a web page and an iCalendar file. A first run found the defects fixed before this
+  one: a compile step that repeated every section, plans given to the worker, emoji and quoted
+  markup in headings, and map links listed as sources.
+- **Also found.** Two checkouts built into one `target/` on the board reuse each other's path
+  crates. A deploy compiled pond-api against the other checkout's pond-core; clearing the
+  `pond-*`/`goose*` fingerprints fixed it.
+- **Not verified.** Printing to PDF in the built Electron app. The phone's report and share
+  screens (goose-on-the-go #200 and its follow-up) on a device.
+
+**2026-10-29 — PAI-6: the line long tasks wait in (section 8.9).**
+
+- **Why.** On the Orin a member's deep research waited an hour behind an older task, with its card
+  saying "Planning", and they asked twice more. The runner's pick by `updated_at` was meant to let
+  tasks take turns. A step never touches `updated_at`, so in practice the oldest task always won.
+- **What landed.** `long_task_queue::run_order` is the one order: the order tasks were asked for.
+  The runner, every task's view (`queue: {position, of, ahead}`) and `GET /long-tasks/queue` read
+  it. A deep-research turn and `task_start`'s result tell the prime where the new task waits. The
+  desktop card says "Waiting its turn: 3rd in line" and offers Keep going or Stop for each of the
+  member's own tasks in line.
+- **PAI-1.** Another member's task is only a place in the line, never its goal: in the views, the
+  line route, the prime's note and the card. Nobody identified gets 403 from the line route.
+- **PAI-3.** The prime's preamble is unchanged: the waiting line rides the deep-research note in the
+  turn's `<system-context>`, and `task_start`'s result is a tool result.
+- **PAI-7.** Stopping is the member's own choice on their card. Nothing is stopped for them.
+- **Verified on the Orin** (main at `c4b4786f`, E4B QAT, 2026-10-29, a member's paired test device):
+  two deep-research asks in a row. The second's view said `position 2 of 2` with the first's goal
+  ahead, and `GET /long-tasks/queue` listed both in order. The prime replied that it was waiting its
+  turn behind another task and that the task card can stop the person's tasks. Stopping the first
+  moved the second to the front. Both were stopped and the device and its chats removed afterwards.
+  The phone's queue card (goose-on-the-go #204) is not checked on a device.
+
+**2026-10-29 — PAI-1 and PAI-2: My Pond and the admin card ([pond administrator](../pond-administrator.md)).**
+
+- **Why.** Jerry asked for a phone area to administer the pond: storage, files, caches, long-task
+  artifacts and reports, health and power. Each of those deletes or reveals something, and being
+  paired was the only proof any route asked for.
+- **What landed.** `/api/v1/admin/*` answers only a member's device (`DeviceRung::Member`; a
+  guest's or an unattributed device gets `403 admin_members_only`) that unlocked it with the admin
+  card in the last 15 minutes (`AdminElevation`, `pond-core/src/security/services/`). The card is
+  made on the device by `giap.sh admin-card`, which keeps only a verifier on the pond and seals the
+  plaintext to the TPM. Wrong cards are slowed like the setup code.
+- **PAI-1.** A long task of another member shows its state, dates and artifact count, never its goal
+  or artifact titles, as the run queue already shows it. The unlock binds to the device, not to the
+  household.
+- **PAI-2.** The file browser never lists `setup/`, `tls/`, `secrets*`, `embedded-network/`,
+  `lightning/` or `.runtime_*`, and refuses `..`, absolute paths and paths through a symlink. Every
+  unlock, refusal and change is an `admin.*` audit event, with a file's top-level area only, and
+  every unlock is pushed to the household. Nothing new reaches `Settings` or leaves the device.
+- **Invariants.** No preamble or prompt change, no egress, no LLM call on the path.
+- **Not verified on the Orin yet.** The TPM seal and the `nvpmodel` switch need the board and
+  Jerry's sudo password; the deploy waits for his go-ahead.
+
+**2026-10-29 — PAI-2: the pond's own account, `agamemnon` ([pond administrator](../pond-administrator.md#the-service-account)).**
+
+- **What landed.** `install.sh` offers a new pond its own locked system account; `giap.sh
+  service-account [undo|status]` moves an existing one and back. The service runs as `agamemnon`
+  from `/var/lib/goose-in-a-pond`, with its own PulseAudio from a lingering user manager.
+- **PAI-2.** The data directory is `0750` and other local users lose the group read they had
+  through the login's home. The login keeps read access through an ACL that leaves every file's own
+  mask alone, so `setup/`, `secrets/`, `tls/` and the host credential stay the service account's.
+  Nothing new leaves the device; the scripts change only who owns the data.
+- **Invariants.** No server code, preamble, prompt or setting changed.
+- **On hardware.** In containers on the nano: the installer's step ran the real `pond-server` as
+  `agamemnon`, and a live voice turn ran with Whisper on CUDA and the USB pair. The nano itself
+  was not moved. A desktop shell's voice loop, which runs as the login, is the next step.
+
+**2026-10-29 — PAI-6: briefs, made agents and fuller sections (section 8.11).**
+
+- **What landed.**
+  - Every long task carries a `Brief` artifact. The planner sees it, and it's inlined into every step. Deep research writes it from the conversation before the ask, and `task_start` takes one from the prime.
+  - A plan step or a delegation may carry `new_agent` when no saved role fits (migration 0071). The runner and `made_role` hold its tools to the task's ceiling or to the prime's own.
+  - Research steps are asked for 400 to 900 words of specifics per section.
+- **PAI-1.** The brief holds the owner's own conversation and is scoped like any artifact of the task.
+- **PAI-2.** A made agent asks for tools and is given only those within its ceiling: device control and unknown groups are dropped.
+- **PAI-3.** No preamble changed except the planner's, which rebuilds once. The brief and the section guide ride in step briefs.
+- **Verified on the Orin** (branch `feat/descriptive-dispatch`, E4B QAT, 2026-10-29, a member's paired test device). One turn said "four friends, 12 to 15 December, one vegetarian, we'd rather not fly"; the next asked for deep research with "Plan our trip."
+  - The brief carried that turn, and the prime's acknowledgement named the dates and diet.
+  - The plan went by train and road: SGR and road sections, no flights. Vegetarian appears in the dining section, the meal plan, the itinerary and the result.
+  - Sections were 536 to 617 words, where earlier runs gave about 150 to 600.
+  - 8 steps took 18.3 minutes, two of them on a second try. No draft had an emoji.
+  - The planner chose saved roles for every step, so a made agent is verified by tests only.
 
 **2026-10-28 — the context space, designed; no code.**
 

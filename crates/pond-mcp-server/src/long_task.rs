@@ -14,7 +14,8 @@ use pond_core::shared::domain::long_task::{
 use pond_core::shared::domain::orchestration::DelegationAuthority;
 use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository};
 use pond_core::shared::services::child_sessions::{process_child_sessions, ChildSessionRegistry};
-use pond_core::shared::services::long_task_runner::result_artifact;
+use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
+use pond_core::shared::services::long_task_runner::{clip_brief, result_artifact, BRIEF_TITLE};
 use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
@@ -293,6 +294,10 @@ fn token_count(value: Option<Value>, field: &str) -> Result<Option<u32>, Refusal
 pub struct TaskStartParams {
     /// What the finished work should give the person, in one or two sentences.
     pub goal: Option<String>,
+    /// Everything from this conversation the helpers need that the goal leaves out: who it is for,
+    /// dates and places, budget, diets and allergies, what was decided or ruled out. They see
+    /// nothing of the conversation but this and the goal.
+    pub brief: Option<String>,
     #[serde(flatten)]
     #[schemars(skip)]
     pub extra: HashMap<String, Value>,
@@ -465,41 +470,50 @@ impl TasksMcpServer {
         )
         .map_err(|e| Refusal::Rejected(e.to_string()))?;
         deps.repo.create_task(&task).await.map_err(store)?;
+        if let Some(body) = params.brief.as_deref().and_then(clip_brief) {
+            let brief = Artifact::new(
+                task.id(),
+                None,
+                ArtifactKind::Note,
+                BRIEF_TITLE,
+                "What the conversation said that the goal leaves out",
+                body,
+                Utc::now(),
+            )
+            .map_err(|e| Refusal::Rejected(e.to_string()))?;
+            deps.repo.insert_artifact(&brief).await.map_err(store)?;
+        }
         deps.wake_runner();
+        let open = deps
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, false)
+            .await
+            .map_err(store)?;
+        let place = place_of(&run_order(&open), task.id(), task.owner_profile_id());
         tracing::info!(
             target: "giap::trace",
             kind = "long_task_started",
             task_id = %task.id(),
             origin_session_id = %authority.session_id(),
             max_steps = task.budget().max_steps(),
+            position = place.as_ref().map(|p| p.position),
         );
+        let waiting = place
+            .as_ref()
+            .and_then(waiting_line)
+            .map(|line| format!(" {line}"))
+            .unwrap_or_default();
         Ok(format!(
             "Started task {}. The pond works on it while the household is quiet and tells the \
              person on their phone when it is done. Tell the person it has started; task_status \
-             with this id says how far it has got.",
+             with this id says how far it has got.{waiting}",
             task.id()
         ))
     }
 
     async fn run_status(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
         let (deps, authority) = self.caller(meta)?;
-        let scope = authority.profile_scope();
-        if let Some(task_id) = task_id_of(params) {
-            let task = reached_task(&deps, scope, &task_id).await?;
-            let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-            let result = result_of(deps.repo.as_ref(), task.id()).await?;
-            return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
-        }
-        let tasks = reached_tasks(&deps, scope).await?;
-        if tasks.is_empty() {
-            return Ok("There are no long tasks running for this person.".to_string());
-        }
-        let mut lines = vec![format!("Long tasks still running: {}", tasks.len())];
-        for task in &tasks {
-            let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
-            lines.push(task_line(task, &steps));
-        }
-        Ok(lines.join("\n"))
+        status_text(&deps, authority.profile_scope(), task_id_of(params)).await
     }
 
     async fn run_cancel(&self, meta: &Meta, params: TaskIdParams) -> Result<String, Refusal> {
@@ -541,6 +555,52 @@ impl TasksMcpServer {
 }
 
 /// One task if this scope reaches it; a foreign id and an unknown one read the same.
+/// What `task_status` answers: one task, or every task still running for this person.
+async fn status_text(
+    deps: &LongTaskDeps,
+    scope: &ProfileScope,
+    task_id: Option<String>,
+) -> Result<String, Refusal> {
+    if let Some(task_id) = task_id {
+        let task = reached_task(deps, scope, &task_id).await?;
+        let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
+        let result = result_of(deps.repo.as_ref(), task.id()).await?;
+        return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
+    }
+    let tasks = reached_tasks(deps, scope).await?;
+    if tasks.is_empty() {
+        return Ok(NO_TASKS_RUNNING.to_string());
+    }
+    let mut lines = vec![format!("Long tasks still running: {}", tasks.len())];
+    for task in &tasks {
+        let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
+        lines.push(task_line(task, &steps));
+    }
+    Ok(lines.join("\n"))
+}
+
+const NO_TASKS_RUNNING: &str = "There are no long tasks running for this person.";
+
+/// `task_status`'s answer for a call that reached `check_task` instead: the prime often asks it
+/// about a task `task_start` began. `None` when the id is no long task of theirs, or none runs.
+pub(crate) async fn long_task_status_for(
+    scope: &ProfileScope,
+    task_id: Option<&str>,
+) -> Option<String> {
+    long_task_status_with(&installed_long_task_deps()?, scope, task_id).await
+}
+
+async fn long_task_status_with(
+    deps: &LongTaskDeps,
+    scope: &ProfileScope,
+    task_id: Option<&str>,
+) -> Option<String> {
+    status_text(deps, scope, task_id.map(str::to_string))
+        .await
+        .ok()
+        .filter(|text| text != NO_TASKS_RUNNING)
+}
+
 async fn reached_task(
     deps: &LongTaskDeps,
     scope: &ProfileScope,
@@ -932,8 +992,9 @@ found, in a few sentences; `failure` = why, if it failed; `artifacts` = ids of w
     }
 
     #[tool(description = "\
-Write this task's plan: every step still to do, in order. Steps already started or finished \
-stay as they are. If it is refused, fix what the message names and call it again.")]
+Write this task's plan: every step still to do, in order. Each step names a listed `role`, or \
+carries a `new_agent` (name, instructions, tools) when none is for it. Steps already started or \
+finished stay as they are. If it is refused, fix what the message names and call it again.")]
     async fn plan_write(
         &self,
         ctx: RequestContext<RoleServer>,
@@ -1518,6 +1579,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_primes_brief_is_saved_for_every_helper_and_a_blank_one_is_not() {
+        let pond = Pond::new();
+        let prime = pond.prime();
+        let _liz = pond.turn("engine-liz", "giap-liz", ProfileScope::Owner("liz".into()));
+        let started = prime
+            .run_start(
+                &meta_for("engine-liz"),
+                params(serde_json::json!({
+                    "goal": "a four-day Mombasa plan",
+                    "brief": "Four friends, 12-15 December. Liz is lactose intolerant. No flights."
+                })),
+            )
+            .await
+            .unwrap();
+        let tasks = pond
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, true)
+            .await
+            .unwrap();
+        assert!(started.contains(tasks[0].id()), "{started}");
+        let artifacts = pond.repo.list_artifacts(tasks[0].id()).await.unwrap();
+        let brief = pond_core::shared::services::long_task_runner::brief_artifact(&artifacts)
+            .expect("the brief is saved as the task's own artifact");
+        let body = pond
+            .repo
+            .get_artifact(tasks[0].id(), &brief.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(body.body().contains("lactose intolerant"));
+
+        prime
+            .run_start(
+                &meta_for("engine-liz"),
+                params(serde_json::json!({"goal": "compare plumbers", "brief": "  "})),
+            )
+            .await
+            .unwrap();
+        let tasks = pond
+            .repo
+            .list_tasks(LongTaskOwnerFilter::Everyone, true)
+            .await
+            .unwrap();
+        let plumbers = tasks
+            .iter()
+            .find(|t| t.goal() == "compare plumbers")
+            .unwrap();
+        assert!(pond
+            .repo
+            .list_artifacts(plumbers.id())
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn a_guest_cannot_start_a_task_and_a_member_can() {
         let pond = Pond::new();
         let prime = pond.prime();
@@ -1596,6 +1713,43 @@ mod tests {
             tasks[0].owner_profile_id(),
             None,
             "a household task has no owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_long_task_asked_about_through_check_task_gets_its_status() {
+        let pond = Pond::new();
+        let deps = pond.deps();
+        let liz = ProfileScope::Owner("liz".into());
+        let hers = pond.task(liz.clone(), "plan the school trip").await;
+        let his = pond
+            .task(ProfileScope::Owner("jerry".into()), "his task")
+            .await;
+
+        let one = long_task_status_with(&deps, &liz, Some(hers.id()))
+            .await
+            .unwrap();
+        assert!(one.contains("plan the school trip"), "{one}");
+        let listed = long_task_status_with(&deps, &liz, None).await.unwrap();
+        assert!(
+            listed.contains(hers.id()) && !listed.contains(his.id()),
+            "{listed}"
+        );
+
+        assert_eq!(
+            long_task_status_with(&deps, &liz, Some(his.id())).await,
+            None,
+            "not hers"
+        );
+        assert_eq!(
+            long_task_status_with(&deps, &liz, Some("no-such-task")).await,
+            None
+        );
+        let nobody = ProfileScope::Owner("ola".into());
+        assert_eq!(
+            long_task_status_with(&deps, &nobody, None).await,
+            None,
+            "with nothing running, check_task keeps its own refusal"
         );
     }
 

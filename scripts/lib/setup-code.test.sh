@@ -230,6 +230,23 @@ test_provision_stops_before_the_certificate_when_the_card_fails() {
   lacks "$(cat "$FAKE_CALLS")" "pondnet"
 }
 
+test_doctor_asks_as_the_service_account_and_never_for_a_password() {
+  world
+  # shellcheck disable=SC2016  # the fake's own shell expands these
+  printf '%s\n' '#!/bin/sh' 'printf "sudo %s\n" "$*" >> "$FAKE_CALLS"' \
+    '[ -n "${SUDO_LOCKED:-}" ] && { echo "sudo: a password is required" >&2; exit 1; }' \
+    '[ "$1" = -n ] && shift; [ "$1" = -u ] && shift 2' 'exec "$@"' > "$W/bin/sudo"
+  chmod +x "$W/bin/sudo"
+  echo claimed > "$FAKE_STATE"
+  setup_code_doctor "$W/bin/pond-server" "$W/data" agamemnon >/dev/null
+  eq "$SETUP_CODE_LEVEL" ok
+  contains "$(cat "$FAKE_CALLS")" "sudo -n -u agamemnon env POND_DATA_DIR=$W/data"
+  local out
+  out="$(SUDO_LOCKED=1 setup_code_doctor "$W/bin/pond-server" "$W/data" agamemnon; echo "level=$SETUP_CODE_LEVEL")"
+  contains "$out" "kept by agamemnon"
+  contains "$out" "level=info"
+}
+
 for fn in $(declare -F | awk '{print $3}' | grep '^test_'); do t "$fn" "$fn"; done
 printf '%s passed, %s failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]

@@ -281,10 +281,10 @@ describe("start-up copies on the Recipes screen", () => {
     render(<Recipes />);
     const group = await screen.findByRole("region", { name: "Built-in agents" });
     expect(within(group).getAllByText("Ready")).toHaveLength(3);
-    expect(within(group).getByRole("listitem", { name: "Long-task planner" })).toBeTruthy();
+    expect(within(group).getByRole("listitem", { name: "Point Gander" })).toBeTruthy();
     expect(within(group).queryByRole("button", { name: /edit|delete/i })).toBeNull();
     expect(within(group).queryByText("greeter")).toBeNull();
-    fireEvent.click(within(group).getByRole("button", { name: "Rebuild Long-task verifier" }));
+    fireEvent.click(within(group).getByRole("button", { name: "Rebuild Sentinel Goose" }));
     await waitFor(() => expect(api.rebuildAgentPrefill).toHaveBeenCalledWith("long-task-verifier"));
   });
 

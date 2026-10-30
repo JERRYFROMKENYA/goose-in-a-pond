@@ -617,6 +617,7 @@ fn with_id_prefix(task: LongTask, prefix: &str) -> Result<LongTask, LongTaskErro
         state: task.state(),
         max_steps: task.budget().max_steps(),
         deadline: task.budget().deadline(),
+        kind: task.kind(),
         created_at: task.created_at(),
         updated_at: task.updated_at(),
         finished_at: task.finished_at(),
@@ -1104,6 +1105,7 @@ pub fn plan_hand_off(
         inputs,
         depends_on: vec![source.key().to_string()],
         acceptance: None,
+        new_agent: None,
     };
     validate_appended_step(task, draft, steps).map_err(HandOffRefused::from)
 }

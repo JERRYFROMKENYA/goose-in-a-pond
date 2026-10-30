@@ -41,6 +41,7 @@ fn step(key: &str, ordinal: u32, deps: &[&str], state: StepState, attempts: u32)
         failure: (state == StepState::Failed).then(|| "the page would not load".to_string()),
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap()
 }
@@ -172,6 +173,7 @@ fn a_worker_sees_its_inputs_and_its_dependencies_output_and_nothing_else() {
         failure: None,
         started_at: None,
         finished_at: None,
+        agent: None,
     })
     .unwrap();
     let artifacts = [
@@ -179,7 +181,7 @@ fn a_worker_sees_its_inputs_and_its_dependencies_output_and_nothing_else() {
         summary("from-a", Some("a"), "Quotes"),
         summary("from-z", Some("z"), "Unrelated"),
     ];
-    let brief = worker_brief(&task, &b, &artifacts, t(10));
+    let brief = worker_brief(&task, &b, &artifacts, &HashMap::new(), t(10));
     assert!(brief.contains("compare the two quotes"));
     assert!(brief.contains("names the cheaper bus company"));
     assert!(brief.contains("given") && brief.contains("from-a"));
@@ -202,10 +204,46 @@ fn the_planner_is_told_what_failed_and_why() {
         &[],
         &[],
         &PlanReason::Blocked(Vec::new()),
+        None,
         t(10),
     );
     assert!(brief.contains("a done"));
     assert!(brief.contains("the page would not load"));
+}
+
+#[test]
+fn only_a_research_task_is_briefed_to_search_and_cite() {
+    let general = task_in(LongTaskState::Running, None);
+    let research = task_in(LongTaskState::Running, None).with_kind(LongTaskKind::Research);
+    let step_b = step("b", 0, &[], StepState::Pending, 0);
+    let plan = |task: &LongTask| {
+        planner_brief(
+            task,
+            &[],
+            &[],
+            &[],
+            &PlanReason::Blocked(Vec::new()),
+            None,
+            t(10),
+        )
+    };
+    let work = |task: &LongTask| worker_brief(task, &step_b, &[], &HashMap::new(), t(10));
+
+    assert!(plan(&research).contains("deep research"));
+    assert!(
+        plan(&research).contains(RESULT_TITLE),
+        "the plan ends in the report the card opens"
+    );
+    assert!(
+        work(&research).contains("Markdown link"),
+        "sources are cited as links"
+    );
+    assert!(
+        plan(&research).contains("Do not plan a step that combines"),
+        "a compile step would repeat every section in the joined report"
+    );
+    assert!(!plan(&general).contains("deep research"));
+    assert!(!work(&general).contains("deep research"));
 }
 
 fn run(status: TaskStatus, result: Option<&str>) -> TaskRun {
@@ -229,12 +267,18 @@ fn a_run_settles_to_exactly_one_hand_back() {
         settle_run(
             Some(reported.clone()),
             &["saved".to_string()],
-            &done("prose")
+            &done("prose"),
+            false
         ),
         RunEnd::Reported(reported),
         "a reported outcome wins over saved work and the helper's last words"
     );
-    match settle_run(None, &["day-1".to_string()], &done("Here is day one.")) {
+    match settle_run(
+        None,
+        &["day-1".to_string()],
+        &done("Here is day one."),
+        false,
+    ) {
         RunEnd::Reported(o) => {
             assert_eq!(
                 o.outcome(),
@@ -250,11 +294,12 @@ fn a_run_settles_to_exactly_one_hand_back() {
         None,
         &[],
         &done(r#"{"outcome": "completed", "summary": "done from text"}"#),
+        false,
     ) {
         RunEnd::Reported(o) => assert_eq!(o.summary(), "done from text"),
         other => panic!("expected a parsed report, got {other:?}"),
     }
-    match settle_run(None, &[], &done("I think it went fine")) {
+    match settle_run(None, &[], &done("I think it went fine"), false) {
         RunEnd::Reported(o) => assert_eq!(
             o.outcome(),
             OutcomeKind::Failed,
@@ -266,12 +311,18 @@ fn a_run_settles_to_exactly_one_hand_back() {
         settle_run(
             None,
             &["saved".to_string()],
-            &run(TaskStatus::Cancelled, None)
+            &run(TaskStatus::Cancelled, None),
+            false
         ),
         RunEnd::Preempted,
         "a stopped run reruns, even if it saved something"
     );
-    match settle_run(None, &[], &run(TaskStatus::TurnBudgetExhausted, None)) {
+    match settle_run(
+        None,
+        &[],
+        &run(TaskStatus::TurnBudgetExhausted, None),
+        false,
+    ) {
         RunEnd::Reported(o) => assert_eq!(o.outcome(), OutcomeKind::Failed),
         other => panic!("expected a failure, got {other:?}"),
     }
@@ -280,4 +331,299 @@ fn a_run_settles_to_exactly_one_hand_back() {
 #[test]
 fn a_step_session_reads_as_the_ponds_own() {
     assert!(long_task_session_id("t", "r").starts_with("sched-"));
+}
+
+fn retry_of(key: &str, failure: &str) -> PlanStep {
+    PlanStep::from_parts(PlanStepParts {
+        task_id: "task-1".to_string(),
+        key: key.to_string(),
+        ordinal: 1,
+        role: "long-task-worker".to_string(),
+        instructions: format!("do {key}"),
+        inputs: Vec::new(),
+        depends_on: vec!["a".to_string()],
+        acceptance: None,
+        state: StepState::Failed,
+        attempts: 1,
+        summary: None,
+        failure: Some(failure.to_string()),
+        started_at: None,
+        finished_at: None,
+        agent: None,
+    })
+    .unwrap()
+}
+
+#[test]
+fn small_inputs_are_put_in_the_brief_and_large_ones_stay_pull_only() {
+    let task = task_in(LongTaskState::Running, None);
+    let b = step("b", 1, &["a"], StepState::Pending, 0);
+    let mut big = summary("from-a-big", Some("a"), "All the hotel pages");
+    big.tokens = INLINE_ARTIFACT_TOKENS + 1;
+    let artifacts = [summary("from-a", Some("a"), "Quotes"), big];
+    let ids = inline_ids(&b, &artifacts);
+    assert_eq!(ids, vec!["from-a".to_string()]);
+
+    let bodies = HashMap::from([(
+        "from-a".to_string(),
+        "Bus A: 1,200 KES. Bus B: 950 KES.".to_string(),
+    )]);
+    let brief = worker_brief(&task, &b, &artifacts, &bodies, t(10));
+    assert!(brief.contains("already read for you"), "{brief}");
+    assert!(brief.contains("Bus B: 950 KES."), "{brief}");
+    let listed = brief.split("Other artifacts you may read:").nth(1).unwrap();
+    assert!(
+        listed.contains("from-a-big") && !listed.contains("from-a ["),
+        "{brief}"
+    );
+}
+
+#[test]
+fn inlining_stops_at_the_total_budget() {
+    let b = step("b", 1, &["a"], StepState::Pending, 0);
+    let mut artifacts = Vec::new();
+    for i in 0..5 {
+        let mut a = summary(&format!("part-{i}"), Some("a"), "Part");
+        a.tokens = 1_000;
+        artifacts.push(a);
+    }
+    assert_eq!(
+        inline_ids(&b, &artifacts).len(),
+        (INLINE_TOTAL_TOKENS / 1_000) as usize
+    );
+}
+
+#[test]
+fn a_retry_sees_what_its_last_try_saved_and_gets_more_turns_after_running_out() {
+    let task = task_in(LongTaskState::Running, None);
+    let artifacts = [summary("from-b-try-1", Some("b"), "Half the list")];
+    let retry = retry_of("b", OUT_OF_TURNS);
+    assert_eq!(
+        inline_ids(&retry, &artifacts),
+        vec!["from-b-try-1".to_string()]
+    );
+    assert!(
+        worker_brief(&task, &retry, &artifacts, &HashMap::new(), t(10)).contains("from-b-try-1")
+    );
+    assert!(
+        !worker_brief(
+            &task,
+            &step("b", 1, &["a"], StepState::Pending, 0),
+            &artifacts,
+            &HashMap::new(),
+            t(10)
+        )
+        .contains("from-b-try-1"),
+        "a first try is not shown work it has not done"
+    );
+    assert_eq!(turns_for(6, &retry), 9);
+    assert_eq!(turns_for(6, &retry_of("b", "the page would not load")), 6);
+    assert_eq!(turns_for(6, &step("b", 1, &[], StepState::Pending, 0)), 6);
+}
+
+#[test]
+fn an_empty_result_or_a_run_out_of_turns_fails_so_the_step_retries() {
+    let done = run(TaskStatus::Completed, Some("ok"));
+    let empty = StepOutcome::new(OutcomeKind::Completed, "done", Vec::new(), None);
+    match settle_run(Some(empty), &[], &done, true) {
+        RunEnd::Reported(o) => assert_eq!(o.failure(), Some(CAME_BACK_EMPTY)),
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    let real = StepOutcome::new(
+        OutcomeKind::Completed,
+        "Bus B is cheaper by 250 KES a seat.",
+        Vec::new(),
+        None,
+    );
+    assert_eq!(
+        settle_run(Some(real.clone()), &[], &done, true),
+        RunEnd::Reported(real),
+        "a result in the summary is a result"
+    );
+    let out = run(TaskStatus::TurnBudgetExhausted, None);
+    match settle_run(None, &["half".to_string()], &out, true) {
+        RunEnd::Reported(o) => {
+            assert_eq!(o.failure(), Some(OUT_OF_TURNS), "half-done work is retried")
+        }
+        other => panic!("expected a failure, got {other:?}"),
+    }
+    match settle_run(None, &["half".to_string()], &out, false) {
+        RunEnd::Reported(o) => assert_eq!(
+            o.outcome(),
+            OutcomeKind::Completed,
+            "on the last try, saved work stands"
+        ),
+        other => panic!("expected the saved work, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_result_saved_under_a_longer_title_is_still_the_result() {
+    let titled = |id: &str, title: &str| summary(id, Some("s"), title);
+    let exact = [
+        titled("a", "Final Trip Plan Result"),
+        titled("b", "Result"),
+        titled("c", "Notes"),
+    ];
+    assert_eq!(
+        result_artifact(&exact).map(|a| a.id.as_str()),
+        Some("b"),
+        "an exact Result wins"
+    );
+    let drifted = [
+        titled("a", "Search results for hotels"),
+        titled("b", "Arusha Trip Result"),
+        titled("c", "Calendar"),
+    ];
+    assert_eq!(result_artifact(&drifted).map(|a| a.id.as_str()), Some("b"));
+    let none = [
+        titled("a", "Search results"),
+        titled("b", "Resulting costs"),
+    ];
+    assert_eq!(
+        result_artifact(&none),
+        None,
+        "results and resulting are not the result"
+    );
+}
+
+#[test]
+fn a_run_stopped_after_it_reported_keeps_its_report() {
+    let reported = StepOutcome::new(
+        OutcomeKind::Completed,
+        "Bus B is cheaper by 250 KES a seat.",
+        Vec::new(),
+        None,
+    );
+    assert_eq!(
+        settle_run(
+            Some(reported.clone()),
+            &[],
+            &run(TaskStatus::Cancelled, None),
+            true
+        ),
+        RunEnd::Reported(reported),
+        "the runner stops a run once it reports; that must not throw the report away"
+    );
+    assert_eq!(
+        settle_run(None, &[], &run(TaskStatus::Cancelled, None), true),
+        RunEnd::Preempted,
+        "stopped before reporting, it reruns"
+    );
+}
+
+#[test]
+fn the_brief_carries_what_was_said_before_the_ask_to_the_planner_and_every_step() {
+    use crate::models::domain::message::Role;
+    let earlier = [
+        (Role::User, "We're four, and I'm lactose intolerant."),
+        (Role::Tool, "{\"tool\": \"weather\"}"),
+        (Role::Assistant, "Noted. When are you going?"),
+        (Role::User, "  "),
+    ];
+    let text = conversation_brief(&earlier).unwrap();
+    assert_eq!(
+        text,
+        "Earlier in the conversation:\nThe person: We're four, and I'm lactose intolerant.\nThe assistant: Noted. When are you going?"
+    );
+    assert_eq!(conversation_brief(&[]), None);
+    assert_eq!(conversation_brief(&[(Role::User, " ")]), None);
+
+    let long = "x".repeat(BRIEF_CHARS);
+    let many = [(Role::User, "first, dropped"), (Role::User, long.as_str())];
+    let kept = conversation_brief(&many).unwrap();
+    assert!(
+        !kept.contains("first, dropped"),
+        "the end of the conversation is kept"
+    );
+    assert!(kept.chars().count() <= BRIEF_CHARS + 40, "{}", kept.len());
+
+    let task = task_in(LongTaskState::Running, None);
+    let plan = planner_brief(&task, &[], &[], &[], &PlanReason::Fresh, Some(&text), t(10));
+    assert!(plan.contains("lactose intolerant"), "{plan}");
+
+    let mut brief = summary("brief-1", None, BRIEF_TITLE);
+    brief.tokens = 40;
+    let artifacts = [brief, summary("from-z", Some("z"), "Unrelated")];
+    let b = step("b", 1, &["a"], StepState::Pending, 0);
+    assert_eq!(
+        brief_artifact(&artifacts).map(|a| a.id.as_str()),
+        Some("brief-1")
+    );
+    assert_eq!(
+        inline_ids(&b, &artifacts),
+        vec!["brief-1".to_string()],
+        "every step is given the brief"
+    );
+    let bodies = HashMap::from([("brief-1".to_string(), text.clone())]);
+    assert!(worker_brief(&task, &b, &artifacts, &bodies, t(10)).contains("lactose intolerant"));
+
+    assert_eq!(clip_brief("  "), None);
+    assert_eq!(
+        clip_brief(&"y".repeat(BRIEF_CHARS + 10)).unwrap().len(),
+        BRIEF_CHARS
+    );
+}
+
+#[test]
+fn a_made_agent_gets_only_the_tasks_tools_and_the_workers_budget() {
+    use crate::shared::domain::long_task::StepAgent;
+    let worker = crate::shared::services::long_task_roles::worker_role().unwrap();
+    let agent = StepAgent {
+        name: "Fare Checker".into(),
+        instructions: "Compare matatu and SGR fares.".into(),
+        tools: vec![
+            "giap-knowledge".into(),
+            "giap-device".into(),
+            "giap-made-up".into(),
+        ],
+    };
+    let mut step = step("fares", 0, &[], StepState::Pending, 0);
+    step = PlanStep::from_parts(PlanStepParts {
+        role: "new:Fare Checker".into(),
+        agent: Some(agent.clone()),
+        ..step_parts(&step)
+    })
+    .unwrap();
+    let role = role_for_agent(&step, &agent, &worker).unwrap();
+    assert_eq!(role.name(), "new:Fare Checker");
+    let tools: Vec<&str> = role
+        .requested_tool_groups()
+        .iter()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        tools,
+        vec!["giap-knowledge", TASK_WORK_EXTENSION],
+        "no device control, nothing made up"
+    );
+    assert!(role
+        .instructions()
+        .contains("Compare matatu and SGR fares."));
+    assert!(role.instructions().contains("Never put a person's name"));
+    assert_eq!(role.max_turns(), worker.max_turns());
+}
+
+fn step_parts(step: &PlanStep) -> PlanStepParts {
+    PlanStepParts {
+        task_id: step.task_id().to_string(),
+        key: step.key().as_str().to_string(),
+        ordinal: step.ordinal(),
+        role: step.role().to_string(),
+        instructions: step.instructions().to_string(),
+        inputs: step.inputs().to_vec(),
+        depends_on: step
+            .depends_on()
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect(),
+        acceptance: step.acceptance().map(str::to_string),
+        state: step.state(),
+        attempts: step.attempts(),
+        summary: step.summary().map(str::to_string),
+        failure: step.failure().map(str::to_string),
+        started_at: step.started_at(),
+        finished_at: step.finished_at(),
+        agent: step.agent().cloned(),
+    }
 }

@@ -117,6 +117,32 @@ impl fmt::Display for LongTaskState {
     }
 }
 
+/// What a task is for, which decides how its planner and workers are briefed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongTaskKind {
+    #[default]
+    General,
+    /// A member asked for deep research: search, keep sources, end in a cited report.
+    Research,
+}
+
+impl LongTaskKind {
+    pub const ALL: [LongTaskKind; 2] = [LongTaskKind::General, LongTaskKind::Research];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LongTaskKind::General => "general",
+            LongTaskKind::Research => "research",
+        }
+    }
+
+    /// Exact stored spelling only; an unknown value is `None`, never a default kind.
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == raw)
+    }
+}
+
 /// Where one step of a plan is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -250,6 +276,7 @@ pub struct LongTask {
     origin_session_id: Option<String>,
     state: LongTaskState,
     budget: LongTaskBudget,
+    kind: LongTaskKind,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     finished_at: Option<DateTime<Utc>>,
@@ -266,6 +293,7 @@ pub struct LongTaskParts {
     pub state: LongTaskState,
     pub max_steps: u32,
     pub deadline: Option<DateTime<Utc>>,
+    pub kind: LongTaskKind,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -299,10 +327,16 @@ impl LongTask {
             origin_session_id,
             state: LongTaskState::Planning,
             budget,
+            kind: LongTaskKind::General,
             created_at: at,
             updated_at: at,
             finished_at: None,
         })
+    }
+
+    pub fn with_kind(mut self, kind: LongTaskKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Rebuild a stored task through the same checks; a row that fails them is an error.
@@ -316,6 +350,7 @@ impl LongTask {
             state,
             max_steps,
             deadline,
+            kind,
             created_at,
             updated_at,
             finished_at,
@@ -347,6 +382,7 @@ impl LongTask {
                 max_steps: max_steps.min(MAX_LONG_TASK_STEPS),
                 deadline,
             },
+            kind,
             created_at,
             updated_at,
             finished_at,
@@ -371,6 +407,10 @@ impl LongTask {
 
     pub fn origin_session_id(&self) -> Option<&str> {
         self.origin_session_id.as_deref()
+    }
+
+    pub fn kind(&self) -> LongTaskKind {
+        self.kind
     }
 
     pub fn state(&self) -> LongTaskState {
@@ -546,8 +586,12 @@ fn suggest_key(raw: &str) -> Option<String> {
 pub struct StepDraft {
     #[serde(alias = "id", alias = "step_key")]
     pub key: String,
-    #[serde(alias = "agent")]
+    /// Empty when the step makes its own agent with `new_agent`.
+    #[serde(default, alias = "agent")]
     pub role: String,
+    /// A new agent for this step, when no saved role fits.
+    #[serde(default, alias = "custom_agent")]
+    pub new_agent: Option<StepAgent>,
     #[serde(alias = "task", alias = "instruction")]
     pub instructions: String,
     /// Artifact ids the step starts from; it is shown their summaries, never their bodies.
@@ -568,6 +612,35 @@ pub struct StepDraft {
     pub depends_on: Vec<String>,
     #[serde(default, alias = "acceptance_check", alias = "check")]
     pub acceptance: Option<String>,
+}
+
+/// An agent a plan makes for one step because no saved role fits. The runner builds it from these
+/// and holds its tools to the task's ceiling, so a plan can ask for no more than a saved role has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepAgent {
+    pub name: String,
+    pub instructions: String,
+    #[serde(default, alias = "tool_groups", deserialize_with = "one_or_many")]
+    pub tools: Vec<String>,
+}
+
+/// A made agent's step names it `new:<name>`, so the card can tell it from a saved role.
+pub const NEW_AGENT_PREFIX: &str = "new:";
+
+/// Longest name a made agent may have; it is shown on the card.
+const AGENT_NAME_CHARS: usize = 40;
+
+impl StepAgent {
+    fn cleaned(self) -> Option<Self> {
+        let name: String = self.name.trim().chars().take(AGENT_NAME_CHARS).collect();
+        let instructions = self.instructions.trim().to_string();
+        let tools = clean_ids(self.tools);
+        (!name.is_empty() && !instructions.is_empty()).then_some(Self {
+            name,
+            instructions,
+            tools,
+        })
+    }
 }
 
 /// A small model writes `"a, b"` or `"a"` where a list belongs; keys and ids never hold commas.
@@ -604,6 +677,8 @@ pub struct PlanStep {
     failure: Option<String>,
     started_at: Option<DateTime<Utc>>,
     finished_at: Option<DateTime<Utc>>,
+    /// Set when the plan made this step's agent rather than naming a saved role.
+    agent: Option<StepAgent>,
 }
 
 /// A stored step's columns, for [`PlanStep::from_parts`]; holding one grants nothing.
@@ -623,6 +698,7 @@ pub struct PlanStepParts {
     pub failure: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    pub agent: Option<StepAgent>,
 }
 
 impl PlanStep {
@@ -657,11 +733,17 @@ impl PlanStep {
             failure: capped(parts.failure.as_deref()),
             started_at: parts.started_at,
             finished_at: parts.finished_at,
+            agent: parts.agent.and_then(StepAgent::cleaned),
         })
     }
 
     pub fn task_id(&self) -> &str {
         &self.task_id
+    }
+
+    /// The agent this plan made for the step, when it named no saved role.
+    pub fn agent(&self) -> Option<&StepAgent> {
+        self.agent.as_ref()
     }
 
     pub fn key(&self) -> &StepKey {
@@ -950,7 +1032,11 @@ pub fn validate_plan(
     let first_ordinal = kept.last().map_or(1, |step| step.ordinal.saturating_add(1));
     let mut steps = Vec::with_capacity(drafts.len());
     for (offset, (draft, key)) in drafts.into_iter().zip(keys.iter()).enumerate() {
-        let role = draft.role.trim();
+        let agent = draft.new_agent.and_then(StepAgent::cleaned);
+        let made_role = agent
+            .as_ref()
+            .map(|agent| format!("{NEW_AGENT_PREFIX}{}", agent.name));
+        let role = made_role.as_deref().unwrap_or(draft.role.trim());
         if role.is_empty() {
             return Err(PlanError::MissingRole {
                 step: key.to_string(),
@@ -993,6 +1079,7 @@ pub fn validate_plan(
             failure: None,
             started_at: None,
             finished_at: None,
+            agent,
         });
     }
 
@@ -1086,6 +1173,7 @@ pub fn validate_appended_step(
         failure: None,
         started_at: None,
         finished_at: None,
+        agent: None,
     });
     Ok(ValidatedPlan {
         task_id: task.id.clone(),
@@ -1909,6 +1997,7 @@ mod test_support {
             failure: None,
             started_at: None,
             finished_at: None,
+            agent: None,
         }
     }
 
@@ -2209,6 +2298,32 @@ mod task_tests {
     }
 
     #[test]
+    fn a_task_is_general_until_asked_and_its_kind_reads_back_exactly() {
+        let task = LongTask::start(
+            ProfileScope::Owner("liz".into()),
+            None,
+            "compare heat pumps",
+            None,
+            LongTaskBudget::new(3, None).unwrap(),
+            t(0),
+        )
+        .unwrap();
+        assert_eq!(task.kind(), LongTaskKind::General);
+        assert_eq!(
+            task.with_kind(LongTaskKind::Research).kind(),
+            LongTaskKind::Research
+        );
+        for kind in LongTaskKind::ALL {
+            assert_eq!(LongTaskKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(
+            LongTaskKind::parse("Research"),
+            None,
+            "only the stored spelling"
+        );
+    }
+
+    #[test]
     fn the_deadline_passes_at_its_instant() {
         let budget = LongTaskBudget::new(3, Some(t(100))).unwrap();
         assert!(!budget.deadline_passed(t(99)));
@@ -2228,6 +2343,7 @@ mod task_tests {
             state: LongTaskState::Paused,
             max_steps,
             deadline: None,
+            kind: LongTaskKind::Research,
             created_at: t(0),
             updated_at: t(5),
             finished_at: None,
@@ -2241,6 +2357,11 @@ mod task_tests {
         assert_eq!(task.state(), LongTaskState::Paused);
         assert_eq!(task.updated_at(), t(5));
         assert_eq!(task.budget().max_steps(), 4);
+        assert_eq!(
+            task.kind(),
+            LongTaskKind::Research,
+            "a stored kind survives the rebuild"
+        );
 
         assert_eq!(
             LongTask::from_parts(parts(MAX_LONG_TASK_STEPS + 10))
@@ -2355,6 +2476,7 @@ mod draft_tests {
                 inputs: vec!["a1".into(), "a2".into()],
                 depends_on: vec!["fetch".into()],
                 acceptance: Some("names a winner".into()),
+                new_agent: None,
             }
         );
     }

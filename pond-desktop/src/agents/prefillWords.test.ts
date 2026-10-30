@@ -23,9 +23,9 @@ function row(over: Partial<PrefillAgent> = {}): PrefillAgent {
 
 describe("naming an agent", () => {
   it("names the built-ins by their job, and anything else by its own name", () => {
-    expect(agentLabel("long-task-planner")).toBe("Long-task planner");
-    expect(agentLabel("long-task-worker")).toBe("Long-task worker");
-    expect(agentLabel("long-task-verifier")).toBe("Long-task verifier");
+    expect(agentLabel("long-task-planner")).toBe("Point Gander");
+    expect(agentLabel("long-task-worker")).toBe("Forager Gosling");
+    expect(agentLabel("long-task-verifier")).toBe("Sentinel Goose");
     expect(agentLabel("study-planner")).toBe("study-planner");
   });
 });
@@ -104,7 +104,7 @@ describe("Home's line while the pond builds", () => {
       "Getting agents ready (2 of 5): study-planner",
     );
     expect(buildLine({ active: true, current: "long-task-planner", done: 0, total: 4 })).toBe(
-      "Getting agents ready (0 of 4): Long-task planner",
+      "Getting agents ready (0 of 4): Point Gander",
     );
   });
 
@@ -140,3 +140,11 @@ describe("one sentence over every agent", () => {
     expect(prefillSummary([])).toBeNull();
   });
 });
+
+describe("an agent a plan made for one step", () => {
+  it("shows by its own name, marked as made for the task", () => {
+    expect(agentLabel("new:Fare Checker")).toBe("Fare Checker (made for this task)");
+    expect(agentLabel("new-ish")).toBe("new-ish");
+  });
+});
+

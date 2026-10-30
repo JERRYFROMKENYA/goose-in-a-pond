@@ -1000,11 +1000,16 @@ export interface LongTaskArtifact {
   created_at: string;
 }
 
+/** What a task is for; spellings are pond-core's `LongTaskKind`. */
+export type LongTaskKind = "general" | "research";
+
 /** A long task as the chat card shows it. */
 export interface LongTask {
   id: string;
   goal: string;
   state: LongTaskState;
+  /** Absent from an older pond, which only has general tasks. */
+  kind?: LongTaskKind;
   origin_session_id: string | null;
   created_at: string;
   updated_at: string;
@@ -1012,7 +1017,41 @@ export interface LongTask {
   steps: LongTaskStep[];
   artifacts: LongTaskArtifact[];
   result_artifact_id: string | null;
+  /** Where an open task waits; `null` once it has ended, and absent from an older pond. */
+  queue?: LongTaskQueuePlace | null;
 }
+
+/** A task ahead in the line: one of the caller's own or the household's, or only a place another member holds. */
+export type LongTaskAhead = { id: string; goal: string; state: LongTaskState } | { another_member: true };
+
+/** One slot works the household's long tasks in the order they were asked for; 1 is the one under way. */
+export interface LongTaskQueuePlace {
+  position: number;
+  of: number;
+  ahead: LongTaskAhead[];
+}
+
+/** One web page a report cites. */
+export interface LongTaskSource {
+  title: string;
+  url: string;
+}
+
+/** A task's whole report, from `GET /long-tasks/{id}/report`; `markdown` joins the summary and every section. */
+export interface LongTaskReport {
+  id: string;
+  title: string;
+  state: LongTaskState;
+  kind: LongTaskKind;
+  markdown: string;
+  /** How many drafted sections the report was joined from. */
+  sections: number;
+  sources: LongTaskSource[];
+  /** How many dated events it holds; a calendar file is offered only above 0. */
+  calendar_events: number;
+}
+
+export type LongTaskExportFormat = "markdown" | "html" | "ics";
 
 export interface LongTaskArtifactBody {
   id: string;
@@ -1046,7 +1085,17 @@ export interface ChatStreamRequest {
   images?: ImageAttachment[];
   /** Ask the server to keep this turn running if the connection drops. */
   resumable?: boolean;
+  /** The message is a research question: the pond starts deep research on it. */
+  deep_research?: boolean;
 }
+
+/**
+ * Answer of `GET /long-tasks/deep-research`. `off` means the household switched long tasks or the
+ * orchestrator off; `unidentified` means the pond cannot tell who is asking.
+ */
+export type DeepResearchAvailability =
+  | { available: true }
+  | { available: false; reason: "off" | "unidentified" };
 
 /** What the server is still driving for a session, from `GET .../active-run`. */
 export interface ActiveRun {
@@ -1094,6 +1143,8 @@ export interface TurnStats {
   context_pct: number | null;
   model_load_ms: number | null;
   inference_count: number;
+  // Null when no MTP drafter ran; optional because servers built before it omit the key.
+  draft_accept_rate?: number | null;
 }
 
 /** Mid-stream frame when `should_compact` is true. Unlike `CompactionReport`, `turns_remaining`

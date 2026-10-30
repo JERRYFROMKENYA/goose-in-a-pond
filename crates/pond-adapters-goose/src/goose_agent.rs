@@ -3069,7 +3069,8 @@ impl GooseAdapter {
         };
 
         // Same subtraction for the entitlement: the delegation authority is built from it.
-        let entitled_tools = entitled_tools.map(|tools| {
+        // Named, not inferred from later use: on macOS that inference overflows through objc2's impls.
+        let entitled_tools: Option<HashSet<String>> = entitled_tools.map(|tools| {
             if turn_scope.excludes_everything() {
                 pond_core::mcp::services::tool_selection::subtract_guest_denied_tools(tools.iter())
                     .into_iter()
@@ -3086,7 +3087,7 @@ impl GooseAdapter {
             )
             .into_iter()
             .collect();
-        let entitled_tools = entitled_tools.map(|tools| {
+        let entitled_tools: Option<HashSet<String>> = entitled_tools.map(|tools| {
             pond_core::mcp::services::tool_selection::subtract_helper_only_tools(tools.iter())
                 .into_iter()
                 .collect()
@@ -3194,6 +3195,12 @@ impl GooseAdapter {
             msg.push_str("<system-context>\n");
             if let Some(ref sc) = request.suggestion_context {
                 msg.push_str(&sc.render_envelope());
+                msg.push('\n');
+            }
+            if let Some(ref research) = request.deep_research_task {
+                msg.push_str(&pond_core::shared::services::deep_research::turn_note(
+                    research,
+                ));
                 msg.push('\n');
             }
             if !dynamic_suffix_for_user_msg.is_empty() {
@@ -4039,6 +4046,9 @@ impl GooseAdapter {
                 context_used_tokens = turn_stats.context_used_tokens,
                 context_limit_tokens = turn_stats.context_limit_tokens,
                 inference_count = turn_stats.inference_count,
+                // Always written, so `giap.sh doctor` can tell "no drafter ran" from an older server.
+                drafter = turn_stats.draft_accept_rate.is_some(),
+                draft_accept_rate = turn_stats.draft_accept_rate,
             );
             let stats = saw_usage.then_some(turn_stats);
             // Before Done: a client that stops reading at Done drops this stream.
@@ -4110,6 +4120,7 @@ impl AgentPort for GooseAdapter {
             // No completeness check: a whole extra round-trip for a ping nobody reads.
             warmup: true,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let shape = if voice_mode {
@@ -8000,6 +8011,7 @@ mod tests {
             tool_group_allowlist: None,
             warmup: false,
             suggestion_context: None,
+            deep_research_task: None,
         };
 
         let mut stream = adapter.chat_stream(request).await.unwrap();

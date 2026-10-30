@@ -1445,6 +1445,69 @@ saved, as an idle lane job, not on its first step.
   rides and cameras (`groups_denied_to_subagents`), so in P11 no step can act outward at all. P12
   adds the approval path that lets one do so.
 
+### 8.8 Deep research (Jerry, 2026-10-28)
+
+A member can ask for research from the chat composer's + menu, on the phone and the desktop,
+instead of waiting for the prime to decide a question needs a long task.
+
+| Piece | Design |
+|---|---|
+| Start | The turn is sent with `deep_research`. The pond starts the task itself, with the message as its goal, rather than relying on a small model to call `task_start`. |
+| Owner | The caller the long-task routes answer: the device's member, or the primary member on the pond's own desktop. So the chat card can always read the task it started. |
+| Record | `drive_turn` folds a `task_start` call and its result through `absorb` before the engine's events. The stream and the stored tool rows are those of the prime's own call, so the card anchors live and in history. |
+| The prime | The turn's `<system-context>` says the research has started, so the reply acknowledges it in a sentence or two and doesn't answer unresearched. |
+| Research | `LongTaskKind::Research` (migration 0067). The planner is told to gather with `search_web` and `get_wikipedia_article` before one step writes the `Result` report. Workers keep each source's title and link beside what it says. The helpers' tools are unchanged: `giap-knowledge` was already theirs. |
+| Refusals | `GET /long-tasks/deep-research` says whether this caller may use it, and the composer hides or disables the item. The stream refuses before saving anything: 409 when long tasks or the orchestrator are off, 403 when nobody is identified. |
+| Start time | The runner picks the task up on its next poll (30 s) once the household has been quiet for 30 s, as for any task. |
+| Length | A report is not one artifact a worker writes in one reply. Research tasks get 24 steps; the planner gathers, then gives each section a step that saves it as a draft, then writes the `Result` summary. `research_report::assemble` joins the summary and the drafts in plan order, then lists the pages they cite, so a report is as long as its plan and no context window holds it whole. |
+| Plans | A shipped `long-task-composer` role builds itineraries, meal plans and lists: a heading per day, time lists, tables, checklists, map links, the forecast, and what the household has said about who is coming and what they eat. Dated events go to a `Calendar` data artifact. Neither the composer nor a research step puts a person's name, health or diet in a web search. |
+| Export | `GET /long-tasks/{id}/report` gives the joined report and its sources. `GET /long-tasks/{id}/export` gives Markdown; a standalone page that prints or saves as a PDF, with every bit of markup the model wrote escaped, links only to web and mail addresses, and nothing fetched; or an iCalendar file of the plan's events. |
+| Names | The shipped helpers are shown as Point Gander (planner), Forager Gosling (worker), Sentinel Goose (verifier) and Nestmaker Goose (composer), and each recipe tells its helper its own name, so the planner sees the others' too. Their ids (`long-task-planner` and so on) are unchanged, since plans, snapshots and the prefill registry route by them. The main assistant keeps the name the household gives it. |
+| Pictures | None are generated: the Orin runs no image model. A report's pictures are links, and the export never loads them. |
+
+### 8.9 The line (Jerry, 2026-10-29)
+
+One slot works every open task, so a task asked for while others are open waits. A member was left
+looking at a card that said "Planning" for an hour and asked twice more. Now the pond says where each
+task waits and lets the member choose what keeps going.
+
+| Piece | Design |
+|---|---|
+| Order | `long_task_queue::run_order`: open tasks in the order they were asked for, and the runner finishes the front one before it starts the next. The runner, the routes and the prime all read it, so none of them can disagree. It replaced a pick by `updated_at`, meant to let tasks take turns. It did not: a step never touches `updated_at`, so the oldest task always won. |
+| Who sees what | A member sees the goal and progress of their own tasks and the household's. Another member's task is only a place in the line (`another_member`), never its goal. |
+| Routes | Every task's view carries `queue: {position, of, ahead}`, `null` once it has ended. `GET /long-tasks/queue` gives the whole line as the caller may see it. Stopping is `POST /long-tasks/{id}/cancel`, as before. |
+| The prime | A deep-research turn and `task_start`'s result say where the new task waits and whose tasks are ahead, so the reply tells the person it waits its turn and that its card lets them stop what they no longer need. |
+| The card | A waiting task says "Waiting its turn: 3rd in line" rather than "Planning". Below that are the member's own tasks ahead and this one, each with Keep going or Stop, and one button to stop the ones picked. |
+
+### 8.10 Pace (Jerry, 2026-10-29)
+
+Research has to stay deep and checked and get faster. Every change here removes waiting and
+re-reading. None removes a check.
+
+| Piece | Design |
+|---|---|
+| The lane | `select_next` gave the slot to whichever eligible job had waited longest, so a long task, which runs most often, lost every gap between steps to a chore. A member's task now goes before the pond's chores, after only a compaction a returning member waits on. A chore that has gone `CHORE_PATIENCE` (15 minutes) since its last run still gets one turn. |
+| Background subagents | The lane's "turn in flight" now also counts a held subagent permit. A background child outlives its parent's turn, and a chore used to start beside it. |
+| Between steps | A run that moved a task on is followed at once, with no 30 s poll and no 5 s floor, so a chore can't take the gap. The 30 s of quiet before a task starts is kept on purpose: a step is cancelled when the household speaks, so starting sooner mostly wastes work. |
+| Inputs | A step's inputs up to `INLINE_ARTIFACT_TOKENS` each and `INLINE_TOTAL_TOKENS` in all go in its brief whole. A worker then spends no turn and no re-prefill calling `artifact_read` first, and a small model can't skip reading them. Larger inputs stay pull-only (rule 2). |
+| Reliability | A helper that runs out of turns fails its first try instead of having half-done work counted as done. Its retry gets half again as many turns (capped at `MAX_ROLE_MAX_TURNS`), with what it saved inlined so it continues. A "completed" report with no artifact and a summary under 20 characters fails as empty and retries. The verifier, the retry and the planner's replan are unchanged. |
+
+### 8.11 Briefs (Jerry, 2026-10-29)
+
+A helper starts in an empty window and saw only the goal, so anything said earlier in the
+conversation was lost. "I'm lactose intolerant", said three messages before the ask, never reached
+the plan.
+
+| Piece | Design |
+|---|---|
+| The brief | A task-level `Brief` artifact (kind `note`, no step), saved when the task starts. It is in the planner's brief and inlined into every step's, ahead of the step's own inputs. No migration: it's an artifact like any other, scoped to the task's owner |
+| Deep research | The pond writes the brief itself from the conversation before the ask, up to `BRIEF_CHARS` (4,000), keeping the newest. The ask itself is the goal. No model call |
+| `task_start` | Takes `brief`. Its description asks for who it is for, dates and places, budget, diets and allergies, and what was decided or ruled out |
+| `delegate` | `instructions` asks for the same: a full brief, since the agent sees nothing of the conversation |
+| Saved or made agents | A plan step names a saved role, or carries `new_agent` (name, instructions, tools) when none fits. It is stored with the step (migration 0071) and named `new:<name>`. `role_for_agent` builds it from the shipped worker's turns and window share. Its tools are those it asked for within `LONG_TASK_ROOT_GROUPS`, always with the task-work tools. It runs on the conversation's model with the task's scope. It has no compiled snapshot, so its first run starts cold |
+| `delegate` with `new_agent` | The prime may make an agent for one request. `made_role` builds it, and `DelegationAuthority::delegate` narrows its tools to the prime's own, as for any delegate. The prime still can't choose a model |
+| Fuller sections | A research step writing a section is asked for 400 to 900 words of specifics, and a plan for every day or item with its times, places and costs. This is in the step's brief, not its role, so no snapshot is rebuilt |
+
 ---
 
 ## 9. Agents are recipes (designed 2026-10-28; P14-P18)
@@ -1520,6 +1583,9 @@ whose user messages differ from their first token, under `request_context::compi
   index. Anything else is rebuilt: **missing** (none matched), **unreadable** (llama.cpp refused
   it), **corrupt** (the checksum differs) or **stale** (it covers less than the preamble).
 - A compile call decodes one token at most and never resumes a chat's cache.
+- Nothing else may reach the engine under the scope, or it becomes the pair's first call. So the
+  engine admits a prompt by its window alone: a refused warm-up sends goose into a recovery
+  compaction, which runs inside the scope.
 
 The boot pass is a lane job, exempt from the activity gate, after the existing prewarm. The
 household's turns still come first.

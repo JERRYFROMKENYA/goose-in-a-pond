@@ -1,8 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
+  aheadWords,
   currentStep,
+  isWaiting,
+  ordinal,
+  placeWords,
   isEnded,
   isMoving,
+  isResearch,
   resultLine,
   resultOf,
   startedTaskId,
@@ -10,6 +15,7 @@ import {
   stepAgent,
   stepWords,
   strayTasks,
+  taskKindLabel,
   taskWords,
 } from "./longTaskWords";
 import { artifactOf, doneTask, OTHER_ID, STARTED_TEXT, stepOf, TASK_ID, taskOf } from "./longTaskFixtures";
@@ -56,6 +62,37 @@ describe("finding the task a tool result started", () => {
   });
 });
 
+describe("finding the task the pond itself started for deep research", () => {
+  const POND_TEXT = `Started task ${TASK_ID}. It runs in the background and will report here when it is done.`;
+  const POND_TOOL = "giap-tasks__task_start";
+
+  it("reads the text of a result the pond made, as it reads a model's", () => {
+    expect(startedTaskId(POND_TEXT, POND_TOOL)).toBe(TASK_ID);
+  });
+
+  it("reads a stored row whose call id is the pond's own, not a uuid the task is called by", () => {
+    const row = {
+      role: "tool" as const,
+      content: JSON.stringify({ tool_call_id: `deep-research-${OTHER_ID}`, tool: POND_TOOL, content: POND_TEXT }),
+    };
+    expect(startedTaskIdOfRow(row)).toBe(TASK_ID);
+  });
+});
+
+describe("what a task is for", () => {
+  it("calls a research task Deep research, for assistive tech", () => {
+    expect(isResearch(taskOf({ kind: "research" }))).toBe(true);
+    expect(taskKindLabel(taskOf({ kind: "research" }))).toBe("Deep research");
+  });
+
+  it("counts a general task, and one from a pond that does not say, as a long task", () => {
+    expect(isResearch(taskOf({ kind: "general" }))).toBe(false);
+    expect(isResearch(taskOf())).toBe(false);
+    expect(taskKindLabel(taskOf({ kind: "general" }))).toBe("Long task");
+    expect(taskKindLabel(taskOf())).toBe("Long task");
+  });
+});
+
 describe("a task in plain words", () => {
   it.each([
     ["planning", "Planning"],
@@ -97,7 +134,7 @@ describe("a task in plain words", () => {
   });
 
   it("names a built-in agent by its job and any other by the name it was saved under", () => {
-    expect(stepAgent({ role: "long-task-planner" })).toBe("Long-task planner");
+    expect(stepAgent({ role: "long-task-planner" })).toBe("Point Gander");
     expect(stepAgent({ role: "study-planner" })).toBe("study-planner");
   });
 });
@@ -137,5 +174,36 @@ describe("tasks no message points at", () => {
       third: taskOf({ id: "third", created_at: "2026-10-28T08:00:00Z" }),
     };
     expect(strayTasks(tasks, new Set(["third"])).map((t) => t.id)).toEqual([OTHER_ID, TASK_ID]);
+  });
+});
+
+describe("a task waiting its turn", () => {
+  const second = { position: 2, of: 3, ahead: [{ id: "a", goal: "Plan the trip", state: "running" as const }] };
+
+  it("says where it is in line instead of saying it is planning", () => {
+    expect(taskWords(taskOf({ state: "planning", steps: [], queue: second }))).toBe("Waiting its turn: 2nd in line");
+    expect(isWaiting(taskOf({ state: "planning", queue: second }))).toBe(true);
+  });
+
+  it("keeps its own words at the front of the line, once ended, and on an older pond", () => {
+    const front = { position: 1, of: 2, ahead: [] };
+    expect(taskWords(taskOf({ state: "planning", steps: [], queue: front }))).toBe("Planning");
+    expect(isWaiting(taskOf({ state: "cancelled", queue: second }))).toBe(false);
+    expect(isWaiting(taskOf({ state: "planning", queue: undefined }))).toBe(false);
+  });
+
+  it("counts places as people say them", () => {
+    expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101].map(ordinal)).toEqual([
+      "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "23rd", "101st",
+    ]);
+    expect(placeWords(1)).toBe("Working now");
+    expect(placeWords(3)).toBe("3rd in line");
+  });
+
+  it("says who is ahead without naming another member's task", () => {
+    const mine = { id: "a", goal: "Plan the trip", state: "running" as const };
+    expect(aheadWords([mine])).toBe("Ahead of this one: 1 of your tasks.");
+    expect(aheadWords([mine, { another_member: true }, mine])).toBe("Ahead of this one: 2 of your tasks and 1 for another member.");
+    expect(aheadWords([{ another_member: true }, { another_member: true }])).toBe("Ahead of this one: 2 for other members.");
   });
 });

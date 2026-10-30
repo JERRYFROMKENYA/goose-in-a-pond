@@ -2,13 +2,19 @@
 import type { PrefillAgent, PrefillBuild, PrefillStatus } from "../api/types";
 
 const BUILT_IN_LABELS: Record<string, string> = {
-  "long-task-planner": "Long-task planner",
-  "long-task-worker": "Long-task worker",
-  "long-task-verifier": "Long-task verifier",
+  "long-task-planner": "Point Gander",
+  "long-task-worker": "Forager Gosling",
+  "long-task-verifier": "Sentinel Goose",
+  "long-task-composer": "Nestmaker Goose",
 };
 
 /** A built-in by its job; anything else by the name it was saved under. */
+/** An agent a plan made for one step is named `new:<name>`; it shows by its name. */
+const MADE_AGENT = /^new:(.+)$/;
+
 export function agentLabel(name: string): string {
+  const made = MADE_AGENT.exec(name);
+  if (made) return `${made[1].trim()} (made for this task)`;
   return BUILT_IN_LABELS[name] ?? name;
 }
 

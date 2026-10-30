@@ -120,6 +120,11 @@ id = "GHSA-9hj8-73fh-9963"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0's legacy Shrink/Reduce/Implode decoder trusts an attacker-controlled ZIP64 size and can exhaust memory. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: the legacy decoders are zip's legacy-zip feature, which nothing in GIAP or goose enables; only deflate is compiled in."
 
+[[IgnoredVulns]]
+id = "GHSA-hjqx-j4rw-g7xv"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 ZipArchive::extract() validates symlink targets lexically, so a crafted archive can write outside the destination. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: no code in the build calls extract(); pond-server's buffalo_l download (model_download.rs) reads entries with by_index() and writes each to a fixed path chosen by file name."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]

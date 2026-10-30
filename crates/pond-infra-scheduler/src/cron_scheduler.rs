@@ -5,7 +5,8 @@ use anyhow::{bail, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use pond_core::user_data::domain::schedule::{
-    MissedRun, OneShotTimePassed, RunStatus, Schedule, ScheduleRun, SkipReason, TaskKind, CRON_ONCE,
+    MissedRun, MissedRunAnswer, NoMissedRun, OneShotTimePassed, RunStatus, Schedule, ScheduleRun,
+    SkipReason, TaskKind, CRON_ONCE,
 };
 use pond_core::user_data::ports::schedule_execution::ScheduleExecutor;
 use pond_core::user_data::ports::scheduler::{
@@ -48,6 +49,10 @@ struct PersistedTask {
     ask_if_missed: bool,
     #[serde(default)]
     missed_run: Option<MissedRun>,
+    /// The latest missed fire time already asked about, answered or not, so it is never asked
+    /// about twice.
+    #[serde(default)]
+    asked_through: Option<chrono::DateTime<Utc>>,
 }
 
 fn default_timezone() -> String {
@@ -270,11 +275,8 @@ impl CronSchedulerAdapter {
         if !record.ask_if_missed || record.paused || !recurring {
             return false;
         }
-        let since = record
-            .missed_run
-            .map(|m| m.due_at)
-            .or(record.last_run)
-            .or(record.created_at);
+        let fired_or_made = record.last_run.or(record.created_at);
+        let since = fired_or_made.max(record.asked_through);
         let Some(since) = since else {
             return false;
         };
@@ -293,7 +295,102 @@ impl CronSchedulerAdapter {
         }
         tracing::info!(task = %record.id, due_at = %due_at, "a run was missed; asking before running it");
         record.missed_run = Some(MissedRun { due_at });
+        record.asked_through = Some(due_at);
         true
+    }
+
+    /// Run `id` now, in the background; `caught_up_from` marks a missed run made late.
+    async fn start_run(
+        &self,
+        id: &str,
+        caught_up_from: Option<chrono::DateTime<Utc>>,
+    ) -> Result<()> {
+        use pond_core::user_data::domain::schedule::ScheduleResultEvent;
+
+        let (kind, label) = {
+            let guard = self.tasks.lock().await;
+            let entry = guard
+                .get(id)
+                .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
+            (Self::resolve_kind(entry), entry.persisted.label.clone())
+        };
+
+        let executor = self.executor.clone();
+        let tasks = self.tasks.clone();
+        let run_history = self.run_history.clone();
+        let result_tx = self.result_tx.clone();
+        let persist = self.persist.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            {
+                let mut guard = tasks.lock().await;
+                if let Some(entry) = guard.get_mut(&id) {
+                    entry.currently_running = true;
+                }
+            }
+            // Rules fire via `run_now`; their cooldown reads this stamp back after a restart.
+            CronSchedulerAdapter::stamp_fire(&tasks, &persist, &id).await;
+
+            let run_id = match caught_up_from {
+                Some(due_at) => run_history.record_late_start(&id, due_at).await,
+                None => run_history.record_start(&id).await,
+            };
+            let start = std::time::Instant::now();
+
+            // Broadcast "started" event so clients see progress immediately
+            if let Some(tx) = &result_tx {
+                let _ = tx.send(ScheduleResultEvent {
+                    schedule_id: id.clone(),
+                    schedule_label: label.clone(),
+                    run_id: run_id.clone(),
+                    status: RunStatus::Running,
+                    result: None,
+                    error: None,
+                    duration_ms: None,
+                });
+            }
+
+            let result = executor.execute(&id, &kind).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            let (status, result_text, error_text) = match &result {
+                Ok(text) => {
+                    run_history
+                        .record_finish(&run_id, RunStatus::Completed, Some(text.clone()), None)
+                        .await;
+                    (RunStatus::Completed, Some(text.clone()), None)
+                }
+                Err(e) => {
+                    tracing::error!("run_now task {id} failed: {e}");
+                    run_history
+                        .record_finish(&run_id, RunStatus::Failed, None, Some(e.to_string()))
+                        .await;
+                    (RunStatus::Failed, None, Some(e.to_string()))
+                }
+            };
+
+            if let Some(tx) = &result_tx {
+                let _ = tx.send(ScheduleResultEvent {
+                    schedule_id: id.clone(),
+                    schedule_label: label,
+                    run_id: run_id.clone(),
+                    status,
+                    result: result_text,
+                    error: error_text,
+                    duration_ms: Some(duration_ms),
+                });
+            }
+
+            // Mark not-running. `last_run` was stamped at fire time above.
+            {
+                let mut guard = tasks.lock().await;
+                if let Some(entry) = guard.get_mut(&id) {
+                    entry.currently_running = false;
+                }
+            }
+        });
+
+        Ok(())
     }
 
     // ── Internal job management ───────────────────────────────────────────────
@@ -540,7 +637,7 @@ impl RecurringJob {
         if let Ok(early) = (at - Utc::now()).to_std() {
             tokio::time::sleep(early).await;
         }
-        {
+        let unanswered = {
             let mut guard = self.tasks.lock().await;
             // A pause, delete or reshape swaps the task's job id; a superseded job stays quiet.
             if guard.get(&self.id).map(|e| e.job_id) != Some(fired) {
@@ -564,6 +661,15 @@ impl RecurringJob {
                      edited or the pond restarts"
                 ),
             }
+            // The next fire time came before an answer; the run below saves the cleared question.
+            guard
+                .get_mut(&self.id)
+                .and_then(|e| e.persisted.missed_run.take())
+        };
+        if let Some(missed) = unanswered {
+            self.run_history
+                .record_skipped(&self.id, missed.due_at, SkipReason::NobodyAnswered.as_str())
+                .await;
         }
         tracing::info!(
             task = %self.id,
@@ -777,6 +883,7 @@ impl SchedulerPort for CronSchedulerAdapter {
             fire_at,
             ask_if_missed: req.ask_if_missed,
             missed_run: None,
+            asked_through: None,
         };
 
         // Held from registration to insert, so an occurrence due at once finds its entry.
@@ -937,95 +1044,28 @@ impl SchedulerPort for CronSchedulerAdapter {
     }
 
     async fn run_now(&self, id: &str) -> Result<()> {
-        use pond_core::user_data::domain::schedule::ScheduleResultEvent;
-
-        let (kind, label) = {
-            let guard = self.tasks.lock().await;
-            let entry = guard
-                .get(id)
-                .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
-            (Self::resolve_kind(entry), entry.persisted.label.clone())
-        };
-
-        let executor = self.executor.clone();
-        let tasks = self.tasks.clone();
-        let run_history = self.run_history.clone();
-        let result_tx = self.result_tx.clone();
-        let persist = self.persist.clone();
-        let id = id.to_string();
-        tokio::spawn(async move {
-            {
-                let mut guard = tasks.lock().await;
-                if let Some(entry) = guard.get_mut(&id) {
-                    entry.currently_running = true;
-                }
-            }
-            // Rules fire via `run_now`; their cooldown reads this stamp back after a restart.
-            CronSchedulerAdapter::stamp_fire(&tasks, &persist, &id).await;
-
-            let run_id = run_history.record_start(&id).await;
-            let start = std::time::Instant::now();
-
-            // Broadcast "started" event so clients see progress immediately
-            if let Some(tx) = &result_tx {
-                let _ = tx.send(ScheduleResultEvent {
-                    schedule_id: id.clone(),
-                    schedule_label: label.clone(),
-                    run_id: run_id.clone(),
-                    status: RunStatus::Running,
-                    result: None,
-                    error: None,
-                    duration_ms: None,
-                });
-            }
-
-            let result = executor.execute(&id, &kind).await;
-            let duration_ms = start.elapsed().as_millis() as u64;
-
-            let (status, result_text, error_text) = match &result {
-                Ok(text) => {
-                    run_history
-                        .record_finish(&run_id, RunStatus::Completed, Some(text.clone()), None)
-                        .await;
-                    (RunStatus::Completed, Some(text.clone()), None)
-                }
-                Err(e) => {
-                    tracing::error!("run_now task {id} failed: {e}");
-                    run_history
-                        .record_finish(&run_id, RunStatus::Failed, None, Some(e.to_string()))
-                        .await;
-                    (RunStatus::Failed, None, Some(e.to_string()))
-                }
-            };
-
-            if let Some(tx) = &result_tx {
-                let _ = tx.send(ScheduleResultEvent {
-                    schedule_id: id.clone(),
-                    schedule_label: label,
-                    run_id: run_id.clone(),
-                    status,
-                    result: result_text,
-                    error: error_text,
-                    duration_ms: Some(duration_ms),
-                });
-            }
-
-            // Mark not-running. `last_run` was stamped at fire time above.
-            {
-                let mut guard = tasks.lock().await;
-                if let Some(entry) = guard.get_mut(&id) {
-                    entry.currently_running = false;
-                }
-            }
-        });
-
-        Ok(())
+        self.start_run(id, None).await
     }
 
     async fn update_task(&self, id: &str, req: UpdateScheduleRequest) -> Result<Schedule> {
         // Validated at the store, as in `create_task`.
         if let Some(kind) = &req.kind {
             validate_kind(kind)?;
+        }
+
+        // Switching asking off settles a waiting question; the save below keeps it settled.
+        if req.ask_if_missed == Some(false) {
+            let waiting = {
+                let mut guard = self.tasks.lock().await;
+                guard
+                    .get_mut(id)
+                    .and_then(|e| e.persisted.missed_run.take())
+            };
+            if let Some(missed) = waiting {
+                self.run_history
+                    .record_skipped(id, missed.due_at, SkipReason::AskingTurnedOff.as_str())
+                    .await;
+            }
         }
 
         // `fire_at` (given, or derived via `once`) makes a one-shot with the `"@once"` cron;
@@ -1119,6 +1159,32 @@ impl SchedulerPort for CronSchedulerAdapter {
 
     async fn get_runs(&self, schedule_id: &str, limit: u32) -> Result<Vec<ScheduleRun>> {
         Ok(self.run_history.get_runs(schedule_id, limit).await)
+    }
+
+    async fn answer_missed_run(&self, id: &str, answer: MissedRunAnswer) -> Result<()> {
+        // Taken under the lock: of two answers, only the first finds the question.
+        let due_at = {
+            let mut guard = self.tasks.lock().await;
+            let entry = guard
+                .get_mut(id)
+                .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
+            entry
+                .persisted
+                .missed_run
+                .take()
+                .ok_or_else(|| NoMissedRun { id: id.to_string() })?
+                .due_at
+        };
+        self.save().await?;
+        match answer {
+            MissedRunAnswer::Run => self.start_run(id, Some(due_at)).await,
+            MissedRunAnswer::Skip => {
+                self.run_history
+                    .record_skipped(id, due_at, SkipReason::ByMember.as_str())
+                    .await;
+                Ok(())
+            }
+        }
     }
 
     async fn list_upcoming(&self, limit: u32) -> Result<Vec<Schedule>> {
@@ -2040,6 +2106,135 @@ mod tests {
         );
     }
 
+    /// A restarted scheduler asking about one missed morning of `morning`, and when it was due.
+    async fn asking_about_a_missed_morning(
+        dir: &std::path::Path,
+    ) -> (CronSchedulerAdapter, chrono::DateTime<Utc>) {
+        let two_days_ago = Utc::now() - chrono::Duration::days(2);
+        let sched = restart_with(dir, &[daily_since("morning", true, two_days_ago)]).await;
+        let due = sched.list_tasks().await.unwrap()[0]
+            .missed_run
+            .unwrap()
+            .due_at;
+        (sched, due)
+    }
+
+    async fn settled_runs(sched: &CronSchedulerAdapter) -> Vec<ScheduleRun> {
+        for _ in 0..50 {
+            let runs = sched.get_runs("morning", 10).await.unwrap();
+            if !runs.is_empty() && runs.iter().all(|r| r.status != RunStatus::Running) {
+                return runs;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("no settled run");
+    }
+
+    #[tokio::test]
+    async fn skipping_a_missed_run_records_it_and_settles_the_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sched, due) = asking_about_a_missed_morning(tmp.path()).await;
+
+        sched
+            .answer_missed_run("morning", MissedRunAnswer::Skip)
+            .await
+            .unwrap();
+
+        let runs = settled_runs(&sched).await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, RunStatus::Skipped);
+        assert_eq!(runs[0].started_at, due);
+        assert_eq!(
+            runs[0].result.as_deref(),
+            Some(SkipReason::ByMember.as_str())
+        );
+        drop(sched);
+        let reopened = make_scheduler(tmp.path()).await;
+        assert_eq!(reopened.list_tasks().await.unwrap()[0].missed_run, None);
+    }
+
+    #[tokio::test]
+    async fn running_a_missed_run_runs_it_late_and_a_second_answer_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sched, due) = asking_about_a_missed_morning(tmp.path()).await;
+
+        sched
+            .answer_missed_run("morning", MissedRunAnswer::Run)
+            .await
+            .unwrap();
+        let second = sched
+            .answer_missed_run("morning", MissedRunAnswer::Skip)
+            .await
+            .expect_err("the first answer settled it");
+        assert!(second.downcast_ref::<NoMissedRun>().is_some(), "{second}");
+
+        let runs = settled_runs(&sched).await;
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, RunStatus::Completed);
+        assert_eq!(runs[0].caught_up_from, Some(due));
+    }
+
+    #[tokio::test]
+    async fn turning_asking_off_settles_a_waiting_question() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sched, due) = asking_about_a_missed_morning(tmp.path()).await;
+
+        sched
+            .update_task(
+                "morning",
+                UpdateScheduleRequest {
+                    ask_if_missed: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let runs = settled_runs(&sched).await;
+        assert_eq!(runs[0].started_at, due);
+        assert_eq!(
+            runs[0].result.as_deref(),
+            Some(SkipReason::AskingTurnedOff.as_str())
+        );
+        drop(sched);
+        let reopened = make_scheduler(tmp.path()).await;
+        assert_eq!(reopened.list_tasks().await.unwrap()[0].missed_run, None);
+    }
+
+    #[tokio::test]
+    async fn a_question_closes_as_unanswered_when_the_next_run_comes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let every_second = PersistedTask {
+            cron: "* * * * * *".into(),
+            ..daily_since("morning", true, Utc::now() - chrono::Duration::days(2))
+        };
+        let sched = restart_with(tmp.path(), &[every_second]).await;
+        let due = sched.list_tasks().await.unwrap()[0]
+            .missed_run
+            .unwrap()
+            .due_at;
+
+        let mut runs = Vec::new();
+        for _ in 0..150 {
+            runs = sched.get_runs("morning", 10).await.unwrap();
+            if runs.iter().any(|r| r.status == RunStatus::Completed) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let skipped: Vec<_> = runs
+            .iter()
+            .filter(|r| r.status == RunStatus::Skipped)
+            .collect();
+        assert_eq!(skipped.len(), 1, "{runs:?}");
+        assert_eq!(skipped[0].started_at, due);
+        assert_eq!(
+            skipped[0].result.as_deref(),
+            Some(SkipReason::NobodyAnswered.as_str())
+        );
+        assert_eq!(sched.list_tasks().await.unwrap()[0].missed_run, None);
+    }
+
     #[tokio::test]
     async fn an_old_question_closes_as_unanswered_when_a_newer_run_is_missed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2053,6 +2248,7 @@ mod tests {
         .unwrap();
         let waiting = PersistedTask {
             missed_run: Some(MissedRun { due_at: old_due }),
+            asked_through: Some(old_due),
             ..daily_since("asks", true, three_days_ago)
         };
         let sched = restart_with(tmp.path(), &[waiting]).await;
@@ -2328,6 +2524,7 @@ mod tests {
                 last_run: None,
                 ask_if_missed: false,
                 missed_run: None,
+                asked_through: None,
             })
             .collect()
     }

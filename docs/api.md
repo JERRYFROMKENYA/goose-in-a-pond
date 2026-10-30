@@ -1175,6 +1175,8 @@ start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, cu
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |
 | `POST /schedules/{id}/run-now` | | `202 {fired}` |
+| `POST /schedules/{id}/missed/run` | | `202 {fired}`: runs the waiting missed run now; its run carries `caught_up_from`. `409 code: "no_missed_run"` when nothing is waiting, including when another answer came first |
+| `POST /schedules/{id}/missed/skip` | | `200 {skipped}`: records it `skipped`, "Skipped by a household member". `409 code: "no_missed_run"` as above |
 | `GET /schedules/{id}/runs` | `?limit=` | `[ScheduleRun {id, schedule_id, status, result, error, started_at, finished_at, duration_ms, caught_up_from?}]`; `status` is `running`, `completed`, `failed` or `skipped` |
 | `GET /schedules/events` | | SSE; each `data` is `ScheduleResultEvent {schedule_id, schedule_label, run_id, status, result, error, duration_ms}` |
 

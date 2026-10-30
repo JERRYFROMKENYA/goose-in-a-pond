@@ -386,6 +386,23 @@ impl SkipReason {
     }
 }
 
+/// How the household answered a missed-run question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissedRunAnswer {
+    /// Run it now, late.
+    Run,
+    /// Record it skipped.
+    Skip,
+}
+
+/// Answering a missed-run question that is no longer waiting: someone answered first, or it
+/// closed. Callers downcast an `anyhow::Error` to this to answer with a conflict.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("schedule '{id}' has no missed run waiting for an answer")]
+pub struct NoMissedRun {
+    pub id: String,
+}
+
 /// A missed fire time the household has been asked about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MissedRun {

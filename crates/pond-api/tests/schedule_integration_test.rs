@@ -5,7 +5,10 @@ use axum::http::{Request, StatusCode};
 use pond_api::{build_router, AppState};
 use pond_core::shared::mocks::mock_agent::MockAgent;
 use pond_core::user_data::domain::onboarding::OnboardingStep;
-use pond_core::user_data::domain::schedule::{OneShotTimePassed, Schedule, ScheduleRun, CRON_ONCE};
+use pond_core::user_data::domain::schedule::{
+    MissedRun, MissedRunAnswer, NoMissedRun, OneShotTimePassed, Schedule, ScheduleRun, TaskKind,
+    CRON_ONCE,
+};
 use pond_core::user_data::mocks::mock_memory::MockMemoryRepository;
 use pond_core::user_data::mocks::mock_profile::MockProfileRepository;
 use pond_core::user_data::mocks::mock_sensor::{MockCameraStorage, MockSensorStorage};
@@ -197,6 +200,17 @@ impl SchedulerPort for InMemoryScheduler {
         Ok(task.clone())
     }
 
+    async fn answer_missed_run(&self, id: &str, _answer: MissedRunAnswer) -> anyhow::Result<()> {
+        let mut guard = self.tasks.lock().await;
+        let task = guard
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("not found"))?;
+        task.missed_run
+            .take()
+            .map(|_| ())
+            .ok_or_else(|| NoMissedRun { id: id.to_string() }.into())
+    }
+
     async fn get_runs(&self, _schedule_id: &str, _limit: u32) -> anyhow::Result<Vec<ScheduleRun>> {
         Ok(vec![])
     }
@@ -216,6 +230,10 @@ impl SchedulerPort for InMemoryScheduler {
 // ── App factory ───────────────────────────────────────────────────────────────
 
 async fn make_app() -> (axum::Router, tempfile::TempDir) {
+    make_app_with(Arc::new(InMemoryScheduler::new())).await
+}
+
+async fn make_app_with(scheduler: Arc<InMemoryScheduler>) -> (axum::Router, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let db = pond_infra::db::Database::init(tmp.path()).await.unwrap();
     let session_storage = Arc::new(SqliteSessionStorage::new(db.system.clone()));
@@ -223,7 +241,7 @@ async fn make_app() -> (axum::Router, tempfile::TempDir) {
     let mock_hs = MockHandshake::new();
     mock_hs.add_valid_token("test-token".to_string()).await;
 
-    let scheduler: Option<Arc<dyn SchedulerPort>> = Some(Arc::new(InMemoryScheduler::new()));
+    let scheduler: Option<Arc<dyn SchedulerPort>> = Some(scheduler);
 
     let state = Arc::new(AppState {
         warmup: Default::default(),
@@ -852,4 +870,64 @@ async fn asking_if_missed_is_set_on_create_and_changed_on_edit() {
         .await
         .unwrap();
     assert_eq!(json_body(edited).await["ask_if_missed"], false);
+}
+
+#[tokio::test]
+async fn the_first_answer_to_a_missed_run_settles_it_and_a_second_is_a_conflict() {
+    let scheduler = Arc::new(InMemoryScheduler::new());
+    scheduler
+        .create_task(CreateScheduleRequest {
+            id: "morning".into(),
+            label: "Morning".into(),
+            cron: "0 30 6 * * *".into(),
+            fire_at: None,
+            once: false,
+            timezone: "UTC".into(),
+            kind: TaskKind::AgentPrompt {
+                prompt: "good morning".into(),
+            },
+            ask_if_missed: true,
+        })
+        .await
+        .unwrap();
+    scheduler
+        .tasks
+        .lock()
+        .await
+        .get_mut("morning")
+        .unwrap()
+        .missed_run = Some(MissedRun {
+        due_at: chrono::Utc::now() - chrono::Duration::hours(3),
+    });
+    let (app, _tmp) = make_app_with(scheduler).await;
+
+    let skip = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/v1/schedules/morning/missed/skip",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(skip.status(), StatusCode::OK);
+
+    let again = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/v1/schedules/morning/missed/run",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(again).await["code"], "no_missed_run");
+
+    let unknown = app
+        .oneshot(auth_post(
+            "/api/v1/schedules/nope/missed/run",
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
 }

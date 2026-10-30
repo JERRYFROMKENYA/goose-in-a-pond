@@ -125,6 +125,11 @@ id = "GHSA-hjqx-j4rw-g7xv"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0 ZipArchive::extract() validates symlink targets lexically, so a crafted archive can write outside the destination. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: no code in the build calls extract(); pond-server's buffalo_l download (model_download.rs) reads entries with by_index() and writes each to a fixed path chosen by file name."
 
+[[IgnoredVulns]]
+id = "GHSA-q7v9-x93c-xqv3"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 does not bound symlink targets during extraction, so a crafted archive can abort or exhaust memory. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: it is in extraction, and no code in the build calls extract() or creates symlinks from archive entries."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]

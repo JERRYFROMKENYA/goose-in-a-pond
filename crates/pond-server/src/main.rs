@@ -2479,7 +2479,7 @@ async fn run_server(
                                 target: "giap::trace",
                                 kind = "session_retitled",
                                 session_id = %session.id,
-                                title = %title,
+                                title_chars = title.chars().count(),
                             );
                         }
                         Ok(RetitleOutcome::Cancelled) => {
@@ -3612,7 +3612,29 @@ async fn run_server(
     > = Some(Arc::new(SqliteOperationalLog::new(db.logs.clone())));
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
-    let _file_guard = drain_handle.drain_into(operational_log.clone());
+    let household_names = tracing_setup::HouseholdNames::default();
+    let _file_guard = drain_handle.drain_into(
+        operational_log.clone(),
+        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+    );
+    // A new or renamed member is hidden from the Logs viewer within a minute.
+    {
+        let profiles = profile_repo.clone();
+        tokio::spawn(async move {
+            let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                every_minute.tick().await;
+                match profiles.list().await {
+                    Ok(members) => {
+                        household_names.set(members.iter().map(|m| m.display_name.as_str()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not read members' names to hide from the logs")
+                    }
+                }
+            }
+        });
+    }
 
     let telemetry: Option<Arc<dyn pond_core::security::ports::telemetry::TelemetryPort>> =
         match SqliteTelemetry::new(db.logs.clone()).await {

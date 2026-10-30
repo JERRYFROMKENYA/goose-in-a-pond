@@ -1263,7 +1263,8 @@ What the tool keeps:
 - Search sources are held that long only to answer this check. They are never stored or shown.
 
 A refusal is a dead end that names `search_web` only while a search key is stored, so it never
-offers a tool the turn does not hold (R7).
+offers a tool the turn does not hold (R7). It is traced as `web_page_unknown` with the host
+alone: the rest of an address nobody gave may be the data it carries.
 
 What the rule costs: a link found inside a page cannot be followed (9.6).
 
@@ -1293,7 +1294,8 @@ What the rule costs: a link found inside a page cannot be followed (9.6).
    - otherwise, the lines the search's ranker scores for the question, each ranked with its
      section's name in front, up to 2,400 bytes. They are shown in page order, under `[Part n:
      name]` and their section's heading, then the outline ("This page has 5 parts: 1 Fares, 2
-     Timetable, …");
+     Timetable, …"). A heading is never quoted as a line, nor a line of fewer than three words
+     unless it is a table row: on the Orin, BM25 ranked "- Mombasa" above whole sentences;
    - when no line scores, part 1 and the outline.
 5. **Cache.** The last 8 pages read, for 10 minutes. A part asked for after a question costs no
    second fetch.

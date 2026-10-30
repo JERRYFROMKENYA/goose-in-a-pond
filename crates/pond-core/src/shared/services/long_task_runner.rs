@@ -768,9 +768,13 @@ pub fn tools_withheld(role_name: &str) -> &'static [&'static str] {
 }
 
 /// What a helper is told when it stops with turns left but has not reported.
-pub const REPORT_NUDGE: &str = "You stopped without calling step_report, so your step is not \
-     finished. Call step_report now: outcome completed or failed, a few sentences on what you did, \
-     and the ids of the artifacts you saved.";
+/// Both ways out, since a composer that wrote its plan as a reply was told to report, was refused
+/// for having saved nothing, and lost the step.
+pub const REPORT_NUDGE: &str = "You stopped before your step was finished. If you have not saved \
+     your work, save it now with artifact_write: a title, a one-line summary, the whole of your \
+     work as the body, and finish true, which also reports the step. If you saved it already, \
+     call step_report: outcome completed or failed, a few sentences on what you did, and the ids \
+     of the artifacts you saved.";
 
 /// One hand-back per run: the reported one; else, when the helper saved work, that work; else one
 /// read from its last text; else a failure that says why there is none.

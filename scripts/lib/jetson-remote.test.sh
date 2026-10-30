@@ -30,6 +30,8 @@ world() {
   W="$SCRATCH/w.$RANDOM$RANDOM"; mkdir -p "$W/home" "$W/bin"
   export HOME="$W/home" PATH="$W/bin:$TOOLS" W
   export JETSON_RETRY_DELAY=0 JETSON_POLL_SECONDS=0 JETSON_FOLLOW_PATIENCE=5
+  # No system unit unless a test makes one: the host running the tests may have the real one.
+  export JETSON_POND_UNIT="$W/no-unit"
   unset GIAP_STATE_DIR
   : >"$W/ssh.log"; : >"$W/rsync.log"; : >"$W/reachable"
   printf 'nano.local\n' >"$W/hostname"

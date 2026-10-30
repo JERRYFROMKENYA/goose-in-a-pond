@@ -7544,8 +7544,6 @@ fn roles_fingerprint(roles: &[pond_core::shared::domain::orchestration::AgentRol
     hasher.finish()
 }
 
-/// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.
-#[allow(clippy::too_many_arguments)]
 /// Seconds until a waiting task's quiet is due, at least `RECHECK_SECS`: a turn in flight reads as no
 /// quiet at all, and the turn's end is not announced to the runner.
 fn quiet_due_in(idle_for: std::time::Duration, quiet_secs: u64, poll_secs: u64) -> u64 {
@@ -7555,6 +7553,8 @@ fn quiet_due_in(idle_for: std::time::Duration, quiet_secs: u64, poll_secs: u64) 
         .clamp(RECHECK_SECS, poll_secs)
 }
 
+/// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.
+#[allow(clippy::too_many_arguments)]
 async fn advance_long_task(
     task: &pond_core::shared::domain::long_task::LongTask,
     tasks: &dyn pond_core::shared::ports::long_task::LongTaskRepository,

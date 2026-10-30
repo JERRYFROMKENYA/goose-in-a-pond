@@ -154,6 +154,12 @@ the lines that answer the question, or one part whole.")]
         let address = match page_addresses::global().resolve(&asked_address) {
             Some(address) => address,
             None => {
+                // The host only: the rest of an address nobody gave may be the data it carries.
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "web_page_unknown",
+                    host = %web_search::domain_of(&asked_address),
+                );
                 let searchable = crate::secrets::secret(BRAVE_SEARCH_API_KEY)
                     .await
                     .is_some_and(|k| !k.trim().is_empty());
@@ -344,6 +350,22 @@ struct Line {
     text: String,
     section: Option<String>,
     heading: bool,
+}
+
+/// Words a line needs to be quoted for a question. A table row is exempt: its label names its value.
+const MIN_QUOTED_WORDS: usize = 3;
+
+impl Line {
+    /// Whether the line may answer a question alone. A heading is printed above the lines it
+    /// heads, and BM25 ranks a one-word item such as "- Mombasa" above whole sentences.
+    fn is_quotable(&self) -> bool {
+        let words = self
+            .text
+            .trim_start_matches(['-', '>', ' '])
+            .split_whitespace()
+            .count();
+        !self.heading && (self.text.contains(" | ") || words >= MIN_QUOTED_WORDS)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -660,24 +682,30 @@ impl Page {
     /// The lines that answer `question` within [`ANSWER_BYTES`], in page order under their parts;
     /// `None` when no line shares a word or an answer's shape with it.
     fn quote(&self, question: &str) -> Option<String> {
-        let candidates: Vec<String> = self
-            .lines
+        let eligible: Vec<usize> = (0..self.lines.len())
+            .filter(|&i| self.lines[i].is_quotable())
+            .collect();
+        let candidates: Vec<String> = eligible
             .iter()
-            .map(|l| match &l.section {
-                Some(s) if !l.heading => format!("{s}: {}", l.text),
-                _ => l.text.clone(),
+            .map(|&i| {
+                let line = &self.lines[i];
+                match &line.section {
+                    Some(s) => format!("{s}: {}", line.text),
+                    None => line.text.clone(),
+                }
             })
             .collect();
         let ranked = passages::rank(question, &candidates);
         let mut chosen: Vec<usize> = Vec::new();
         let mut used = 0usize;
         for r in ranked.iter().filter(|r| r.score > 0.0) {
-            let cost = self.lines[r.index].text.len() + 1;
+            let index = eligible[r.index];
+            let cost = self.lines[index].text.len() + 1;
             if used + cost > ANSWER_BYTES {
                 continue;
             }
             used += cost;
-            chosen.push(r.index);
+            chosen.push(index);
         }
         if chosen.is_empty() {
             return None;
@@ -917,6 +945,28 @@ mod tests {
     }
 
     #[test]
+    fn a_question_never_quotes_a_heading_or_a_bare_name() {
+        let page = long_page();
+        let line = |text: &str| Line {
+            text: text.into(),
+            section: None,
+            heading: false,
+        };
+        assert!(!line("- Mombasa").is_quotable());
+        assert!(line("Closed on Sundays.").is_quotable());
+        assert!(line("Economy | KSh 1,500").is_quotable());
+        let reply = page.reply(&Request {
+            question: "Fares".into(),
+            part: None,
+        });
+        assert!(
+            !reply.text.contains("\n## Fares\n## Fares"),
+            "a heading is not quoted as a line: {}",
+            reply.text
+        );
+    }
+
+    #[test]
     fn a_part_is_given_whole_and_a_missing_one_is_named() {
         let page = long_page();
         let reply = page.reply(&Request {
@@ -1011,5 +1061,33 @@ mod tests {
         for key in ["url", "question", "part"] {
             assert!(props.contains_key(key), "{key} missing: {schema}");
         }
+    }
+}
+
+/// Real pages read as the tool reads them, printing each reply: `PAGE_URL=<url>
+/// PAGE_QUESTION=<question> cargo test -p pond-mcp-server live_page -- --ignored --nocapture`.
+#[cfg(test)]
+mod live {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_page_reply() {
+        let url = std::env::var("PAGE_URL").expect("set PAGE_URL");
+        let question = std::env::var("PAGE_QUESTION").unwrap_or_default();
+        let part = std::env::var("PAGE_PART").ok().and_then(|p| p.parse().ok());
+        let page = read_page(&url).await.unwrap_or_else(|why| panic!("{why}"));
+        if std::env::var("DUMP_LINES").is_ok() {
+            for (i, line) in page.lines.iter().enumerate() {
+                eprintln!("{:>4} [{}] {}", i, page.part_of(i) + 1, line.text);
+            }
+        }
+        let reply = page.reply(&Request { question, part });
+        eprintln!(
+            "--- {} ({} bytes)\n{}",
+            reply.mode,
+            reply.text.len(),
+            reply.text
+        );
     }
 }

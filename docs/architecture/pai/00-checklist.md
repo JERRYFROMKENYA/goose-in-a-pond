@@ -4101,3 +4101,24 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
     - a short answer left only in a step's summary.
   - In round five the pond chose correctly in all four asks, and in round six in all three.
   - Not verified: a made agent's step on the Orin. The planner made one only when its `new_agent` was unreadable, and that is now dropped.
+
+**2026-10-28, re-planned 2026-10-30 — the context space, designed; no code.**
+
+- [`context-space.md`](../context-space.md) proposes one item store, one multimodal index
+  (EmbeddingGemma 2) and context agents in place of memories, summaries, the three corpora,
+  suggestions and proactive review. It touches PAI-1, -2, -3, -6, -7 and -8. Status: `DESIGNED`,
+  re-checked against `0309bf0d`.
+- The re-plan builds on what landed on 28 and 29 October rather than beside it:
+  - the context agents are shipped recipes (PAI-6 section 9), with two activations and three hooks
+    added to the catalog;
+  - planning is the existing long-task composer;
+  - the embedding slot sits below member tasks in the lane's order;
+  - the data key is sealed to the nano's fTPM the way the admin card is.
+- It reverses the personal-context index's "one index, separate stores" deliberately, in writing
+  (its section 2). Decision 1 in its section 12 is Jerry's.
+- Found while checking the tree:
+  - MCP `save_memory` writes `profile_id: None`, so a member's own save is household-visible;
+  - turn recall reads vector BLOBs on source rows, not the index;
+  - the `SuggestionGeneration` lane job has no cancel watcher.
+- Corrected PAI-2 section 3.4, which said an Orin Nano devkit exposes no fTPM. The nano has an
+  OP-TEE fTPM (`pond-administrator.md`). It does not guard a whole stolen board until OemK1 is fused.

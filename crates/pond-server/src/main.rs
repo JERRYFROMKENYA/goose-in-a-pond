@@ -269,6 +269,10 @@ enum Commands {
         /// Force a fresh code even if one is still active
         #[arg(long)]
         refresh: bool,
+        /// Issue a fresh code whose device becomes this household member's (a profile id from
+        /// `GET /api/v1/profiles`). Pairing an already-paired phone again with it links that phone.
+        #[arg(long, value_name = "PROFILE_ID")]
+        member: Option<String>,
     },
 
     /// Show this pond's printed setup code, its claim state, and a QR to put on its card.
@@ -672,7 +676,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             whisper_url,
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
-        Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::Pairing { refresh, member }) => run_pairing(refresh, member).await,
         Some(Commands::AdminCard {
             rotate,
             json,
@@ -10923,7 +10927,7 @@ async fn run_setup_code(request: pond_server::setup_code::SetupCodeRequest) -> R
     pond_server::setup_code::run(&store, &request, &mut out, &mut err).await
 }
 
-async fn run_pairing(refresh: bool) -> Result<()> {
+async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
     let data_dir = default_data_dir();
     let port = runtime_api_port(&data_dir);
     let credential = pond_server::host_credential::read(&data_dir)?;
@@ -10940,8 +10944,14 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         .default_headers(headers)
         .build()?;
 
-    // GET returns the current unconsumed code; POST mints a fresh one.
-    let resp = if refresh {
+    // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
+    let resp = if let Some(member) = &member {
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "profile_id": member }))
+            .send()
+            .await
+    } else if refresh {
         client.post(&base).send().await
     } else {
         client.get(&base).send().await
@@ -10954,9 +10964,10 @@ async fn run_pairing(refresh: bool) -> Result<()> {
     })?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "server returned {} for pairing-code request",
-            resp.status()
+            "server returned {status} for pairing-code request: {detail}"
         ));
     }
 
@@ -10966,12 +10977,15 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         expires_at: Option<String>,
         /// Where the phone connects and which key it pins.
         pairing: serde_json::Value,
+        /// The member a device pairing with this code becomes; `None` is nobody.
+        #[serde(default)]
+        profile_id: Option<String>,
     }
     let body: CodeResp = resp.json().await?;
 
     // A GET can return {"code": null} when no live code exists — mint one via POST.
-    let (code, expires_at, info) = match (body.code, body.expires_at) {
-        (Some(c), Some(e)) => (c, e, body.pairing),
+    let (code, expires_at, info, owner) = match (body.code, body.expires_at) {
+        (Some(c), Some(e)) => (c, e, body.pairing, body.profile_id),
         _ => {
             let minted: CodeResp = client
                 .post(&base)
@@ -10986,6 +11000,7 @@ async fn run_pairing(refresh: bool) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("server did not return a pairing code"))?,
                 minted.expires_at.unwrap_or_default(),
                 minted.pairing,
+                minted.profile_id,
             )
         }
     };
@@ -11008,6 +11023,13 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         info["tailnet_address"].as_str(),
     );
     println!("Pairing code: {code} (expires: {expires_at})");
+    match &owner {
+        Some(id) => println!("A device pairing with it becomes household member {id}'s."),
+        None => println!(
+            "A device pairing with it belongs to nobody, so with two or more members it is a \
+             guest. `--member <PROFILE_ID>` issues one for a member."
+        ),
+    }
     println!("Pond public-key fingerprint: {pin}");
     print_pairing_qr(&pair_url);
     println!("\n  URL: {pair_url}\n");

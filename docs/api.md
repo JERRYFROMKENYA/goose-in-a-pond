@@ -714,8 +714,16 @@ but loopback: `403 pairing_requires_lan` for a tailnet or unclassifiable peer, e
 `GET /handshake/pairing-code` answers `{code, expires_at, profile_id, pairing}` (`code: null` when
 none is live). `POST /handshake/pairing-code` issues a fresh single-use code; its optional body
 `{profile_id?, unattributed?}` (unknown fields refused) binds the device that pairs with it to a
-member. With no body, a household with exactly one member binds to that member. `pairing` is the
-pairing material: `hostname`, `lan_address`, `tailnet_address`, `https_port`, `tls_spki_sha256`.
+member. With no body, a household with exactly one member binds to that member, and any other
+household binds to nobody. `pairing` is the pairing material: `hostname`, `lan_address`,
+`tailnet_address`, `https_port`, `tls_spki_sha256`.
+
+The binding is the only way a device becomes a member's after the pond has members: nothing
+re-attributes a device later, and `PUT /devices/{id}` does not take a member. A phone already paired
+to nobody is linked by pairing it again with a code issued for its member; the app keeps its install
+id as `client_id`, so the same `devices` row takes the new owner. The dashboard's Pairing page asks
+whose the device will be and issues the code for that choice, and `pond-server pairing --member
+<PROFILE_ID>` does the same from a shell on the pond.
 
 ### `POST /handshake/spoken-code`
 
@@ -822,6 +830,8 @@ Matter controller, and the warmed prompt prefix is re-warmed in the background.
 | 422 | `{"error": "...", "fields": [{"field", "message"}]}` from `settings_validation::validate_patch` |
 | 422 | `agent_backend: "pond"`: the pond agent is quarantined |
 | 422 | `{"error": "...", "field": "matter_ws_url"}` for an unusable Matter URL |
+| 422 | `{"error": "...", "fields": [{"field": "primary_profile_id", ...}]}` when `primary_profile_id` is neither `null`, `""`, nor a member's `id` from `GET /profiles`. Nothing in the patch is saved |
+| 500 | The household members could not be read to check `primary_profile_id`; nothing is saved |
 
 ## Chat and runs
 

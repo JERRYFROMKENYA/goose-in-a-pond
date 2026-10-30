@@ -1528,7 +1528,8 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             device = device.unwrap_or("unknown"),
             error = %why,
             "onboarding completed, but the device that claimed this pond was not attributed \
-             to its owner; it stays unattributed until a pairing code or Devices binds it"
+             to its owner; it stays unattributed until it pairs again with a code issued for a \
+             member"
         );
     };
     let claimant = match claims.claimed_by().await {
@@ -5770,6 +5771,64 @@ fn geocode_target(
     (name_changed || coords_unset).then(|| name.to_string())
 }
 
+/// `primary_profile_id` must name a household member or be cleared (`null` or `""`).
+///
+/// It is a key-value row, not a foreign key, so nothing else stops a display name landing in it,
+/// and a dashboard once offered it as a free-text box: one household typed its owner's name, and
+/// every reader that looks the id up (the claimant's attribution at onboarding completion, the
+/// `Household` prompt particulars) then found nobody, without a word.
+async fn refuse_primary_profile_that_is_not_a_member(
+    state: &Arc<AppState>,
+    patch: &Value,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let Some(id) = patch
+        .get("primary_profile_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(());
+    };
+    match state.profile_repo.get(id).await {
+        Ok(Some(member)) => {
+            tracing::info!(
+                kind = "primary_profile_set",
+                profile_id = %member.id,
+                "the household's primary member is set"
+            );
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::warn!(
+                kind = "primary_profile_refused",
+                value = %id,
+                "refused a primary_profile_id that names no household member"
+            );
+            let message = "Choose a household member. This takes a member's id from \
+                           GET /api/v1/profiles, not a name.";
+            Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({
+                    "error": format!("primary_profile_id: {message}"),
+                    "fields": [{ "field": "primary_profile_id", "message": message }],
+                })),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                kind = "primary_profile_unverified",
+                error = %e,
+                "could not read the household members, so primary_profile_id was not saved"
+            );
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "Could not check that household member, so nothing was saved.",
+                })),
+            ))
+        }
+    }
+}
+
 async fn update_settings(
     State(state): State<Arc<AppState>>,
     body: Result<Json<serde_json::Value>, JsonRejection>,
@@ -5813,6 +5872,8 @@ async fn update_settings(
             })),
         ));
     }
+
+    refuse_primary_profile_that_is_not_a_member(&state, &patch).await?;
 
     let mut base =
         serde_json::to_value(&current).unwrap_or(serde_json::Value::Object(Default::default()));

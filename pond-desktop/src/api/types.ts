@@ -1297,9 +1297,14 @@ export interface RecoveryRequest {
 export interface PairingCodeResponse {
   code: string | null;
   expires_at?: string;
+  /** The household member a device pairing with this code becomes; null binds it to nobody. */
+  profile_id?: string | null;
   /** Where a phone connects and which key it pins; sent only on this host-only route. */
   pairing: PairingMaterial;
 }
+
+/** Whose a device pairing with a new code becomes: a named member, or explicitly nobody. */
+export type PairingCodeBinding = { profile_id: string } | { unattributed: true };
 
 export interface PairingMaterial {
   hostname: string;

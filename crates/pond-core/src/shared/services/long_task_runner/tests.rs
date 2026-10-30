@@ -732,3 +732,68 @@ fn a_short_answer_left_only_in_a_summary_becomes_its_result() {
     let report = task_in(LongTaskState::Running, None).with_answer(AnswerShape::Report);
     assert!(summary_as_result(&report, std::slice::from_ref(&done), &[], t(10)).is_none());
 }
+
+#[test]
+fn a_reply_holding_work_is_kept_as_the_steps_draft() {
+    let task = task_in(LongTaskState::Running, None);
+    let plan = "## Saturday\n".to_string()
+        + &"- 09:00 Breakfast by the lake, then a boat ride to Crescent Island. ".repeat(12);
+    let key = StepKey::parse("draft-itinerary").unwrap();
+    let middle = ReplyDraft {
+        key: key.clone(),
+        last: false,
+    };
+    let kept = reply_as_draft(
+        &task,
+        &middle,
+        &run(TaskStatus::Completed, Some(&plan)),
+        t(5),
+    )
+    .expect("a plan written as a reply is kept");
+    assert_eq!(kept.title(), "Saturday");
+    assert_eq!(kept.body(), plan.trim());
+    assert_eq!(
+        kept.step_key().map(|k| k.to_string()).as_deref(),
+        Some("draft-itinerary")
+    );
+
+    let last = ReplyDraft { key, last: true };
+    let result = reply_as_draft(&task, &last, &run(TaskStatus::Completed, Some(&plan)), t(5));
+    assert_eq!(
+        result.map(|a| a.title().to_string()).as_deref(),
+        Some(RESULT_TITLE)
+    );
+
+    assert!(
+        reply_as_draft(
+            &task,
+            &middle,
+            &run(TaskStatus::Completed, Some("I could not save it.")),
+            t(5)
+        )
+        .is_none(),
+        "a sign-off is not work"
+    );
+    assert!(
+        reply_as_draft(&task, &middle, &run(TaskStatus::Failed, Some(&plan)), t(5)).is_none(),
+        "a failed run's text is not handed on"
+    );
+}
+
+#[test]
+fn a_draft_without_a_heading_is_named_from_its_key() {
+    let task = task_in(LongTaskState::Running, None);
+    let text = "The train is faster and costs less than most buses. ".repeat(10);
+    let draft = ReplyDraft {
+        key: StepKey::parse("draft-comfort").unwrap(),
+        last: false,
+    };
+    let kept = reply_as_draft(
+        &task,
+        &draft,
+        &run(TaskStatus::Completed, Some(&text)),
+        t(5),
+    )
+    .unwrap();
+    assert_eq!(kept.title(), "Comfort");
+}

@@ -534,6 +534,16 @@ pub struct ChildOutcome {
     pub loaded_extensions: BTreeSet<String>,
 }
 
+/// What a nudged child hands back: the reply before the nudge when it is the longer, since a
+/// helper that wrote its work as a reply then answered the nudge with a line about reporting.
+pub fn after_nudge(before: Option<String>, after: Option<String>) -> Option<String> {
+    match (before, after) {
+        (Some(before), Some(after)) if before.len() > after.len() => Some(before),
+        (before, None) => before,
+        (_, after) => after,
+    }
+}
+
 /// Assembles a child's messages into turns: Goose yields one message per provider chunk, so a turn
 /// is a run of assistant messages closed by any other role; the answer is the last non-blank one.
 #[derive(Debug, Default)]
@@ -572,6 +582,11 @@ impl ChildTurns {
 
     pub fn turns(&self) -> u32 {
         self.turns
+    }
+
+    /// The latest finished turn's text, if any had text.
+    pub fn last_completed(&self) -> Option<&str> {
+        self.last_completed.as_deref()
     }
 
     /// End of stream: flush the open run; returns `(last completed answer, assistant turns)`.

@@ -74,8 +74,9 @@ pub fn turn_note(turn: &DeepResearchTurn) -> String {
     format!(
         "<deep-research>\nThe person asked for deep research on their message, and the pond has \
          started task {} on it: helpers will {work}, and the person is told on their phone when \
-         it is done.{waiting} Reply in one or two sentences saying what will be looked into. Do \
-         not answer the question yourself, and do not call any tool.\n</deep-research>",
+         it is done.{waiting} The helpers read any page the message links, so do not read it \
+         yourself. Reply in one or two sentences saying what will be looked into. Do not answer \
+         the question yourself, and do not call any tool.\n</deep-research>",
         turn.task_id
     )
 }
@@ -150,6 +151,10 @@ mod tests {
             note.contains("do not call"),
             "a second task_start would start it twice"
         );
+        assert!(
+            note.contains("do not read it yourself"),
+            "the prime read a linked page twice, a 39 s reply, then the helper read it again"
+        );
         assert!(note.starts_with("<deep-research>") && note.ends_with("</deep-research>"));
         assert!(!note.contains("in line"));
 
@@ -159,7 +164,7 @@ mod tests {
             answer: AnswerShape::Auto,
         });
         assert!(
-            queued.contains("done. It is number 2 in line. Reply"),
+            queued.contains("done. It is number 2 in line. The helpers read"),
             "{queued}"
         );
     }

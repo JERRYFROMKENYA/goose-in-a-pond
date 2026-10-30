@@ -7281,6 +7281,7 @@ async fn run_long_task_runner(
             authorities: authorities.clone(),
             storage: storage.clone(),
             last_user_activity: last_user_activity.clone(),
+            tasks: tasks.clone(),
         };
         if compile_due {
             use pond_core::shared::services::agent_prefill;
@@ -7369,10 +7370,12 @@ struct LongTaskHelpers {
     authorities: Arc<pond_core::shared::services::turn_authority::TurnAuthorityRegistry>,
     storage: Arc<dyn pond_core::user_data::ports::session_storage::SessionStorage>,
     last_user_activity: Arc<tokio::sync::RwLock<std::time::Instant>>,
+    tasks: Arc<dyn pond_core::shared::ports::long_task::LongTaskRepository>,
 }
 
 impl LongTaskHelpers {
-    /// One helper life for `task`, bound to `work` so its tools reach only this task.
+    /// One helper life for `task`, bound to `work` so its tools reach only this task. With
+    /// `reply_draft`, a reply holding work is saved when the helper saved nothing.
     async fn run(
         &self,
         task: &pond_core::shared::domain::long_task::LongTask,
@@ -7380,6 +7383,7 @@ impl LongTaskHelpers {
         work: pond_core::shared::services::step_bindings::StepWork,
         brief: String,
         may_retry: bool,
+        reply_draft: Option<pond_core::shared::services::long_task_runner::ReplyDraft>,
     ) -> anyhow::Result<pond_core::shared::services::long_task_runner::RunEnd> {
         use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
@@ -7469,8 +7473,26 @@ impl LongTaskHelpers {
         watcher.abort();
         drop(lease);
         let reported = binding.take_report();
-        let written = binding.take_written();
-        Ok(runner::settle_run(reported, &written, &run?, may_retry))
+        let mut written = binding.take_written();
+        let mut run = run?;
+        if reported.is_none() && written.is_empty() {
+            if let Some(draft) =
+                reply_draft.and_then(|d| runner::reply_as_draft(task, &d, &run, chrono::Utc::now()))
+            {
+                self.tasks.insert_artifact(&draft).await?;
+                tracing::info!(
+                    target: "giap::trace",
+                    kind = "long_task_reply_saved",
+                    task_id = %task.id(),
+                    title = %draft.title(),
+                    chars = draft.body().len(),
+                    "a helper's work was in its reply; the runner saved it"
+                );
+                written.push(draft.id().to_string());
+                run.result = Some(draft.summary().to_string());
+            }
+        }
+        Ok(runner::settle_run(reported, &written, &run, may_retry))
     }
 }
 
@@ -7606,6 +7628,8 @@ async fn advance_long_task(
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
     use pond_core::shared::services::step_bindings::StepWork;
 
+    // The goal is the person's words, so a page it links stays readable however long the task runs.
+    pond_core::mcp::services::page_addresses::global().note_words(task.goal());
     let steps = tasks.list_steps(task.id()).await?;
     let artifacts = tasks.list_artifacts(task.id()).await?;
     let now = chrono::Utc::now();
@@ -7702,7 +7726,7 @@ async fn advance_long_task(
                 now,
             );
             let end = helpers
-                .run(task, planner, StepWork::Plan, brief, false)
+                .run(task, planner, StepWork::Plan, brief, false, None)
                 .await?;
             if end == RunEnd::Preempted {
                 return Ok(true);
@@ -7776,8 +7800,19 @@ async fn advance_long_task(
                 .clone()
                 .with_max_turns(runner::turns_for(role.max_turns(), &step));
             let may_retry = step.attempts() < runner::MAX_STEP_ATTEMPTS;
+            let reply_draft = runner::ReplyDraft {
+                key: key.clone(),
+                last: runner::last_step_line(&steps, &step).is_some(),
+            };
             let outcome = match helpers
-                .run(task, &role, StepWork::Do(key.clone()), brief, may_retry)
+                .run(
+                    task,
+                    &role,
+                    StepWork::Do(key.clone()),
+                    brief,
+                    may_retry,
+                    Some(reply_draft),
+                )
                 .await
             {
                 Ok(RunEnd::Reported(outcome)) => outcome,
@@ -7813,7 +7848,7 @@ async fn advance_long_task(
                     );
                     Some(
                         helpers
-                            .run(task, verifier, StepWork::Check(key), brief, false)
+                            .run(task, verifier, StepWork::Check(key), brief, false, None)
                             .await?,
                     )
                 } else {

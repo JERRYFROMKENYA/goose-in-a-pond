@@ -421,8 +421,9 @@ const SHORT_PLAN: &str = "The person wants a short answer. You only write the pl
 /// A research report gathers, writes a section per part, then the Result that opens it.
 const RESEARCH_REPORT_PLAN: &str = "The person wants a report, as long as the question needs: \
      a page for a narrow question, many for a trip or a big decision. Plan it in three parts. \
-     First, steps that each look into one part of the question and save their findings with \
-     their sources. Then one step per section of the report, each writing its section from the \
+     First, one step for each thing the question is about, such as each option a comparison \
+     weighs, that looks into all of it and saves its findings with their sources: not a step \
+     for each question about one thing. Then one step per section of the report, each writing its section from the \
      findings it is given and saving it as a draft artifact titled as the reader should see it. \
      Plan only the sections the goal asks for or cannot do without. A section that is itself a \
      plan, such as an itinerary, goes to long-task-composer. Last, one step writes the artifact titled \"Result\": \
@@ -446,9 +447,12 @@ const DECIDE_ANSWER: &str = "Nobody has said how long the answer should be, so d
 const RESEARCH_STEP: &str = "This is research. Answer from sources, never from memory: the \
      house's own tools for what happened here, such as get_recent_camera_events, the sensor and \
      schedule tools and the memory tools, and search_web or get_wikipedia_article only for what \
-     is outside the house. Keep only what the sources say, and cite each web source as a Markdown \
-     link, [its title](its address), using the address the search gave. If the sources disagree, \
-     say so. Write only what your tools returned or your inputs say: never write that the house \
+     is outside the house. Before you write a number, price, time or date from the web, read the \
+     page it came from with read_web_page: give the source's domain as search_web showed it, or \
+     the link the goal gives, and the question. Read one page in your step, two at most, and at \
+     most one more part of a page: each read is a turn. Then save what you found. Keep only what the sources say, and cite each web \
+     source as a Markdown link, [its title](its address), using the address read_web_page gave, \
+     or the search's domain. If the sources disagree, say so. Write only what your tools returned or your inputs say: never write that the house \
      has nothing of something unless the house's own tool said so. If what your step needs is \
      out of your tools' reach, do not search the web for it: save what you could find, say \
      plainly what is missing and how the person could get it, and report the step completed. \
@@ -736,6 +740,78 @@ fn first_line(text: &str) -> &str {
         .unwrap_or("")
 }
 
+/// Words a reply needs before the runner keeps it as its step's draft: less is a sign-off.
+const MIN_DRAFT_WORDS: usize = 60;
+
+/// A step whose helper's reply the runner keeps when the helper saved nothing.
+#[derive(Debug, Clone)]
+pub struct ReplyDraft {
+    pub key: StepKey,
+    /// The plan's last step saves the answer, so its reply is the Result.
+    pub last: bool,
+}
+
+/// The helper's reply as its step's draft, when it reported nothing, saved nothing, and the reply
+/// holds work: a composer on the Orin wrote whole plans as replies, then lost the step twice.
+pub fn reply_as_draft(
+    task: &LongTask,
+    draft: &ReplyDraft,
+    run: &TaskRun,
+    now: DateTime<Utc>,
+) -> Option<crate::shared::domain::long_task::Artifact> {
+    let text = run.result_for_parent()?.trim();
+    if text.split_whitespace().count() < MIN_DRAFT_WORDS || StepOutcome::parse(text).is_ok() {
+        return None;
+    }
+    let heading = text
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix('#'))
+        .map(|h| h.trim_start_matches('#').trim())
+        .filter(|h| !h.is_empty());
+    let title = if draft.last {
+        RESULT_TITLE.to_string()
+    } else {
+        heading
+            .map(str::to_string)
+            .unwrap_or_else(|| title_from_key(&draft.key))
+    };
+    let summary = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or(&title);
+    crate::shared::domain::long_task::Artifact::new(
+        task.id(),
+        Some(draft.key.clone()),
+        crate::shared::domain::long_task::ArtifactKind::Draft,
+        &title,
+        summary,
+        text.to_string(),
+        now,
+    )
+    .ok()
+}
+
+/// "draft-itinerary" as "Itinerary": the key's words, less the verb a planner puts first.
+fn title_from_key(key: &StepKey) -> String {
+    const VERBS: &[&str] = &[
+        "draft", "write", "research", "find", "gather", "compose", "make",
+    ];
+    let key = key.to_string();
+    let words: Vec<&str> = key.split(['-', '_']).filter(|w| !w.is_empty()).collect();
+    let words = match words.split_first() {
+        Some((first, rest)) if VERBS.contains(first) && !rest.is_empty() => rest.to_vec(),
+        _ => words,
+    };
+    let joined = words.join(" ");
+    let mut chars = joined.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => "Draft".to_string(),
+    }
+}
+
 /// How one run ended, from the runner's side.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RunEnd {
@@ -765,9 +841,13 @@ pub fn tools_withheld(role_name: &str) -> &'static [&'static str] {
 }
 
 /// What a helper is told when it stops with turns left but has not reported.
-pub const REPORT_NUDGE: &str = "You stopped without calling step_report, so your step is not \
-     finished. Call step_report now: outcome completed or failed, a few sentences on what you did, \
-     and the ids of the artifacts you saved.";
+/// Both ways out, since a composer that wrote its plan as a reply was told to report, was refused
+/// for having saved nothing, and lost the step.
+pub const REPORT_NUDGE: &str = "You stopped before your step was finished. If you have not saved \
+     your work, save it now with artifact_write: a title, a one-line summary, the whole of your \
+     work as the body, and finish true, which also reports the step. If you saved it already, \
+     call step_report: outcome completed or failed, a few sentences on what you did, and the ids \
+     of the artifacts you saved.";
 
 /// One hand-back per run: the reported one; else, when the helper saved work, that work; else one
 /// read from its last text; else a failure that says why there is none.

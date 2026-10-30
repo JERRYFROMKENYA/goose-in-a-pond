@@ -4150,3 +4150,23 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - the `SuggestionGeneration` lane job has no cancel watcher.
 - Corrected PAI-2 section 3.4, which said an Orin Nano devkit exposes no fTPM. The nano has an
   OP-TEE fTPM (`pond-administrator.md`). It does not guard a whole stolen board until OemK1 is fused.
+
+**2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
+
+- **What landed.**
+  - `giap-knowledge__read_web_page` reads one page into Markdown lines in parts, and returns the lines that answer a question or a part whole (small-model-tools §9).
+  - Forager Gosling's recipe and the research step use it before writing a number, price, time or date from the web.
+  - The deep-research note tells the acknowledging turn the helpers read any linked page.
+  - The report nudge tells a helper that saved nothing to save its work with `artifact_write`.
+- **PAI-2.**
+  - The tool reads only an address the person wrote, a task's goal names, or a search returned (`page_addresses`), so a page cannot steer a helper holding the memory tools into sending data out inside an address.
+  - Every fetch goes through the public-only client and `traced_get_with`. A refusal is traced by host alone.
+- **PAI-3.**
+  - The default tool block grows by 666 raw bytes, so each shape's snapshot compiles again once.
+  - A page result is transient: history keeps a stub with the address.
+- **PAI-1.** It touches no personal data, and no member-scoped data passes through it.
+- **Verified on the Orin** (branch `feat/read-web-page`, E4B QAT, 2026-10-30, a member's paired test device). Four rounds, fixing between them (small-model-tools §9.5):
+  - Round four: a comparison report took 9.7 minutes (14.4 and 20.0 before its fixes), and a weekend plan 11.9 (19.7). Every short answer took 1.5 to 2.4 minutes. Every answer was right.
+  - A linked page in chat was read in 1.8 s.
+  - A deep-research acknowledgement with a link took 9.9 s once the note said the helpers read it (39.5 s before).
+  - Not verified on the Orin: `reply_as_draft`, since no helper left work in a reply in round four; and the bench (R1).

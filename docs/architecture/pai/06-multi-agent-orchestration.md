@@ -1551,6 +1551,21 @@ the pond reads it from the ask.
 | Start | Every `open_task` rings the runner. A task waits 10 s of quiet, not 30, and the runner looks again when the quiet is due rather than at its next 30 s poll. A step the household interrupts reruns without spending a try |
 | The prime's turn | The deep-research note promises the answer that will come and asks for no tool call: the prime used to look up the task it had just been told about |
 
+### 8.14 Reading the pages it cites (Jerry, 2026-10-30)
+
+A search quotes a few passages a page and no address, so a helper wrote prices and times from
+snippets: one short answer gave the train from Nairobi to Mombasa as 1 h 26 min. Forager Gosling
+now reads the page with `read_web_page` ([small-model-tools §9](../small-model-tools.md#9-reading-a-web-page-read_web_page)).
+
+| Piece | Design |
+|---|---|
+| The tool | `giap-knowledge__read_web_page(url, question, part?)` fetches one page through the search's public-only client. It turns the page into Markdown lines, in parts of about 800 tokens, and returns the lines that answer the question, or a part whole by its number. No key and no model call |
+| Who reads | Forager Gosling's recipe names it beside `search_web`. The research step reads the page before writing a number, price, time or date from the web, and cites the address the tool gave. Nestmaker Goose and the chat turn hold it through `giap-knowledge`. The planner and the verifier do not |
+| Which pages | Only an address the person wrote, a task's goal names, or a search returned. A helper holds the memory tools, and a page could tell it to "read" an address carrying what it knows. The runner notes the goal's links on every pass, so a long task can read them however long it runs. A helper names a search source by its domain, as the copy shows it |
+| Cost | The tool block grows by 666 raw bytes, so every helper's snapshot is compiled again once. Each read is one more model turn: helpers that read two or three pages a step doubled a weekend plan's research time on the Orin, so a step reads one page, two at most, and one more part at most |
+| Work left in a reply | A composer wrote its draft as a reply, answered the report nudge with a `step_report` that was refused for saving nothing, and lost the step, twice in two reports (3 to 5 minutes and a replan each). The nudge now names `artifact_write` first. And when a step's helper reports nothing and saves nothing, a reply of 60 words or more is saved as the step's draft (`reply_as_draft`), titled "Result" on the plan's last step. A nudged helper hands back the longer of its two replies (`after_nudge`) |
+| Gathering | A report gathers in one step per thing the question is about, such as each option a comparison weighs, not one per question about it: a train-against-bus comparison was planned as six gathering steps and took 20 minutes |
+
 ---
 
 ## 9. Agents are recipes (designed 2026-10-28; P14-P18)

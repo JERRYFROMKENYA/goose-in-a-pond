@@ -3127,3 +3127,21 @@ fn only_a_child_that_stopped_on_its_own_without_reporting_is_nudged() {
     reported.store(true, Ordering::SeqCst);
     assert!(!should_nudge(&plan, 1, false), "it has already reported");
 }
+
+#[test]
+fn a_nudged_child_keeps_the_work_it_wrote_before_the_nudge() {
+    let work = "Saturday: boat ride at 09:00, lunch at the lake. ".repeat(10);
+    assert_eq!(
+        after_nudge(Some(work.clone()), Some("I will report now.".into())).as_deref(),
+        Some(work.as_str())
+    );
+    assert_eq!(
+        after_nudge(Some(work.clone()), None).as_deref(),
+        Some(work.as_str())
+    );
+    assert_eq!(
+        after_nudge(Some("Short.".into()), Some(work.clone())).as_deref(),
+        Some(work.as_str())
+    );
+    assert_eq!(after_nudge(None, None), None);
+}

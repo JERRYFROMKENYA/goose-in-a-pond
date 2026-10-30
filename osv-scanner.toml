@@ -115,6 +115,11 @@ id = "GHSA-8hxf-qr8p-62x4"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0 can accept an AES-encrypted entry whose HMAC was never checked when the stream ends early. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: AES support is zip's aes-crypto feature, which nothing in GIAP or goose enables (cargo tree -e features -i zip shows only the deflate features)."
 
+[[IgnoredVulns]]
+id = "GHSA-9hj8-73fh-9963"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0's legacy Shrink/Reduce/Implode decoder trusts an attacker-controlled ZIP64 size and can exhaust memory. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: the legacy decoders are zip's legacy-zip feature, which nothing in GIAP or goose enables; only deflate is compiled in."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]

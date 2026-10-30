@@ -1045,6 +1045,8 @@ impl SchedulerPort for CronSchedulerAdapter {
         if let Some(entry) = guard.get_mut(id) {
             entry.persisted.paused = false;
             entry.job_id = job_id;
+            // Fire times passed while paused were skipped on purpose, not missed.
+            entry.persisted.asked_through = Some(Utc::now());
         }
         drop(guard);
 
@@ -1068,21 +1070,6 @@ impl SchedulerPort for CronSchedulerAdapter {
             validate_kind(kind)?;
         }
 
-        // Switching asking off settles a waiting question; the save below keeps it settled.
-        if req.ask_if_missed == Some(false) {
-            let waiting = {
-                let mut guard = self.tasks.lock().await;
-                guard
-                    .get_mut(id)
-                    .and_then(|e| e.persisted.missed_run.take())
-            };
-            if let Some(missed) = waiting {
-                self.run_history
-                    .record_skipped(id, missed.due_at, SkipReason::AskingTurnedOff.as_str())
-                    .await;
-            }
-        }
-
         // `fire_at` (given, or derived via `once`) makes a one-shot with the `"@once"` cron;
         // a real `cron` alone makes it recurring again and clears `fire_at`.
         // A new zone moves every occurrence, so it re-registers the job as a new cron does.
@@ -1096,6 +1083,16 @@ impl SchedulerPort for CronSchedulerAdapter {
                 .get_mut(id)
                 .ok_or_else(|| anyhow::anyhow!("task '{id}' not found"))?;
 
+            // An event rule has no clock job and a timed task no rule, so neither can become the other.
+            if let Some(kind) = &req.kind {
+                if kind.is_event_triggered() != Self::resolve_kind(entry).is_event_triggered() {
+                    anyhow::bail!(
+                        "'{id}' cannot change between a timed schedule and an event rule; \
+                         delete it and create the other"
+                    );
+                }
+            }
+
             if let Some(label) = &req.label {
                 entry.persisted.label = label.clone();
             }
@@ -1104,6 +1101,11 @@ impl SchedulerPort for CronSchedulerAdapter {
             }
             if let Some(kind) = &req.kind {
                 entry.persisted.kind = Some(kind.clone());
+            }
+            // Fire times before a reshape, or while nobody asked, were never owed a question.
+            if shape_changed || (req.ask_if_missed == Some(true) && !entry.persisted.ask_if_missed)
+            {
+                entry.persisted.asked_through = Some(Utc::now());
             }
             if let Some(ask) = req.ask_if_missed {
                 entry.persisted.ask_if_missed = ask;
@@ -1163,7 +1165,23 @@ impl SchedulerPort for CronSchedulerAdapter {
             }
         }
 
+        // Settled only once the edit has held, so a refused edit leaves the question open.
+        let settled = if req.ask_if_missed == Some(false) {
+            let mut guard = self.tasks.lock().await;
+            guard
+                .get_mut(id)
+                .and_then(|e| e.persisted.missed_run.take())
+        } else {
+            None
+        };
+
         self.save().await?;
+
+        if let Some(missed) = settled {
+            self.run_history
+                .record_skipped(id, missed.due_at, SkipReason::AskingTurnedOff.as_str())
+                .await;
+        }
 
         let guard = self.tasks.lock().await;
         let entry = guard
@@ -2218,6 +2236,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_refused_edit_that_turns_asking_off_leaves_the_question_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (sched, due) = asking_about_a_missed_morning(tmp.path()).await;
+
+        sched
+            .update_task(
+                "morning",
+                UpdateScheduleRequest {
+                    ask_if_missed: Some(false),
+                    cron: Some("not a cron".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("the cron is refused");
+
+        let task = &sched.list_tasks().await.unwrap()[0];
+        assert_eq!(task.missed_run.map(|m| m.due_at), Some(due));
+        assert!(sched.get_runs("morning", 10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn times_passed_while_paused_are_not_asked_about() {
+        let tmp = tempfile::tempdir().unwrap();
+        let two_days_ago = Utc::now() - chrono::Duration::days(2);
+        let paused = PersistedTask {
+            paused: true,
+            ..daily_since("morning", true, two_days_ago)
+        };
+        let sched = restart_with(tmp.path(), &[paused]).await;
+
+        sched.resume_task("morning").await.unwrap();
+        drop(sched);
+        let reopened = make_scheduler(tmp.path()).await;
+
+        assert_eq!(reopened.list_tasks().await.unwrap()[0].missed_run, None);
+    }
+
+    #[tokio::test]
+    async fn turning_asking_on_does_not_ask_about_earlier_times() {
+        let tmp = tempfile::tempdir().unwrap();
+        let two_days_ago = Utc::now() - chrono::Duration::days(2);
+        let sched = restart_with(tmp.path(), &[daily_since("morning", false, two_days_ago)]).await;
+
+        sched
+            .update_task(
+                "morning",
+                UpdateScheduleRequest {
+                    ask_if_missed: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        drop(sched);
+        let reopened = make_scheduler(tmp.path()).await;
+
+        let task = &reopened.list_tasks().await.unwrap()[0];
+        assert!(task.ask_if_missed);
+        assert_eq!(task.missed_run, None);
+    }
+
+    #[tokio::test]
     async fn a_question_closes_as_unanswered_when_the_next_run_comes() {
         let tmp = tempfile::tempdir().unwrap();
         let every_second = PersistedTask {
@@ -2525,6 +2606,107 @@ mod tests {
                 actions: vec![lights_on()]
             }
         );
+    }
+
+    /// Keeps every kind it was asked to run.
+    struct RecordingExecutor(Arc<std::sync::Mutex<Vec<TaskKind>>>);
+
+    #[async_trait]
+    impl ScheduleExecutor for RecordingExecutor {
+        async fn execute(&self, _id: &str, kind: &TaskKind) -> Result<String> {
+            self.0.lock().unwrap().push(kind.clone());
+            Ok("ok".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn an_edited_routine_runs_its_new_actions_at_the_next_fire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sched = CronSchedulerAdapter::new(
+            tmp.path().join("schedules.json"),
+            tmp.path().join("schedule_runs.json"),
+            Arc::new(RecordingExecutor(seen.clone())),
+        )
+        .await
+        .unwrap();
+        sched
+            .create_task(CreateScheduleRequest {
+                cron: "* * * * * *".into(),
+                ..routine_req("lights", vec![lights_on()])
+            })
+            .await
+            .unwrap();
+        let lights_off = TriggerAction::DevicePower {
+            device_id: "kitchen-lights".into(),
+            on: false,
+        };
+        let edited = TaskKind::Routine {
+            actions: vec![lights_off],
+        };
+
+        sched
+            .update_task(
+                "lights",
+                UpdateScheduleRequest {
+                    kind: Some(edited.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        // A fire already under way may still run the old actions; the next one must not.
+        let fired = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !seen.lock().unwrap().contains(&edited) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+
+        assert!(fired.is_ok(), "ran only {:?} in 5 s", seen.lock().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_timed_schedule_and_an_event_rule_cannot_become_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sched = make_scheduler(tmp.path()).await;
+        sched
+            .create_task(create_req("daily", "0 0 8 * * *"))
+            .await
+            .unwrap();
+        sched.create_task(rule_req("rule", notify())).await.unwrap();
+        let rule_kind = rule_req("x", notify()).kind;
+
+        for (id, kind) in [
+            ("daily", rule_kind),
+            (
+                "rule",
+                TaskKind::AgentPrompt {
+                    prompt: "hi".into(),
+                },
+            ),
+        ] {
+            sched
+                .update_task(
+                    id,
+                    UpdateScheduleRequest {
+                        kind: Some(kind),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect_err("a kind that changes how the task fires is refused");
+        }
+
+        let kinds: HashMap<_, _> = sched
+            .list_tasks()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| (t.id.clone(), t.kind.is_event_triggered()))
+            .collect();
+        assert!(!kinds["daily"]);
+        assert!(kinds["rule"]);
     }
 
     /// Fails as a routine does when one of its devices did not answer.
@@ -2892,12 +3074,16 @@ impl TaskRunContext {
             kind,
         } = self;
 
-        let label = {
+        // The kind as stored now, not as armed: an edited routine or prompt runs as edited.
+        let (label, kind) = {
             let guard = tasks.lock().await;
-            guard
-                .get(&id)
-                .map(|e| e.persisted.label.clone())
-                .unwrap_or_default()
+            match guard.get(&id) {
+                Some(e) => (
+                    e.persisted.label.clone(),
+                    CronSchedulerAdapter::resolve_kind(e),
+                ),
+                None => (String::new(), kind),
+            }
         };
 
         {

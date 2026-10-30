@@ -19,6 +19,7 @@ import type {
   ChatEvent,
   ContextWarning,
   ImageAttachment,
+  ResearchAnswer,
   SessionMessage,
   TurnStats,
 } from "../api/types";
@@ -393,6 +394,8 @@ export interface SendTurn {
   attachments?: PreparedImage[];
   /** The text is a research question: the pond starts deep research on it. Never queued. */
   deepResearch?: boolean;
+  /** How long that research's answer should be; absent lets the pond decide. */
+  deepResearchAnswer?: ResearchAnswer;
 }
 
 /** `code` where the body has one, else its `reason`: deep research's refusals name theirs that way. */
@@ -724,6 +727,7 @@ async function runTurn(turn: SendTurn): Promise<void> {
         // Resumable: the run outlives this window, which the reattach path depends on.
         true,
         turn.deepResearch ? true : undefined,
+        turn.deepResearch ? turn.deepResearchAnswer : undefined,
       ),
       ctx,
     );

@@ -1732,6 +1732,10 @@ struct ChatRequest {
     /// The member asked for deep research: the pond starts a research task on the message.
     #[serde(default)]
     deep_research: bool,
+    /// How long that research's answer should be: `short`, `report`, or `auto` (or absent) for
+    /// the planner to read from the ask. Anything else is read as `auto`.
+    #[serde(default)]
+    deep_research_answer: Option<String>,
     /// Who that task belongs to, settled by `chat_stream` from the caller and never from the body.
     #[serde(skip)]
     deep_research_for: Option<String>,
@@ -2933,7 +2937,15 @@ async fn drive_turn(
     // the prime's own `task_start` call is, so the chat card finds it live and in history.
     let deep_research_task = match req.deep_research_for.as_deref() {
         None => None,
-        Some(member) => match start_deep_research(state, member, &req.message, &session_id).await {
+        Some(member) => match start_deep_research(
+            state,
+            member,
+            &req.message,
+            &session_id,
+            req.deep_research_answer.as_deref(),
+        )
+        .await
+        {
             Ok(research) => Some(research),
             Err(e) => {
                 let data =
@@ -15455,6 +15467,9 @@ fn long_task_repo(state: &Arc<AppState>) -> pond_infra::sqlite_long_task::Sqlite
     pond_infra::sqlite_long_task::SqliteLongTaskRepository::new(state.db.system.clone())
 }
 
+/// Room for a short answer of 150 words with its links, and a margin for a model that ran over.
+const SHORT_ANSWER_VIEW_CHARS: usize = 4000;
+
 /// One task as the chat card shows it: its steps with their agents, and its artifacts without
 /// their bodies.
 async fn long_task_view(
@@ -15465,12 +15480,27 @@ async fn long_task_view(
     use pond_core::shared::ports::long_task::LongTaskRepository as _;
     let steps = repo.list_steps(task.id()).await?;
     let artifacts = repo.list_artifacts(task.id()).await?;
-    let result = pond_core::shared::services::long_task_runner::result_artifact(&artifacts)
+    let result = pond_core::shared::services::long_task_runner::answer_artifact(task, &artifacts)
         .map(|a| a.id.clone());
+    // A short answer is shown whole on the card, so it comes with the view rather than a sheet.
+    let answer_text = match (&result, task.answer()) {
+        (Some(id), pond_core::shared::domain::long_task::AnswerShape::Short) => {
+            repo.get_artifact(task.id(), id).await?.map(|artifact| {
+                artifact
+                    .body()
+                    .chars()
+                    .take(SHORT_ANSWER_VIEW_CHARS)
+                    .collect::<String>()
+            })
+        }
+        _ => None,
+    };
     Ok(json!({
         "id": task.id(),
         "goal": task.goal(),
         "kind": task.kind(),
+        "answer": task.answer(),
+        "answer_text": answer_text,
         "state": task.state(),
         "origin_session_id": task.origin_session_id(),
         "created_at": task.created_at(),
@@ -15578,30 +15608,29 @@ async fn start_deep_research(
     member: &str,
     question: &str,
     session_id: &str,
+    answer: Option<&str>,
 ) -> anyhow::Result<pond_core::shared::domain::agent::DeepResearchTurn> {
+    use pond_core::shared::domain::long_task::AnswerShape;
     use pond_core::shared::ports::long_task::{LongTaskOwnerFilter, LongTaskRepository as _};
+    use pond_core::shared::services::long_task_open::{open_task, OpeningBrief};
     use pond_core::shared::services::long_task_queue::{place_of, run_order, waiting_line};
     let repo = long_task_repo(state);
+    let answer = answer.and_then(AnswerShape::read).unwrap_or_default();
     let task = pond_core::shared::services::deep_research::research_task(
         member,
         question,
         session_id,
         chrono::Utc::now(),
-    )?;
-    repo.create_task(&task).await?;
+    )?
+    .with_answer(answer);
     // The helpers start in empty windows; what was said before the ask reaches them only here.
-    if let Some(body) = deep_research_brief(state, session_id, question).await {
-        let brief = pond_core::shared::domain::long_task::Artifact::new(
-            task.id(),
-            None,
-            pond_core::shared::domain::long_task::ArtifactKind::Note,
-            pond_core::shared::services::long_task_runner::BRIEF_TITLE,
-            "What the conversation said before the ask",
+    let brief = deep_research_brief(state, session_id, question)
+        .await
+        .map(|body| OpeningBrief {
+            summary: "What the conversation said before the ask",
             body,
-            chrono::Utc::now(),
-        )?;
-        repo.insert_artifact(&brief).await?;
-    }
+        });
+    let task = open_task(&repo, task, brief).await?;
     let open = repo
         .list_tasks(LongTaskOwnerFilter::Everyone, false)
         .await?;
@@ -15612,12 +15641,14 @@ async fn start_deep_research(
         task_id = %task.id(),
         origin_session_id = %session_id,
         research = true,
+        answer = task.answer().as_str(),
         position = place.as_ref().map(|p| p.position),
         "a member asked for deep research"
     );
     Ok(pond_core::shared::domain::agent::DeepResearchTurn {
         task_id: task.id().to_string(),
         waiting: place.as_ref().and_then(waiting_line),
+        answer: task.answer(),
     })
 }
 
@@ -15774,6 +15805,7 @@ async fn long_task_queue(
             "id": task.id(),
             "goal": task.goal(),
             "kind": task.kind(),
+            "answer": task.answer(),
             "state": task.state(),
             "origin_session_id": task.origin_session_id(),
             "created_at": task.created_at(),
@@ -15876,7 +15908,12 @@ async fn long_task_report(
     if events.is_empty() {
         events = report::itinerary_events(&markdown, task.created_at().date_naive());
     }
-    Ok((markdown, events, sections.len()))
+    let shown = if report::holds_its_sections(summary.as_deref().unwrap_or(""), &sections) {
+        0
+    } else {
+        sections.len()
+    };
+    Ok((markdown, events, shown))
 }
 
 /// `GET /api/v1/long-tasks/{id}/report` -- the whole report, as long as its plan made it, with
@@ -16728,6 +16765,7 @@ async fn run_recipe(
         tool_group_allowlist,
         suggestion_context: None,
         deep_research: false,
+        deep_research_answer: None,
         deep_research_for: None,
     };
 

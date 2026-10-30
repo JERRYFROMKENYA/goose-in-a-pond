@@ -1488,7 +1488,7 @@ re-reading. None removes a check.
 |---|---|
 | The lane | `select_next` gave the slot to whichever eligible job had waited longest, so a long task, which runs most often, lost every gap between steps to a chore. A member's task now goes before the pond's chores, after only a compaction a returning member waits on. A chore that has gone `CHORE_PATIENCE` (30 minutes, §8.12) since its last run still gets one turn. |
 | Background subagents | The lane's "turn in flight" now also counts a held subagent permit. A background child outlives its parent's turn, and a chore used to start beside it. |
-| Between steps | A run that moved a task on is followed at once, with no 30 s poll and no 5 s floor, so a chore can't take the gap. The 30 s of quiet before a task starts is kept on purpose: a step is cancelled when the household speaks, so starting sooner mostly wastes work. |
+| Between steps | A run that moved a task on is followed at once, with no 30 s poll and no 5 s floor, so a chore can't take the gap. The quiet before a task starts is 10 s since §8.13. |
 | Inputs | A step's inputs up to `INLINE_ARTIFACT_TOKENS` each and `INLINE_TOTAL_TOKENS` in all go in its brief whole. A worker then spends no turn and no re-prefill calling `artifact_read` first, and a small model can't skip reading them. Larger inputs stay pull-only (rule 2). |
 | Reliability | A helper that runs out of turns fails its first try instead of having half-done work counted as done. Its retry gets half again as many turns (capped at `MAX_ROLE_MAX_TURNS`), with what it saved inlined so it continues. A "completed" report with no artifact and a summary under 20 characters fails as empty and retries. The verifier, the retry and the planner's replan are unchanged. |
 
@@ -1527,6 +1527,29 @@ nothing useful.
 | Nudge | A step or check helper that stops with turns left and no report is sent one more message in its own session (`REPORT_NUDGE`, at most `NUDGE_TURNS`). It costs a short decode on a warm cache, where a retry re-reads its brief and redoes the step. A helper out of turns isn't nudged: its retry gets more turns |
 | Chores | `CHORE_PATIENCE` is 30 minutes. A chore's turn costs a task its slot for about a minute, and a deep-research task runs about 20 |
 | The prime's cold turns | Goose's `SNAPSHOT_MAX_TOKENS` is 10,240, above the chat preamble. E4B stores about 20 KiB a token, so the snapshot is about 200 MB, written once. At 6,144 a cold chat turn re-decoded the rest of the preamble |
+
+### 8.13 The answer the person wants (Jerry, 2026-10-29)
+
+The pipeline answered every ask with a sectioned report, so a question with a one-line answer paid
+for gathering, sections and a summary, then showed one line and a sheet to open. Long tasks are the
+base other features build on, so length is now a property of the task. The person decides it, or
+the pond reads it from the ask.
+
+| Piece | Design |
+|---|---|
+| The shape | `AnswerShape` on the task (migration 0073): `auto`, `short` or `report`. `short` is the answer itself in a few sentences, at most 150 words with its sources. `report` is sections with a Result that opens them |
+| Who decides | The member, beside the deep-research chip on the desktop and the phone ("Pond decides", "Short answer", "Full report"). Or the prime, through `task_start`'s `answer`, when the person said how much they want. Otherwise the planner reads the ask and passes `answer` to `plan_write`. Report is the exception it names: a report, a plan, a comparison of many options, or thoroughness; a softer "short when unsure" gave the same question both shapes across runs. `decide_task_answer` changes only an `auto` task, so a member's choice stands |
+| Report sections | A report plans only the sections the goal asks for or cannot do without: given the composer's examples, it added a meal plan and packing list to a weekend nobody asked one for. A Result as long as its sections, from a last step that compiled them, is not followed by them again (`holds_its_sections`) |
+| A chosen short answer | `open_task` stores the task paused with one worker step (`short_answer_plan`), then sets it running. No planner runs |
+| Briefs | `answer_plan` and `answer_step` size the planner's and the workers' briefs. A short plan has one or two steps and no sections, and `plan_write` refuses a longer one (`MAX_SHORT_STEPS`): told so, the planner still once wrote three, and the answer took 5.9 minutes instead of about 1.5. A report keeps its sections and their 400 to 900 words |
+| The answer's home | The pond tells the plan's last step to title its answer "Result" (`last_step_line`), whatever the planner wrote. A short task with no Result takes the newest thing its steps saved (`answer_artifact`): a helper told to title its answer Result called it "Current Presence and Camera Status". One that saved nothing and put its answer in its summary keeps that summary as its Result (`summary_as_result`) |
+| The card | The task view carries `answer` and, for a finished short answer, `answer_text`. The card shows the answer whole in place of the result line and the report sheet. The notification carries it too, links read as words, cut at 700 characters |
+| Names | A plan step with no key takes one from its name or its place (`step-2`), and an unreadable step's refusal names the fields it had. A wait may name a step by its name, title or number (`match_waits_by_name`). One that matches nothing waits for every step before it (`RelaxedWait`), and `plan_write` says so, rather than refusing the plan. A `new_agent` that can't be read as one (a string, or an object with no name) is dropped, and a step with neither a role nor an agent goes to the general worker. `step_report` reads an artifact named by its title as that artifact, and a made-up id as what the run saved |
+| Sources | A link saved to a bare web address gets `https://`. A camera with no events reads the household's camera and says so, since a helper asked about an imagined "front door" camera and gave up |
+| Tools by job | `tools_withheld` keeps each helper to the task tools its job uses: the planner is not offered `artifact_write` or `step_report`, the checker not `artifact_write` or `plan_write`, a worker not `plan_write`. The planner used to try the step itself first, a turn each time. The prefill compile withholds the same, so each role's snapshot still matches its runs |
+| Correctness | A question about the house plans no web step, and research looks only where the goal points. A helper writes only what its tools returned, and never that the house has nothing unless the house's own tool said so. The verifier fails off-goal work (§8.12) |
+| Start | Every `open_task` rings the runner. A task waits 10 s of quiet, not 30, and the runner looks again when the quiet is due rather than at its next 30 s poll. A step the household interrupts reruns without spending a try |
+| The prime's turn | The deep-research note promises the answer that will come and asks for no tool call: the prime used to look up the task it had just been told about |
 
 ---
 

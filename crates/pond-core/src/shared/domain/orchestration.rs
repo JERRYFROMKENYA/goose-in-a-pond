@@ -660,6 +660,7 @@ impl DelegationAuthority {
             scope,
             tool_groups,
             read_tools,
+            withheld: BTreeSet::new(),
             depth,
             max_turns: role.max_turns,
             context_fraction: role.context_fraction,
@@ -766,6 +767,8 @@ pub struct TaskSpec {
     scope: ChildScope,
     tool_groups: BTreeSet<String>,
     read_tools: BTreeSet<String>,
+    /// Tools of its groups this run is not offered: a helper reaches for a tool it should not use.
+    withheld: BTreeSet<String>,
     depth: DelegationDepth,
     max_turns: u32,
     context_fraction: f32,
@@ -891,6 +894,12 @@ impl TaskSpec {
         &self.persona
     }
 
+    /// Offer the child none of these tools, though its groups hold them. Only ever narrows.
+    pub fn withholding<'a>(mut self, tools: impl IntoIterator<Item = &'a str>) -> Self {
+        self.withheld.extend(tools.into_iter().map(str::to_string));
+        self
+    }
+
     /// Nudge the child once when it stops without reporting; see [`ReportNudge`].
     pub fn nudging(mut self, nudge: ReportNudge) -> Self {
         self.nudge = Some(nudge);
@@ -904,6 +913,9 @@ impl TaskSpec {
     /// May the child call this fully-qualified tool?
     /// Stricter than `filter_tools_by_groups`: unprefixed and user-added MCP tools are denied.
     pub fn grants_tool(&self, tool_name: &str) -> bool {
+        if self.withheld.contains(tool_name) {
+            return false;
+        }
         match group_of_tool(tool_name) {
             Some(extension) => {
                 self.tool_groups.contains(extension) || self.read_tools.contains(tool_name)
@@ -1169,6 +1181,17 @@ mod depth_tests {
             .delegate(&asks_vision, request("researcher", "go"))
             .unwrap();
         assert!(!spec.grants_tool(events));
+    }
+
+    #[test]
+    fn a_withheld_tool_is_never_granted_though_its_group_is() {
+        let groups: BTreeSet<String> = ["giap-weather".to_string()].into_iter().collect();
+        let spec = DelegationAuthority::root("s1", ProfileScope::Household, groups)
+            .delegate(&weather_role(), request("researcher", "go"))
+            .unwrap()
+            .withholding(["giap-weather__get_forecast"]);
+        assert!(!spec.grants_tool("giap-weather__get_forecast"));
+        assert!(spec.grants_tool("giap-weather__get_current_weather"));
     }
 
     #[test]

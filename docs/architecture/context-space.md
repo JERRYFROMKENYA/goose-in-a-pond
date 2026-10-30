@@ -1,77 +1,92 @@
 # The context space
 
-One store, one multimodal index and one set of background agents for everything a pond learns about
-its household, from the household's phones, its home and its conversations. The model and the household
-search the same space, and each sees only what its principal may see.
+One store, one multimodal index and a set of shipped agents for everything a pond learns about its
+household, from its phones, its home and its conversations. The model and the household search the
+same space, and each sees only what its principal may see.
 
-**Status: DESIGNED 2026-10-28.** Current-state claims were checked against `main` at `f8831d73` and,
-where marked, measured on the nano that day. No code has changed. It replaces the memory, summary,
-index, suggestion and proactive-review systems; section 2 lists what goes. It cuts across PAI-1, -2,
--3, -6, -7 and -8, so [the PAI checklist](./pai/00-checklist.md) governs every phase.
+**Status: DESIGNED 2026-10-28, re-planned 2026-10-30** against `main` at `0309bf0d`. The re-plan
+builds on what landed on 28 and 29 October, summarised in
+[changes-2026-10-28-29.md](./changes-2026-10-28-29.md): long tasks, agents as recipes, deep research,
+the line, My Pond and `agamemnon`. The context, memory and index code is unchanged since the first
+draft. No code has changed. This design replaces memories, summaries, the index, suggestions and
+proactive review; section 3 lists what goes. It cuts across PAI-1, -2, -3, -6, -7 and -8, so
+[the PAI checklist](./pai/00-checklist.md) governs every phase.
 
 ---
 
-## 0. The rules this design keeps
+## 0. Rules
 
-These bind every phase. A phase that breaks one is wrong however good it looks.
-
-1. **Counter-phase.** Indexing and agent work run only when the pond is not serving the household.
-   A turn, a voice session or a wake word stops them within one batch. The one exception is the
-   query embed a turn needs for its own retrieval.
-2. **Deny by default.** Retrieval filters by the caller's principal in SQL before anything is scored.
-   A guest sees nothing. An agent reads as the member it works for.
-3. **Propose, do not act** (PAI-7). Agents write items and proposals. Only a member's approval turns a
-   proposal into an action.
-4. **Nothing leaves the household in plaintext, and personal data does not leave at all.** Phones send
-   to their own pond and nowhere else. Push wakes carry no content.
-5. **The KV prefix is untouched.** Per-turn context rides `<system-context>` in the user message.
-6. **Every derived item names its sources.** Deleting a source deletes what was derived only from it,
-   and destroying a media item's key destroys its bytes everywhere.
+1. **Counter-phase.** Indexing and context agents run only when the pond is not serving the
+   household: no turn in flight, no voice session, no member's long task running. A turn stops them
+   within one batch. The one exception is the query embed a turn needs for its own retrieval.
+2. **Deny by default.** Retrieval filters by the caller's principal in SQL before anything is
+   scored. A guest sees nothing. An agent reads as the member it works for.
+3. **Propose, do not act** (PAI-7). Agents write items and proposals. A member's approval is what
+   turns a proposal into an action.
+4. **Personal data stays in the household.** Phones send to their own pond and nowhere else. Push
+   wakes carry no content. A web lookup never carries a person's name, health or diet, as research
+   steps already promise.
+5. **The KV prefix is untouched.** Per-turn context rides `<system-context>`.
+6. **Every derived item names its sources.** Deleting a source deletes what was derived only from
+   it, and destroying a media item's key destroys its bytes.
 7. **Every number is an Orin measurement or says it is not.**
 
 ---
 
-## 1. Why one space
+## 1. What it builds on
 
-Today the pond keeps five separate systems for what it knows:
+Most of what the first draft proposed to build has since landed in another form. The context space
+uses it rather than adding a second one.
+
+| Landed (or open) | The context space uses it for |
+|---|---|
+| **Agents as recipes** (PAI-6 section 9): `agent_recipes` rows with a `giap_role` block of activations (`schedule`, `event`, `delegated`, `task_step`, `agent`), a fixed hook catalog, and a compiled prefill per agent | Every context agent is a shipped recipe. There is no new agent framework. Section 7 adds two activations and three hooks to the catalog |
+| **Suggested agents** (P19): shipped templates offered as cards, none running until a member turns it on | Understanding, Profile and Proposal ship this way |
+| **Long tasks** (PAI-6 section 8): a planner, workers and a verifier, with artifacts scoped to the owner | Planning *is* this: the composer role writes itineraries and a calendar artifact. A finished task's report and events become items, so they can be found later |
+| **The line and the lane's order** (sections 8.9 and 8.10): compaction, then a member's long task, then chores; a chore that has waited 15 minutes gets one turn; a held subagent permit counts as a turn in flight; 30 s of household quiet before a task starts | Context agents are chores. The new embedding slot yields to anything ahead of chores |
+| **Helpers that read the house** (`HOUSEHOLD_READ_TOOLS`, #717, open) | `search_context` joins that list, so a research step reads the household's own context instead of searching the web for it |
+| **My Pond and the admin card** (`pond-administrator.md`): the nano has an OP-TEE firmware TPM with `tpm2-tools`, and the admin card's recovery copy is sealed to it | The data key is sealed the same way, and the admin card becomes its recovery key (section 9) |
+| **Per-phone keys** (#715, open), held behind Face ID or a fingerprint | The same pattern holds the phone's outbox key |
+| **`agamemnon`**: the pond as a locked account, its data in `/var/lib/goose-in-a-pond` (`0750`) | That directory is what the encrypted volume holds |
+| **Household roles** (#707, open): Owner, Member, Guest, Developer | Who sees household items, and who may connect or remove a source |
+| **Phone screens** for agents and prefills (goose-on-the-go #198), My Pond (#205) and the queue (#204) | Context agents show there with their state. Sources and consent go beside them |
+
+---
+
+## 2. Why one space
+
+Today five systems hold what the pond knows, each with its own writer, scope filter, deletion path
+and lane job:
 
 - memories (`memory_fragments`, batch extraction, consolidation);
 - conversation summaries (`sessions.rolling_summary`);
-- an index over three corpora (`Corpus::{Memory, Context, Summary}` in `pond_vectors.db`);
+- an index over three corpora (`Corpus::{Memory, Context, Summary}`);
 - suggestions (`suggestion_queue`);
-- proactive review (`drafts` and proposals).
+- proactive review (`drafts`).
 
-Each has its own writer, scope filter, deletion path and lane job. A fact the household told the
-pond, an email it read and a suggestion it made are three kinds of row with three privacy stories.
+Long tasks have since added a sixth, artifacts, which is good working memory for a task but
+unsearchable once the task ends.
 
 Measured on the nano on 2026-10-28:
 
 - The embedder is fastembed `all-MiniLM-L6-v2` (384 dimensions, English-only).
 - 25 memory vectors and 40 summary vectors exist, and nothing else is indexed.
-- The nomic GGUF (146 MB) has been on disk since 14 Aug and is never loaded, because
-  `embedding_provider = fastembed`.
+- A 146 MB nomic GGUF sits on disk and is never loaded.
 - Context items are reachable only through `giap-context`, which ships off.
 
 **What changes:**
 
-- Every piece of knowledge becomes an **item** with:
+- Every piece of knowledge becomes an **item**, with:
   - an owner and an audience;
   - its provenance;
   - one vector in one multimodal space.
-- Memories, summaries, emails, photos, camera events and suggestions are item *kinds*, not systems.
-- Lifecycles stop being implied by which table a row sits in. Each kind declares its own (section 3.2).
+- Memories, summaries, mail, photos, camera events, suggestions and finished reports are item
+  *kinds*.
+- Each kind declares its lifecycle (section 4.2), instead of inheriting it from the table it sits in.
 
-This reverses the personal-context index's decision "one index, separate stores", deliberately. Its
-reason was that "a merged store cannot be unmerged". A `kind` column with a declared lifecycle per
-kind is unmerged by construction, and it buys:
-
-- one retrieval path;
-- one scope filter;
-- one deletion path;
-- one consent view;
-- one interface for every agent.
-
-The index's other decisions stand:
+This reverses the personal-context index's "one index, separate stores" deliberately. The concern
+behind it, that "a merged store cannot be unmerged", is met by the `kind` column and a declared
+lifecycle per kind. The index's other decisions stand:
 
 - vectors live in `pond_vectors.db` and hold no text;
 - staleness is a `LEFT JOIN`, not a queue;
@@ -80,398 +95,401 @@ The index's other decisions stand:
 
 ---
 
-## 2. What this replaces
+## 3. What this replaces
 
 | Today | Becomes | Phase |
 |---|---|---|
-| Batch extraction (`BatchExtractionService`, lane job `MemoryExtraction`) | Conversation agent (6.2) | P3 |
-| Dedup and ranking (`memory_relevance.rs`) | One ranker in the unified retriever. Dedup moves to Consolidation, with a threshold measured on EmbeddingGemma 2 | P3 |
-| Consolidation (lane job, plus `POST /memory/consolidate`, which bypasses the lane) | Consolidation agent, lane only | P3 |
-| Cleanup and decay (a 6-hour SQL timer) | The lifecycle per kind (3.2), enforced by one sweep | P1 |
-| Per-turn recall (`topical_memories`), by brute-force cosine over `memory_fragments.embedding`, not the index | The unified retriever, over the index | P3 |
-| Rolling summaries (`session_summary.rs`, lane job `SummaryRefresh`) and titling | Written by the Conversation agent; `hydrate_goose_session` reads them as today | P3 |
-| Three corpora, plus vectors stored on `memory_fragments` and `context_items` with no `model_id` | One index keyed by item, with vectors stored only there | P1, P2 |
-| Startup backfill (no idle gate) and the `IndexMaintenance` lane job | The embedding slot (5.2) | P2 |
-| `IngestPipeline`'s inline embed on every bus event | Ingest (6.1), with embedding deferred to the slot | P1 |
-| `giap-memory` and `giap-context` (`recall`, `search_context`) | One tool group (section 9) | P3 |
-| Suggestion generation (lane job; pull only through `GET /suggestions`) and the template suggestors | Proposal agent, with delivery to the phone | P5 |
-| Proactive review (`drafts` with origin `proactive`) and reminder proposals | Proposal agent. Accepted reminders stay in `reminders`, as approved commitments | P5 |
-| Quiet compaction | Stays. It works on goose's live conversation, not on knowledge | n/a |
+| Batch extraction (`BatchExtractionService`, lane job `MemoryExtraction`), summary refresh, titling | The Conversation agent (7.2) | P3 |
+| Dedup and ranking (`memory_relevance.rs`) | One ranker in the unified retriever; dedup moves to Consolidation, with a threshold measured on EmbeddingGemma 2 | P3 |
+| Consolidation (lane job, plus `POST /memory/consolidate`, which bypasses the lane) | The Consolidation agent, lane only | P3 |
+| Cleanup and decay (a 6-hour SQL timer) | The lifecycle per kind, enforced by one sweep | P1 |
+| Per-turn recall (`topical_memories`), by brute-force cosine over `memory_fragments.embedding` | The unified retriever, over the index | P3 |
+| Three corpora, plus vectors stored on source rows with no `model_id` | One index keyed by item, holding every vector | P1, P2 |
+| Startup backfill (no idle gate) and the `IndexMaintenance` lane job | The embedding slot (6.2) | P2 |
+| `IngestPipeline`'s inline embed on every bus event | Ingest (7.1), with embedding deferred | P1 |
+| `giap-memory` and `giap-context` | One tool group (section 10) | P3 |
+| Suggestion generation and the template suggestors | The Proposal agent | P5 |
+| Proactive review and reminder proposals | The Proposal agent. Accepted reminders stay in `reminders` | P5 |
+| Long-task artifacts | They stay as a task's working memory. A finished task's result and calendar are copied in as items | P5 |
+| Quiet compaction | Stays: it works on goose's live conversation | n/a |
 
-**Unwired code to delete in P1.** `memory_graph.rs` and the `memory_edges` table, whose foreign
-key names a nonexistent `memories(id)`; the settings `memory_graph_enabled` and
-`memory_extraction_first_pass_at`, which nothing reads; `AppState.mcp_memory`;
-`session_messages.embedding`; and context retention's `purge_expired`, which nothing calls.
+**Unwired code to delete in P1:**
+- `memory_graph.rs`, and `memory_edges`, whose foreign key names a nonexistent `memories(id)`;
+- `memory_graph_enabled` and `memory_extraction_first_pass_at`, which nothing reads;
+- `AppState.mcp_memory`;
+- `session_messages.embedding`;
+- context retention's `purge_expired`, which nothing calls.
 
-**Defects that go with the old systems**, each verified 2026-10-28:
+**Defects that go with the old systems** (verified 2026-10-28, and the files are unchanged on
+`0309bf0d`):
+- the `giap-memory` tools search at `ProfileScope::Household`, the open PAI-1 gap;
+- MCP `save_memory` writes `profile_id: None`, making a member's own save household-visible;
+- turn recall and `search_context` read the BLOBs on source rows, and only `recall` reads the index;
+- the `SuggestionGeneration` job has no cancel watcher.
 
-- The `giap-memory` tools search at `ProfileScope::Household`, so one member's turn reads and can
-  forget another member's memories. This is the open PAI-1 gap.
-- MCP `save_memory` writes `profile_id: None` (`pond-mcp-server/src/memory.rs`), which makes a
-  member's own save visible to the whole household.
-- Turn recall and `search_context` read the vector BLOBs on source rows. Only `recall` reads the
-  index, so a long context item, which has no BLOB, cannot be found semantically.
-- The `SuggestionGeneration` job has no cancel watcher, so it runs on when someone starts talking.
+The first two are live privacy defects and are worth fixing before P3 (a task card offers it).
 
-**Tests that read source as text** and change with these phases:
-
-- `index_chokepoints_are_wired.rs`, `redaction_chokepoints_are_wired.rs` (its memory half),
-  `proactive_reviewer_is_wired.rs` and `background_writers_are_not_activity.rs` in `pond-infra`;
-- `context_pipeline_is_wired.rs` and the two `context_producer_tracks_*` tests in `pond-core`;
-- the inline `<system-context>` envelope tests in `goose_agent.rs`.
-
-Each is rewritten to guard the new chokepoint, never deleted without a replacement.
+**Tests that read source as text**, rewritten to guard the new chokepoint and never deleted
+without a replacement:
+- `index_chokepoints_are_wired.rs`, `redaction_chokepoints_are_wired.rs`,
+  `proactive_reviewer_is_wired.rs` and `background_writers_are_not_activity.rs`;
+- `context_pipeline_is_wired.rs` and the two `context_producer_tracks_*` tests;
+- the `<system-context>` envelope tests in `goose_agent.rs`.
 
 ---
 
-## 3. The store
+## 4. The store
 
-### 3.1 Items
-
-`pond_system.db`, one table plus links. Text is stored after redaction (the existing chokepoint).
+### 4.1 Items
 
 | Column | Meaning |
 |---|---|
-| `id` | UUIDv7, so ids are time-ordered and agent cursors are a single high-water mark |
-| `kind` | `message`, `conversation`, `fact`, `entity`, `event`, `media`, `notification`, `mail`, `home_event`, `visit`, `suggestion`, `trait` |
-| `source_id`, `external_id` | Unique together. Ingest is idempotent on them, as `IngestPipeline` already is on `source:external_id` |
-| `owner_profile_id` | The member it belongs to. Must be set unless `audience = household` (a `CHECK`), so no private item can lose its owner (PAI-1's lesson) |
-| `audience` | `private` (default) or `household`. Sharing a private item with named members is a row in `item_shares` |
-| `sensitivity` | `PrivacySensitivity`, as today |
+| `id` | UUIDv7, so agent cursors are a single high-water mark |
+| `kind` | `message`, `conversation`, `fact`, `entity`, `event`, `media`, `notification`, `mail`, `home_event`, `visit`, `report`, `suggestion`, `trait` |
+| `source_id`, `external_id` | Unique together; ingest is idempotent on them |
+| `owner_profile_id` | Required unless `audience = household` (a `CHECK`) |
+| `audience` | `private` (default) or `household`; sharing with named members is a row in `item_shares` |
+| `sensitivity` | `PrivacySensitivity` |
 | `modality` | `text`, `image`, `audio`, `video` |
-| `observed_at`, `valid_until` | When it happened, and when it stops mattering (events, suggestions) |
-| `title`, `body` | Redacted text. `body` is the OCR or caption text for media, when there is any |
-| `blob_id` | Encrypted media bytes (section 7) |
+| `observed_at`, `valid_until` | When it happened, and when it stops mattering |
+| `title`, `body` | Redacted text: for media, the OCR or caption text when there is any |
+| `blob_id` | Encrypted media bytes |
 | `state` | `active`, `superseded`, `dismissed`, `accepted` |
-| `produced_by` | `ingest` or `agent:<name>@<version>`, so a bad agent version's output can be found and withdrawn |
+| `produced_by` | `ingest`, or the recipe name and its definition hash, so a bad agent version's output can be found and withdrawn |
 | `confidence` | For derived items |
 
 `item_links(from_id, to_id, relation)` records `derived_from`, `evidence_for`, `mentions`,
 `same_as` and `supersedes`.
 
-### 3.2 Lifecycle per kind
+### 4.2 Lifecycle per kind
 
-The lifecycle is declared once in `pond-core` (policy), not in each writer.
+The lifecycle is declared once, in `pond-core`.
 
-| Kind | Who writes | Default audience | Retention | On source deletion |
+| Kind | Written by | Default audience | Kept | When its source is deleted |
 |---|---|---|---|---|
-| `message`, `conversation` | chat | private | Until the conversation is deleted | n/a |
-| `fact`, `entity`, `trait` | agents, the model's own save | private | Until superseded or deleted | Deleted when its last `evidence_for` source goes |
+| `message`, `conversation` | chat, Conversation | private | Until the conversation is deleted | n/a |
+| `fact`, `entity`, `trait` | agents, the model's own save | private | Until superseded | Deleted once its last `evidence_for` source is gone |
 | `media`, `notification`, `mail`, `visit` | ingest | private | Per source setting | n/a: these are sources |
-| `home_event` | ingest | household | 7 days, as `sensor_readings` is today, unless an agent cites it | n/a |
-| `event` | ingest, agents | private | Until `valid_until` + 30 days | Deleted when derived only from deleted sources |
-| `suggestion` | agents | private | Until decided or `valid_until` | Withdrawn |
+| `home_event` | ingest | household | 7 days, unless an agent cites it | n/a |
+| `event`, `report` | ingest, agents, long tasks | the owner's | `valid_until` + 30 days; reports until deleted | Deleted when every source is gone |
+| `suggestion` | Proposal | private | Until decided or `valid_until` | Withdrawn |
 
-Approved actions do not cascade. A reminder the member accepted is their commitment, not derived
-data, which is the existing decision.
+Approved actions do not cascade. An accepted reminder is the member's commitment.
 
-### 3.3 The index
+### 4.3 The index
 
 `pond_vectors.db` keeps its shape: `(item_id, model_id, modality, dims, vector)`, with no text.
 
-- **Staleness.** An item needs a vector when no row exists for the current `model_id`
-  (`needs_embedding` already works this way). Changing the model refills the index in idle time.
+- **Staleness.** An item without a vector for the current `model_id` needs one, so changing the
+  model refills the index in idle time.
 - **Vectors are personal data.** Inversion attacks such as Vec2Text reconstruct short inputs from
-  their embeddings. Vectors are encrypted at rest like their items, and retrieval joins them to
-  live, scope-filtered items.
+  their embeddings. Vectors sit on the encrypted volume, and retrieval joins them to live,
+  scope-filtered items.
 
 ---
 
-## 4. Embedding: EmbeddingGemma 2
+## 5. Embedding: EmbeddingGemma 2
 
-EmbeddingGemma 2 (released 2026-10-06, Apache 2.0, built on Gemma 4) puts text, code, images, audio
-and video in one 768-dimension space, with Matryoshka cuts to 512, 256 and 128, and has an 8,192-token
-context. Google's page gives 740M parameters in total and a 270M text model; news reports add a 170M
-vision encoder and a 300M audio encoder, loadable separately. None of this is measured on the Orin
-yet; that is phase P0.
+EmbeddingGemma 2 (2026-10-06, Apache 2.0, built on Gemma 4) puts text, code, images, audio and video
+in one 768-dimension space, with Matryoshka cuts to 512, 256 and 128, and an 8,192-token context.
 
-What it buys here:
+- **Size.** Google's page gives 740M parameters in total and a 270M text model. News reports add a
+  170M vision encoder and a 300M audio encoder, loadable separately.
+- **Not yet measured on the Orin.** That is P0.
 
-- **Pictures become searchable without the chat model's vision encoder.** The Orin declares no
-  picture support until an encoder is measured there (`device_budget::DEVICE_MEASURED_VISION`). An
-  image vector answers "find the screenshot of that restaurant" anyway.
+What it buys:
+
+- **Pictures become searchable without the chat model's vision encoder.** The Orin still declares
+  no picture support until an encoder is measured there (`DEVICE_MEASURED_VISION`).
 - **One space for every modality.** A text question finds a photo, a voice note or a camera clip.
-- **Over 100 languages.** A memory said in Swahili or Sheng is found by a question asked in English.
+- **Over 100 languages.** A fact said in Swahili or Sheng is found by a question asked in English.
 
 How it runs:
 
-| Part | When it is loaded | On the turn path? |
+| Part | Loaded | On the turn path? |
 |---|---|---|
-| Text encoder | Resident if the device budget allows; otherwise loaded per batch, and the turn falls back to keyword recall | Yes: one query embed per turn, measured against the warm TTFT |
-| Vision encoder | Per batch, in idle time, when free RAM covers it | No |
-| Audio encoder | Per batch, in deep idle | No |
+| Text encoder | Resident if the device budget allows; otherwise per batch, and the turn falls back to keyword recall | One query embed per turn, measured against the warm TTFT |
+| Vision encoder | Per batch, when free RAM covers it | No |
+| Audio encoder | Per batch, in quiet hours | No |
 
-- Store 768 dimensions. A 256-dimension prefilter is not worth having below about 50,000 vectors.
-- Use the model card's task prompts word for word, on both the query side and the document side.
-- On the nano, 518 MB was free while E4B served (measured 2026-10-28). That is the whole budget for
-  every encoder. `device_budget.rs` gets one measured constant per encoder before any of them ships.
+On the nano, 518 MB was free while E4B served (2026-10-28). That figure moves with every helper
+snapshot and drafter change, so `device_budget.rs` gets one measured constant per encoder before
+any of them ships. Use the model card's task prompts word for word.
 
 ---
 
-## 5. Counter-phase scheduling
+## 6. Counter-phase scheduling
 
-The pond has one GPU, one memory bus and six cores the language model also wants. Indexing that
-overlaps a turn slows the turn, so the two never overlap.
+### 6.1 Order
 
-### 5.1 States
+The lane already orders background work, and the context space slots into it:
 
-| State | Entered when | Background work allowed |
-|---|---|---|
-| Serving | A turn is in flight, or a voice session or wake capture is active | None. Only the turn's own query embed |
-| Settling | For a measured interval after the last serving signal, because follow-ups cluster | None starts. Running work finishes its batch and stops |
-| Idle | Settling has passed | The embedding slot and the inference lane, in batches |
-| Deep idle | The household's quiet hours, learned from 14 days of activity, and no one present | Heavy work: media backfill, audio, profile synthesis, consolidation, re-embedding after a model change |
+1. a turn in flight, a voice session, or a held subagent permit: nothing else;
+2. compaction;
+3. a member's long task, one step at a time;
+4. chores, including every context agent: the least recently run goes first, and one that has
+   waited 15 minutes gets a turn;
+5. the embedding slot (6.2).
 
-Presence signals are the desktop in focus, a phone in the foreground (the existing heartbeat), a
-voice session, and `BusEvent::Presence` from the camera.
+Heavy agents (Consolidation, Profile, media backfill, re-embedding after a model change) also hold
+to the household's quiet hours, as PAI-6 section 8.3 asks of long tasks.
 
-### 5.2 Two slots, one governor
+### 6.2 The embedding slot
 
-- **The inference lane** stays the only slot that runs the LLM, with its existing rules: one job at
-  a time, a new turn cancels the job, and quiet passes stand.
-- **The embedding slot** is new. It runs one batch at a time and is sized so a batch finishes within
-  a measured bound (the target is 250 ms on the Orin for text). It checks the governor between
-  batches. It may overlap a lane job, because both are background work, but never a turn.
-- **Encoders are loaded per state.** The vision encoder loads in idle only when free RAM covers its
-  measured budget, and it unloads when serving starts or the batch ends.
-- **There is no queue.** The embedding slot finds work by the staleness join. Each agent keeps a
-  cursor, `agent_cursors(agent, last_item_id)`, so a crash or restart resumes where it stopped.
-
-Deliberate shares are the one priority: a screenshot a member sends on purpose is embedded at the
-next idle moment, ahead of any backfill.
+- **When it runs.** It is new, and it runs only when nothing in steps 1 to 3 is active. It may
+  overlap a chore, because both are background work.
+- **Batches.** Each batch must finish within a measured bound (the target is 250 ms on the Orin for
+  text). The slot checks the lane between batches.
+- **Encoders.** The vision encoder loads only when free RAM covers its measured budget, and it
+  unloads when serving starts.
+- **No queue.** Work is found by the staleness join. Agents keep cursors
+  (`agent_cursors(recipe, last_item_id)`), so a restart resumes where it stopped.
+- **Deliberate shares go first.** A screenshot a member sends on purpose is embedded at the next idle
+  moment, ahead of any backfill.
 
 ---
 
-## 6. Agents
+## 7. Agents
 
-### 6.1 Ingest is a pipeline, not an agent
-
-Each step runs without an LLM:
+### 7.1 Ingest is a pipeline, not an agent
 
 1. Receive from a route or connector, and resolve the principal (the paired device's member).
 2. Normalise to an item, with an encrypted blob for media.
-3. Minimise and redact. This is the existing chokepoint, which also drops one-time codes and 2FA
-   notifications.
+3. Redact, using the existing chokepoint, and drop one-time codes and 2FA notifications.
 4. Deduplicate on `(source_id, external_id)`, and on the content hash for media.
 5. Persist the item and its blob in one transaction.
-6. Publish `BusEvent::Ingest` (PAI-8 P8, which does not exist yet).
+6. Publish `BusEvent::Ingest` (PAI-8 P8; the variant does not exist yet).
 
-### 6.2 The agents
+### 7.2 Context agents are recipes
 
-Each agent is declared in `pond-core`: its trigger, principal rule, the kinds it reads, the kinds it
-writes, its tool allow-list and its budget. Each runs on the PAI-6 orchestrator inside the inference
-lane, and everything it produces is an item with provenance.
+**Additions to the `giap_role` catalog** (`role_block.rs`), kept fixed and validated like the rest:
 
-| Agent | Replaces | Trigger | Reads | Writes |
+| Addition | Kind | What it does |
+|---|---|---|
+| `event: { on: context.ingest, kinds: [...] }` | Activation | Fires on `BusEvent::Ingest` for the named kinds. Its cooldown turns a burst into one run |
+| `event: { on: session.quiet }` | Activation | Fires once a conversation has been quiet for its cooldown (`BusEvent::Session` exists; the activation does not) |
+| `context` | Before hook | The owner-scoped items most relevant to the brief, within a token budget |
+| `save_items` | After hook | Writes facts, entities, events and traits from the hand-back, each linked to its sources and stamped with the recipe's hash |
+| `propose` | After hook | A suggestion to the owner's own devices, with its evidence. The decision comes back as feedback |
+
+**The shipped agents.** Goose names are left to the existing naming.
+
+| Agent | Ships as | Activation | Hooks | Replaces |
 |---|---|---|---|---|
-| Conversation | Memory extraction, summary refresh, titling | A conversation quiet for a measured interval | The conversation's new messages | Facts with evidence links, the conversation's summary and title |
-| Understanding | New | New non-chat items past its cursor | The item and its nearest neighbours | Facts, entities, events and links |
-| Consolidation | Consolidation | Deep idle, daily | One member's facts | Merges and supersessions. A contradiction becomes a question for the member |
-| Profile | New | Deep idle, weekly | Facts, entities, visits, and decided suggestions | Traits, each with its evidence |
-| Proposal | Suggestion generation, proactive review | Ingest bursts, time of day, presence, home events | The context around the trigger | Suggestions |
-| Planner | New | An accepted suggestion, or a request ("plan Saturday") | Events, places, calendar | Draft itineraries and schedule entries, as proposals |
+| Conversation | Default, compiled every start | `session.quiet` | `context` before, `save_items` after | Extraction, summary refresh, titling |
+| Consolidation | Default | `schedule`, daily, in quiet hours | `context` before, `save_items` after | Consolidation |
+| Understanding | Suggested | `context.ingest` for mail, media, notifications and visits | `context` before, `save_items` after | n/a (new) |
+| Profile | Suggested | `schedule`, weekly, in quiet hours | `context` before, `save_items` after | n/a (new) |
+| Proposal | Suggested | `context.ingest`, `presence.arrive`, `time.daily`, and camera and sensor events | `context`, `today` and `weather` before, `propose` after | Suggestion generation, proactive review |
+| Planning | Exists: the composer role and deep research | An accepted suggestion, through `start_task` | n/a | n/a |
 
-Per-turn retrieval replaces `topical_memories` (`goose_agent.rs`). It runs one scored search across
-every kind the caller may see and fills `<system-context>` within PAI-3's budget.
+Conversation and Consolidation are default because they replace behaviour that is always on today.
+The other three are suggested: nothing new runs until a member turns it on, as P19 already holds.
 
-### 6.3 Untrusted content
+**Principal.** A context agent runs at the scope of the item or conversation that woke it, and an
+agent woken by a household item reads only household items. This is the existing `member: owner`
+rule, extended to agents the household owns.
 
-Mail, notifications, web pages and text read from screenshots can carry instructions aimed at the
-model. Every agent that reads them follows four rules:
+**Untrusted content.** Mail, notifications, pages and text read off screenshots can carry
+instructions aimed at the model. An agent that reads them:
+1. holds no tool that sends, buys, moves or fetches, so `giap-knowledge` is withheld;
+2. writes only items and proposals;
+3. shows the member which items a proposal came from before they approve it.
 
-1. It has no tool with a side effect, and no network tool, because a fetch is an exfiltration
-   channel.
-2. Its output is items and proposals only.
-3. A proposal shows the member which items it came from before they approve it.
-4. Untrusted text reaches the model inside a data block, never as instructions.
+Untrusted text reaches the model inside a data block, never as instructions.
 
-### 6.4 Four flows
+**Cost.** Each default agent adds one compiled prefill (about 20-30 MB on disk) and one entry to the
+boot compile pass, which already waits behind the household's turns.
 
-1. **Screenshot to outing.** A member shares a screenshot of a restaurant from their phone. The
-   phone sends it with its OCR text. The pond stores an image item owned by that member and embeds
-   it at the next idle moment. Understanding writes a `place` entity linked to the image. On Friday
-   evening, Proposal finds the place, a free Saturday on the member's calendar and the travel time.
-   The member's phone shows "Lunch at the place you saved on Tuesday? You're free from 12." Accepting
-   makes Planner write a schedule entry.
-2. **Mail to reminder.** IMAP delivers a school email. Understanding writes an `event` ("sports day,
-   Friday 14:00"), and Proposal offers a reminder to both parents, because the event's audience is
-   household.
+### 7.3 Four flows
+
+1. **Screenshot to outing.**
+   1. A member shares a screenshot of a restaurant. The phone sends it with its OCR text.
+   2. Understanding writes a `place` entity linked to the image.
+   3. On Friday evening Proposal sees the place, a free Saturday and the weather, and asks the
+      member's phone "Lunch at the place you saved on Tuesday?".
+   4. Accepting starts a planning task. The composer writes the plan and a calendar, and both
+      become items.
+
+   A place lookup on the web carries the place's name only, and only with the nearby-places switch
+   on.
+2. **Mail to reminder.** IMAP delivers a school email. Understanding writes the `event`, and
+   Proposal offers a reminder to both parents, because the event is a household item.
 3. **Home routine.** `home_event` items show the porch light switched off by hand at about 23:00 on
-   twelve of fourteen nights. Proposal offers an automation, which the member approves. Nothing is
-   automated until then.
-4. **Recall.** A member says "Mama ana mzio wa karanga" in a conversation. Conversation writes a fact
-   with that conversation as its evidence. A week later the member asks in English "what is mum
-   allergic to?", and retrieval finds it.
+   twelve of fourteen nights. Proposal offers an automation. Nothing changes until a member approves
+   it.
+4. **Recall.** "Mama ana mzio wa karanga", said in a conversation, becomes a fact with that
+   conversation as its evidence. A week later "what is mum allergic to?" finds it.
 
 ---
 
-## 7. From the phone to the pond
+## 8. From the phone to the pond
 
-The phone app already has a proposal for its half,
-[`docs/PHONE-CONTEXT.md`](https://github.com/jarida-io/goose-on-the-go/blob/main/docs/PHONE-CONTEXT.md)
-(2026-10-16, nothing built). Its pipeline (collectors, reducer, outbox, sync over a proven route
-only) is kept. This design adds media, the envelope and the wakes.
+The phone's proposal,
+[`docs/PHONE-CONTEXT.md`](https://github.com/jarida-io/goose-on-the-go/blob/main/docs/PHONE-CONTEXT.md),
+is kept: collectors, a reducer, an outbox, and sync over a proven route only. None of it is built
+yet.
 
-### 7.1 What exists
+### 8.1 What exists and what doesn't
 
 | Exists | Missing |
 |---|---|
-| CPace pairing, SPKI-pinned HTTPS on :4443, the embedded tailnet node off the LAN | `POST /api/v1/context/ingest` (`SourceKind::Mobile` is `AwaitingIngestRoute`) |
-| Photos picked in chat, stored as session attachments | Any media item: `ItemKind` is `Message`, `Event`, `Document`, `Location`, `Task`, and nothing stores blobs |
-| FCM wakes with no content: `notification_id`, `category`, `wake` (`fcm_push_relay.rs`) | APNs. The phone appears not to act on a wake until it is opened |
-| Token storage in SecureStore | Collectors, a share target, a persistent outbox, background work, resumable upload |
+| CPace pairing, SPKI-pinned HTTPS on :4443, the embedded tailnet node | `POST /api/v1/context/ingest`; `SourceKind::Mobile` is still `AwaitingIngestRoute` |
+| Photos picked in chat, kept as attachments | Media items: `ItemKind` has no media kind, and there is no blob store |
+| FCM wakes carrying only `notification_id`, `category` and `wake` | APNs. The phone appears not to act on a wake until it is opened |
+| Agent, My Pond and queue screens | Collectors, a share target, a persistent outbox, background work, resumable upload |
 
-### 7.2 Sources
+### 8.2 Sources
 
 | Source | Android | iOS | Mode |
 |---|---|---|---|
 | Deliberate shares (screenshots, photos, links, text) | Share intent | Share extension | Eager |
 | Screenshot and photo albums, per album | MediaStore | PhotoKit, limited library | Lazy: on Wi-Fi, while charging |
 | Message and mail notifications, per app | `NotificationListenerService` | Not available to apps | Eager, text only |
-| Calendar, contacts | Read on the phone | Read on the phone | Changes only. The pond pulls CalDAV itself where it can |
-| Places | Visits, clustered on the phone | `CLVisit` | Visits only, never a raw trail |
+| Calendar, contacts | Read on the phone | Read on the phone | Changes only |
+| Places | Visits, clustered on the phone | `CLVisit` | Visits, never a raw trail |
 
-The phone does the cheap perception, which keeps raw data on the phone and work off the pond:
+The phone does the cheap perception: OCR (ML Kit, Apple Vision), clustering places, thumbnails,
+content hashes, and dropping one-time codes.
 
-- OCR, with ML Kit on Android and Apple's Vision framework on iOS;
-- clustering locations into named places;
-- thumbnails and content hashes;
-- dropping one-time codes before they are sent.
+### 8.3 Transport
 
-### 7.3 Transport
-
-1. **Envelope.** Each item is sealed on the phone with HPKE (RFC 9180) to the pond's ingest key and
-   signed with the device's key (StrongBox or Secure Enclave). The pond's public key comes over the
-   pinned pairing channel. Where the board's storage is fused (section 8), the private key never
-   leaves the pond's hardware. The same bytes are then safe over the LAN, the tailnet, or a
-   store-and-forward hop while the pond is away.
-2. **Outbox.** The outbox is encrypted on the phone and keyed `(source, external_id)`. Media uploads
-   in resumable chunks. The phone deletes its copy once the pond acknowledges a durable write.
-3. **Route.** Sync uses only a route the connection manager has proven: local, or the tailnet. The
-   pond never opens a public port.
-4. **Identity.** The pond takes the member from the paired device. That needs
-   `Principal.proven_profile_id` filled in the auth middleware; it is `None` on every path today
-   (PAI-2's next step).
-
-### 7.4 Back to the phone
-
-- A suggestion travels as an FCM or APNs wake with no content.
-- The phone then fetches `/notifications/pending` over its proven route and shows the suggestion
-  itself. Google and Apple see only that a wake happened.
-- iOS needs a Notification Service Extension or a silent push, which the phone doc notes needs the
-  paid team.
+1. **Channel.** Pinned TLS to the pond, inside the tailnet's WireGuard when the phone is away.
+   Nothing between the phone and its pond terminates it, so it is end to end. P1 seals the pond's
+   TLS key to the fTPM (section 9). A separate payload envelope (HPKE) is deferred until something
+   stores and forwards, such as a relay while the pond is down.
+2. **Outbox.** It is encrypted on the phone under a key held behind Face ID or a fingerprint, as
+   #715 holds the admin key, and keyed `(source, external_id)`. Media goes up in resumable chunks.
+   The phone deletes its copy once the pond acknowledges a durable write.
+3. **Identity.** The member comes from the paired device. That needs `Principal.proven_profile_id`
+   filled in the auth middleware. It is still never set outside tests on `0309bf0d`, and this is
+   P4's prerequisite.
+4. **Back to the phone.** A suggestion travels as a wake with no content, and the phone fetches it
+   over its proven route. iOS needs APNs and the paid Apple developer team.
 
 ---
 
-## 8. Keeping it secret
+## 9. Keeping it secret
 
-### 8.1 What is true today
+### 9.1 What is true now
 
-- `pond_system.db`, `pond_vectors.db` and `pond_logs.db` are plain SQLite (`db.rs`); SQLCipher is
-  deferred (PAI-2 section 3.4).
-- Only `secrets.json` is encrypted, with XChaCha20-Poly1305 (`secret_crypto.rs`), under a key file
-  that sits beside it on the same disk.
-- Face embeddings, camera snapshots and the TLS key are plaintext files.
-- No hardware key is used anywhere.
-- PAI-2 says an Orin Nano devkit exposes no fTPM. That is true of an *unfused* board. Jetson Linux r36
-  documents OP-TEE, LUKS disk encryption and an fTPM for Orin, but all of them root in the EKB. The
-  EKB's key must be burned into the OemK1 or OemK2 fuse, and an unfused board uses NVIDIA's public
-  test keys, which protect nothing.
+- The three databases are plain SQLite. Snapshots, face embeddings and the TLS key are plaintext
+  files.
+- `secrets.json` is encrypted, under a key file kept beside it.
+- `agamemnon` keeps the pond's data in `/var/lib/goose-in-a-pond` (`0750`), away from the login.
+- The nano has an OP-TEE firmware TPM with `tpm2-tools`. When the admin card is made, its recovery
+  copy is sealed to it under the owner hierarchy, so that copy cannot be opened from the disk on
+  another board.
+  PAI-2 section 3.4 says an Orin Nano devkit exposes no fTPM; that is wrong, and this change
+  corrects it there.
 
-### 8.2 Key hierarchy
+### 9.2 Key hierarchy
 
 | Layer | Protects | Key |
 |---|---|---|
-| Root | Everything below | Jetson: in the EKB under a fused OemK1, released by OP-TEE. Mac: a Secure Enclave key, through the Keychain. Unfused board: a key file, and the UI says so |
-| Disk | The data partition | LUKS, through Jetson Linux disk encryption, unlocked by the root at boot |
-| Database | `pond_system.db`, `pond_vectors.db` | SQLCipher, keyed from the root. Ships only if its measured per-turn cost on the Orin is small; otherwise the disk layer carries it |
-| Blob | Each media item | A random key per blob, wrapped by the root. Deleting the item destroys the key, so its bytes are gone from every copy and backup |
-| Secrets | Connector tokens | The existing envelope, with its key moved under the root |
-| Backup | Off-device copies | A household recovery key printed on the setup card. Without one, a dead board loses everything |
+| Data volume | `/var/lib/goose-in-a-pond` | LUKS2. One keyslot is sealed to the fTPM. One opens with the admin card, so the printed card is the household's recovery key. Whether the nano's systemd can unlock a TPM2 keyslot at boot is a P1 measurement |
+| TLS identity, secrets key | The phone channel, connector tokens | Sealed to the fTPM. At service start, the root helper that already seals the admin card unseals them for `agamemnon` |
+| Blob | Each media item | A random key per blob, wrapped by the volume key. Deleting the item destroys the key |
+| Database | Every row | SQLCipher, only if its measured per-turn cost is small. The volume carries it otherwise |
+| Mac | The same layers | The login Keychain holds the admin card already. FileVault covers the disk |
 
-The pond never holds per-member keys. Every key lives in the same appliance, so per-member keys would
-add complexity and no protection. Members are separated by the principal filter (rule 2).
+### 9.3 What each layer stops
 
-### 8.3 What the household controls
+| Threat | Stopped? |
+|---|---|
+| A copy of the disk, or storage pulled from the board | Yes, from P1: the volume key never leaves the fTPM |
+| The whole board taken, on an unfused board | No. Without secure boot, a modified OS can run as root and unseal. Fusing OemK1 closes this (decision 2) |
+| The network | Pinned TLS, and WireGuard off the LAN |
+| Another member | The principal filter (rule 2) |
+| A guest | Sees nothing |
 
-- One switch per source and per member, and nothing collects until it is on.
-- An activity view showing what was indexed and when, so automatic work is visible.
-- "What the pond knows about me": traits and facts, each with its evidence, each deletable.
-- Disconnecting a source deletes its items and says how many (PAI-8 rule 6).
+The pond holds no per-member keys. Every key lives on one appliance, so per-member keys would add
+work and no protection.
+
+### 9.4 What the household controls
+
+- One switch per source and per member. Nothing collects until it is on.
+- An activity view of what was indexed and when.
+- "What the pond knows about me": facts and traits with their evidence, each deletable.
+- Disconnecting a source deletes its items and says how many.
 - An export of everything a member owns.
 
 ---
 
-## 9. Surfaces
+## 10. Surfaces
 
 **For the model.** One tool group replaces `giap-memory` and `giap-context`:
-
-- `search_context(query, kinds?, since?)`, where results can be pictures;
+- `search_context(query, kinds?, since?)`, whose results can be pictures;
 - `get_item(id)`;
-- `remember(fact)`, the model's own save.
+- `remember(fact)`.
 
-One group in place of two shrinks the preamble. The tool block changes once at upgrade, so the
-preamble snapshot is rebuilt once.
+`search_context` joins `HOUSEHOLD_READ_TOOLS`. The tool block changes once at upgrade, and the boot
+compile pass rebuilds the affected prefills then.
 
 **For the household** (DESIGN.md governs every screen):
 
-- **Search.** One box. Results of every kind, pictures inline, each saying where it came from.
-- **Suggestions.** Each card states its reason and its evidence ("from your screenshot on Tuesday"),
-  with three choices: *Add it*, *Not now*, *Not like this*. The last two teach Profile and Proposal.
-- **Sources.** Each source with its state, item count and last sync, and pause and disconnect.
-- **What the pond knows**, and **Activity**, as in 8.3.
+- **Search.** One box, results of every kind, pictures inline, each saying where it came from.
+- **Suggestions.** Each card shows its reason and evidence, with *Add it*, *Not now* and *Not like
+  this*. The last two teach Profile and Proposal.
+- **Agents.** The context agents appear on the existing Recipes screens on both UIs, with their
+  prefill state, and the suggested ones as cards.
+- **Sources** and **What the pond knows**, beside them.
+- **In My Pond:** the index's health and its size on disk.
 - **On the phone:** "Send to pond" in the share sheet, suggestions as notifications, and decisions
   from the notification itself.
 - **By voice:** "anything for me today?" reads the member's open suggestions.
 
 ---
 
-## 10. Phases
+## 11. Phases
 
-Each phase is stamped `LANDED` and then `VERIFIED` on the Orin, as the checklist requires, and
-deletes what it replaces in the same release.
+Each phase is stamped `LANDED` and then `VERIFIED` on the Orin, and deletes what it replaces in the
+same release. Before any restart on the nano, check that no long task is running.
 
 | Phase | Builds | Deletes | Gate |
 |---|---|---|---|
-| P0 Measure | EmbeddingGemma 2 on the Orin: resident RAM per encoder, query-embed latency against the warm TTFT, and recall against MiniLM on `memory_reachability_corpus`, `personal_context_corpus`, a new Swahili and mixed-language set, and image queries. Pick the runtime (llama.cpp or ONNX Runtime) | Nothing | It fits the budget and beats MiniLM |
-| P1 Store and keys | Items, links, lifecycle policy, blob store with per-blob keys, the key hierarchy behind a port (a key file until hardware lands). Migration from memories, summaries, context items and suggestions | The `Corpus` split. The old tables after a verified migration, a release later | A migration of the nano's real store, re-run against the same directory |
-| P2 Scheduler | The governor, the embedding slot, the EmbeddingGemma 2 text encoder, re-embedding | Startup backfill, `index_maintenance` | No turn on the Orin measurably slower while indexing runs |
-| P3 Agents | Conversation, Understanding, Consolidation, Profile. The unified retriever and tool group | Batch extraction, summary refresh, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin |
-| P4 Phone | `POST /context/ingest`, the share target, the outbox, wakes, APNs. Then OCR, visits, notifications and albums, each behind its own switch | The phone's chat-only photo path, as an ingest special case | A shared screenshot is found by a text search on the Orin |
-| P5 Proposals | Proposal and Planner, delivery, feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
-| P6 Multimodal and home | Vision and audio encoders in idle time; `home_event` items from cameras, sensors and Matter | n/a | Encoders inside the measured budget |
-| P7 Internet | IMAP IDLE in place of 30-minute polling, CalDAV, webhooks over the tailnet only and signed. Google and Microsoft accounts are PAI-8 P4 and P6 | n/a | A new email becomes a suggestion with no public port open |
-| P8 Hardware root | LUKS and the EKB on fused boards, the Secure Enclave on the Mac, SQLCipher if P0's cost allows | The key file, on fused boards | `giap.sh doctor` reports where the root key lives |
+| P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM |
+| P1 Store and keys | Items, links, lifecycle, migration of memories, summaries, context items and suggestions. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
+| P2 Embedding slot | The slot in the lane's order, the text encoder, re-embedding | Startup backfill, `IndexMaintenance` | No turn or long-task step measurably slower while it runs |
+| P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context` | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet) |
+| P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
+| P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
+| P6 Multimodal and home | Vision and audio encoders; `home_event` items from cameras, sensors and Matter | n/a | Encoders within the measured budget |
+| P7 Internet | IMAP IDLE in place of 30-minute polling, CalDAV, signed webhooks over the tailnet only | n/a | A new email becomes a suggestion with no public port open |
+| P8 Fused boards | Secure boot and the EKB on shipped units | n/a | Decision 2 |
 
-Prerequisites from the checklist: fill `Principal.proven_profile_id` (PAI-2), and scope
-`get_session_messages` and `get_session_attachment` by principal (PAI-1). P3 closes PAI-1's
-`giap-memory` household-scope gap by construction.
+**What has to land first:**
+- `proven_profile_id` (PAI-2), before P4;
+- principal-scoped `get_session_messages` (PAI-1), before P3;
+- roles (#707) and `HOUSEHOLD_READ_TOOLS` (#717), before P3, because the audience rules and
+  `search_context` build on them.
 
 ---
 
-## 11. Decisions owed
+## 12. Decisions owed
 
 | # | Decision | Recommendation |
 |---|---|---|
-| 1 | Reverse "one index, separate stores" for one item store | Yes, for the reasons in section 1 |
-| 2 | Fuse OemK1 on shipped ponds. It is irreversible, and a bad fuse file bricks the board | Yes for shipped units, after a rehearsal on a spare board; the nano stays unfused as a test device |
-| 3 | SQLCipher on top of LUKS | Decide from P0's measured per-turn cost |
-| 4 | Mail: subjects or bodies | Subjects, senders and dates first; bodies as their own phase (the index doc's open decision 2) |
-| 5 | Can a guest see household items? | No. Guests see nothing, the rule PAI-8 already applies to context items |
-| 6 | A household recovery key on the setup card | Yes. Without one, losing the board loses the household's data |
-| 7 | iOS wakes need the paid Apple team | Needed before the phone can sync on iOS while closed |
+| 1 | One item store, reversing "one index, separate stores" | Yes |
+| 2 | Fuse OemK1 on shipped ponds: irreversible, and it alone protects a whole stolen board | Yes for shipped units, after a rehearsal on a spare board. No longer a prerequisite: the fTPM covers a copied disk now |
+| 3 | SQLCipher on top of the encrypted volume | Decide from P0's per-turn cost |
+| 4 | Mail: subjects or bodies | Subjects, senders and dates first |
+| 5 | Guests and household items | Guests see nothing |
+| 6 | The admin card as the data volume's recovery key | Yes. Rotating the card re-wraps that keyslot |
+| 7 | The paid Apple developer team, for iOS wakes | Needed before iOS syncs while the app is closed |
+| 8 | Conversation and Consolidation on by default; Understanding, Profile and Proposal suggested | Yes, as P19 already handles templates |
 
 ---
 
-## 12. PAI check (checklist section 2.2)
+## 13. PAI check (checklist section 2.2)
 
 | Question | Answer |
 |---|---|
-| Does it move the KV prefix? | Once, when the tool group changes at upgrade. Per-turn context stays in `<system-context>` |
-| Does it add preamble tokens? | No. One tool group replaces two |
-| Can `profile_id` be `None`? | Only for household items, enforced by a `CHECK` on `audience` |
-| New egress without the gate? | IMAP and CalDAV already gate themselves. Webhooks arrive over the tailnet. Push carries no content |
-| A secret on `Settings`? | No. Keys sit under the root |
-| Can a guest reach personal data? | No. Retrieval filters by principal before scoring |
+| Does it move the KV prefix? | Once, at upgrade. Per-turn context stays in `<system-context>` |
+| Does it add preamble tokens? | No. One tool group replaces two. Each default agent has its own compiled prefill |
+| Can `profile_id` be `None`? | Only for household items, enforced by a `CHECK` |
+| New egress without the gate? | No. IMAP and CalDAV gate themselves, webhooks arrive over the tailnet, and push carries no content |
+| A secret on `Settings`? | No. Keys are sealed to the fTPM |
+| Can a guest reach personal data? | No |
 | Does a turn block on an LLM call? | No. Only a query embed sits on the turn path, and it is measured |
 | A side effect without approval? | No. Agents write items and proposals only |

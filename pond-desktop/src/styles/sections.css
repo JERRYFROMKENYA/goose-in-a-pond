@@ -1982,7 +1982,7 @@
   cursor: pointer; transition: background var(--transition-fast);
 }
 .logs-toolbar [role="tab"][aria-selected="true"] {
-  background: var(--color-accent); color: #fff;
+  background: var(--color-accent); color: var(--color-text-on-accent);
 }
 .logs-toolbar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
@@ -3120,19 +3120,28 @@
   color: var(--fg);
 }
 
+/* The selected label is ink, not accent: an accent is chosen for how it reads as
+   a fill, and as text Coral measures 2.53:1 on Jarida White and Purple 3.28:1
+   on the dark background, against the 4.5:1 a label needs. The accent goes on
+   the underline, a boundary, through --border-ink, which themeStore.ts floors
+   at the 3:1 a non-text mark needs. */
 .ext-tab-bar__tab--active {
-  color: var(--color-accent);
+  color: var(--color-text);
   font-weight: var(--weight-semibold);
 }
 
-.ext-tab-bar__tab--active::after {
+/* ::before, never ::after. touch.css gives every tab an invisible 44px ::after
+   as its hit area and loads last, so an underline drawn on ::after inherited
+   that box's 44px height and centring and painted the whole selected tab as a
+   solid accent block over its own label. */
+.ext-tab-bar__tab--active::before {
   content: "";
   position: absolute;
   bottom: -2px;
   left: 0;
   right: 0;
   height: 2px;
-  background: var(--color-accent);
+  background: var(--border-ink);
   border-radius: 2px 2px 0 0;
 }
 
@@ -3153,7 +3162,7 @@
 
 .ext-tab-bar__tab--active .ext-tab-bar__count {
   background: var(--color-accent-soft);
-  color: var(--color-accent);
+  color: var(--color-text);
 }
 
 /* ─── Extensions: Inline link ─── */
@@ -4704,9 +4713,14 @@
   position: relative;
   white-space: nowrap;
 }
-[role="tab"]:hover { background: var(--pp-50); color: var(--pp); }
+/* Labels stay ink in every state, for the reason given at .ext-tab-bar__tab--active:
+   an accent is not a text colour (Coral 2.53:1 on Jarida White, Purple 3.28:1 on
+   the dark background). The tint behind a hovered tab and the underline under a
+   selected one carry the accent. The solid Logs segment takes
+   --color-text-on-accent, which Ink derives per accent, instead of a fixed #fff. */
+[role="tab"]:hover { background: var(--pp-50); color: var(--color-text); }
 [role="tab"][aria-selected="true"] {
-  color: var(--pp);
+  color: var(--color-text);
   font-weight: var(--weight-semibold);
 }
 /* Hide HeroUI's built-in tab indicator — we use CSS pseudo-elements instead */
@@ -4719,7 +4733,7 @@
   background: var(--grey-100); border-radius: 10px; padding: 3px;
 }
 .logs-toolbar [role="tab"][aria-selected="true"] {
-  background: var(--color-accent); color: #fff; border-radius: 7px;
+  background: var(--color-accent); color: var(--color-text-on-accent); border-radius: 7px;
 }
 /* Settings underlined tabs */
 .settings-tabs { border-bottom: 1px solid var(--grey-200); }

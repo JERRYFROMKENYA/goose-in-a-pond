@@ -182,6 +182,36 @@ agamemnon_take_data() { # $1 = where the data is now
   agamemnon_root chown -R "$AGAMEMNON:$AGAMEMNON" "$dst" || return 2
 }
 
+agamemnon_login_sudoers() { agamemnon_p "/etc/sudoers.d/goose-in-a-pond-login"; }
+
+# The login that installed the pond keeps running it: start, stop and restart the unit, and act as
+# agamemnon (deploys, builds, voice tests), without a password. Nothing else, and never as root.
+agamemnon_login_dropin_text() { # $1 = login, $2 = systemctl
+  local u="$AGAMEMNON_UNIT" short="${AGAMEMNON_UNIT%.service}"
+  printf '%s\n' \
+    "# Written by giap.sh service-account: the login that installed the pond keeps running it." \
+    "$1 ALL=(root) NOPASSWD: $2 start $u, $2 stop $u, $2 restart $u, $2 start $short, $2 stop $short, $2 restart $short" \
+    "$1 ALL=($AGAMEMNON) NOPASSWD: ALL"
+}
+
+agamemnon_login_dropin() { # $1 = login
+  local login="$1" sc tmp rc
+  sc="$(command -v systemctl 2>/dev/null)"
+  [ -n "$sc" ] || return 0
+  tmp="$(mktemp "${TMPDIR:-/tmp}/giap-login.XXXXXX")" || return 1
+  agamemnon_login_dropin_text "$login" "$sc" > "$tmp"
+  # A sudoers file that does not parse can lock sudo out entirely, so it is checked first.
+  if ! agamemnon_root visudo -cf "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    warn "the rule that lets $login run the pond did not pass visudo; nothing was installed"
+    return 1
+  fi
+  agamemnon_root install -m 0440 "$tmp" "$(agamemnon_login_sudoers)"; rc=$?
+  rm -f "$tmp"
+  [ "$rc" -eq 0 ] && ok "$login may start, stop and restart the pond and act as $AGAMEMNON ($(agamemnon_login_sudoers))"
+  return "$rc"
+}
+
 # agamemnon_take_over <ExecStart> <checkout> <data dir now> <login>: everything but starting it.
 # Returns 1 with nothing moved, or 2 once the data has moved (undo: giap.sh service-account undo).
 agamemnon_take_over() {
@@ -212,6 +242,8 @@ agamemnon_take_over() {
   agamemnon_root systemctl daemon-reload || return 2
   agamemnon_root systemctl enable "$AGAMEMNON_UNIT" >/dev/null 2>&1 || return 2
   ok "the service runs as $AGAMEMNON, with its data in $AGAMEMNON_DATA"
+  agamemnon_login_dropin "$login" || warn "$login needs sudo's password to restart the pond or act as $AGAMEMNON"
+  return 0
 }
 
 # agamemnon_give_back <login> <data dir> : the reverse of take_over's data and grants, the unit stopped.
@@ -233,6 +265,7 @@ agamemnon_give_back() {
   fi
   [ -n "$home" ] && { agamemnon_root setfacl -x "u:$AGAMEMNON" "$(agamemnon_p "$home")" 2>/dev/null || true; }
   agamemnon_root loginctl disable-linger "$AGAMEMNON" 2>/dev/null || true
+  agamemnon_root rm -f "$(agamemnon_login_sudoers)"
   return 0
 }
 

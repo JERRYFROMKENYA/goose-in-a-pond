@@ -941,7 +941,8 @@ doctor_onnxruntime() {
   esac
   if [ -z "$(ortgpu_running_pid)" ] && [ -f "$(ortgpu_stopped_file)" ]; then
     warn "a GPU ONNX Runtime build stopped the pond and did not start it again"
-    note "fix: systemctl --user start $ORTGPU_SERVICE"
+    if [ "$D_SVC_SCOPE" = system ]; then note "fix: sudo systemctl start $ORTGPU_SERVICE"
+    else note "fix: systemctl --user start $ORTGPU_SERVICE"; fi
     DOC_WARN=$((DOC_WARN+1))
   fi
   return 0
@@ -1372,7 +1373,8 @@ action_litert_menu() {
 svc_ctl() { # $1 = start|stop|restart|status
   case "$D_SVC_SCOPE" in
     user)   run systemctl --user "$1" "$SERVICE_NAME" ;;
-    system) run sudo systemctl "$1" "$SERVICE_NAME" ;;
+    system) if [ "$1" = status ]; then run systemctl --no-pager status "$SERVICE_NAME"
+            else run sudo systemctl "$1" "$SERVICE_NAME"; fi ;;
     "BOTH") bad "two units named $SERVICE_NAME exist — resolve that first (menu 24)"; return 1 ;;
     *) bad "no service unit installed on this host"; return 1 ;;
   esac

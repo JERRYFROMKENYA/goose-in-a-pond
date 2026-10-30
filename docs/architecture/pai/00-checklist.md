@@ -4101,3 +4101,19 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
     - a short answer left only in a step's summary.
   - In round five the pond chose correctly in all four asks, and in round six in all three.
   - Not verified: a made agent's step on the Orin. The planner made one only when its `new_agent` was unreadable, and that is now dropped.
+
+**2026-10-30 — PAI-6: reading the pages it cites (section 8.14).**
+
+- **What landed.**
+  - `giap-knowledge__read_web_page` reads one page into Markdown lines in parts, and returns the lines that answer a question or a part whole (small-model-tools §9).
+  - Forager Gosling's recipe and the research step use it before writing a number, price, time or date from the web.
+  - The deep-research note tells the acknowledging turn the helpers read any linked page.
+  - The report nudge tells a helper that saved nothing to save its work with `artifact_write`.
+- **PAI-2.**
+  - The tool reads only an address the person wrote, a task's goal names, or a search returned (`page_addresses`), so a page cannot steer a helper holding the memory tools into sending data out inside an address.
+  - Every fetch goes through the public-only client and `traced_get_with`. A refusal is traced by host alone.
+- **PAI-3.**
+  - The default tool block grows by 666 raw bytes, so each shape's snapshot compiles again once.
+  - A page result is transient: history keeps a stub with the address.
+- **PAI-1.** It touches no personal data, and no member-scoped data passes through it.
+- **Verified on the Orin** (branch `feat/read-web-page`, E4B QAT, 2026-10-30, a member's paired test device). ROUNDS

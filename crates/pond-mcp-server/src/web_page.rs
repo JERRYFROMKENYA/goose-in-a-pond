@@ -40,8 +40,8 @@ const EXTRACT_DEADLINE: Duration = Duration::from_secs(4);
 /// A part, about 800 tokens: a helper can read two beside its brief.
 const PART_BYTES: usize = 3_200;
 
-/// A question's quote at most, as a search's copy allows when it read few pages.
-const ANSWER_BYTES: usize = 2_400;
+/// A question's quote at most, as a search's copy: the next turn prefills all of it.
+const ANSWER_BYTES: usize = 1_800;
 
 /// One line at most; a longer paragraph is split at sentences.
 const LINE_BYTES: usize = 1_000;

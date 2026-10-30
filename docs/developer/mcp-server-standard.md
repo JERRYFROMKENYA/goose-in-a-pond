@@ -91,7 +91,7 @@ helpers in `crates/pond-mcp-server/src/format.rs`:
 | `format_degraded` / `degrade_result` | A keyless fallback's answer, with a note appended |
 
 Budgets in use: Wikipedia extracts 4,000 bytes, `search_web` 1,800 (2,400 wide), `read_web_page`
-2,400 of quoted lines or one 3,200-byte part, `compute_answer` 1,800.
+1,800 of quoted lines or one 3,200-byte part, `compute_answer` 1,800.
 
 A result that a desktop card renders starts with a `[[[mcp-ui:<kind>:<json>]]]` line (weather,
 knowledge). The weather card is also an MCP App resource, `ui://giap-weather/weather-card.html`

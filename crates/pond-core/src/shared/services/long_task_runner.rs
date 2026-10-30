@@ -449,8 +449,8 @@ const RESEARCH_STEP: &str = "This is research. Answer from sources, never from m
      schedule tools and the memory tools, and search_web or get_wikipedia_article only for what \
      is outside the house. Before you write a number, price, time or date from the web, read the \
      page it came from with read_web_page: give the source's domain as search_web showed it, or \
-     the link the goal gives, and the question. One page for a fact is enough, and one more part \
-     of it at most; then save what you found. Keep only what the sources say, and cite each web \
+     the link the goal gives, and the question. Read one page in your step, two at most, and at \
+     most one more part of a page: each read is a turn. Then save what you found. Keep only what the sources say, and cite each web \
      source as a Markdown link, [its title](its address), using the address read_web_page gave, \
      or the search's domain. If the sources disagree, say so. Write only what your tools returned or your inputs say: never write that the house \
      has nothing of something unless the house's own tool said so. If what your step needs is \
@@ -738,6 +738,78 @@ fn first_line(text: &str) -> &str {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .unwrap_or("")
+}
+
+/// Words a reply needs before the runner keeps it as its step's draft: less is a sign-off.
+const MIN_DRAFT_WORDS: usize = 60;
+
+/// A step whose helper's reply the runner keeps when the helper saved nothing.
+#[derive(Debug, Clone)]
+pub struct ReplyDraft {
+    pub key: StepKey,
+    /// The plan's last step saves the answer, so its reply is the Result.
+    pub last: bool,
+}
+
+/// The helper's reply as its step's draft, when it reported nothing, saved nothing, and the reply
+/// holds work: a composer on the Orin wrote whole plans as replies, then lost the step twice.
+pub fn reply_as_draft(
+    task: &LongTask,
+    draft: &ReplyDraft,
+    run: &TaskRun,
+    now: DateTime<Utc>,
+) -> Option<crate::shared::domain::long_task::Artifact> {
+    let text = run.result_for_parent()?.trim();
+    if text.split_whitespace().count() < MIN_DRAFT_WORDS || StepOutcome::parse(text).is_ok() {
+        return None;
+    }
+    let heading = text
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix('#'))
+        .map(|h| h.trim_start_matches('#').trim())
+        .filter(|h| !h.is_empty());
+    let title = if draft.last {
+        RESULT_TITLE.to_string()
+    } else {
+        heading
+            .map(str::to_string)
+            .unwrap_or_else(|| title_from_key(&draft.key))
+    };
+    let summary = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .unwrap_or(&title);
+    crate::shared::domain::long_task::Artifact::new(
+        task.id(),
+        Some(draft.key.clone()),
+        crate::shared::domain::long_task::ArtifactKind::Draft,
+        &title,
+        summary,
+        text.to_string(),
+        now,
+    )
+    .ok()
+}
+
+/// "draft-itinerary" as "Itinerary": the key's words, less the verb a planner puts first.
+fn title_from_key(key: &StepKey) -> String {
+    const VERBS: &[&str] = &[
+        "draft", "write", "research", "find", "gather", "compose", "make",
+    ];
+    let key = key.to_string();
+    let words: Vec<&str> = key.split(['-', '_']).filter(|w| !w.is_empty()).collect();
+    let words = match words.split_first() {
+        Some((first, rest)) if VERBS.contains(first) && !rest.is_empty() => rest.to_vec(),
+        _ => words,
+    };
+    let joined = words.join(" ");
+    let mut chars = joined.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => "Draft".to_string(),
+    }
 }
 
 /// How one run ended, from the runner's side.

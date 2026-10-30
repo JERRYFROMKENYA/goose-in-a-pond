@@ -4670,6 +4670,7 @@ impl GooseAdapter {
         drain_child_stream(&mut stream, &mut turns, &plan).await;
         drop(stream);
 
+        let mut drafted = None;
         if crate::orchestrator::should_nudge(&plan, turns.turns(), cancel.is_cancelled()) {
             let text = plan
                 .nudge
@@ -4684,6 +4685,7 @@ impl GooseAdapter {
                 "a helper stopped without reporting; asking it once to report"
             );
             turns.other_role_message();
+            drafted = turns.last_completed().map(str::to_string);
             let nudge_config = goose::agents::SessionConfig {
                 id: plan.child_session_id.clone(),
                 schedule_id: None,
@@ -4709,6 +4711,7 @@ impl GooseAdapter {
             }
         }
         let (last_text, assistant_turns) = turns.finish();
+        let last_text = crate::orchestrator::after_nudge(drafted, last_text);
 
         // Post-run read: an extension can arrive without `add_extension` (e.g. `default_enabled`).
         loaded_extensions.extend(

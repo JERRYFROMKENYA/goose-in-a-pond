@@ -1292,7 +1292,7 @@ What the rule costs: a link found inside a page cannot be followed (9.6).
    - with `part`, that part whole, then the outline;
    - a page of one part, whole;
    - otherwise, the lines the search's ranker scores for the question, each ranked with its
-     section's name in front, up to 2,400 bytes. They are shown in page order, under `[Part n:
+     section's name in front, up to 1,800 bytes, as a search's copy. They are shown in page order, under `[Part n:
      name]` and their section's heading, then the outline ("This page has 5 parts: 1 Fares, 2
      Timetable, …"). A heading is never quoted as a line, nor a line of fewer than three words
      unless it is a table row: on the Orin, BM25 ranked "- Mombasa" above whole sentences;
@@ -1307,7 +1307,9 @@ What the rule costs: a link found inside a page cannot be followed (9.6).
 
 - **Forager Gosling.** Its recipe names the tool beside `search_web`. A research step reads the
   page before it writes a number, price, time or date from the web, and cites the address the
-  tool gave.
+  tool gave. It reads one page a step, two at most, and one more part at most: each read is a
+  model turn, and on the Orin a weekend plan whose helpers read two or three pages a step took
+  twice as long.
 - **Nestmaker Goose** holds `giap-knowledge`, so it can read a page too.
 - **The chat turn.** The knowledge instructions name the tool for a link the person gives.
 - **Not the planner or Sentinel Goose,** which hold no knowledge tools.

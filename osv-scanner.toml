@@ -110,6 +110,11 @@ id = "GHSA-m665-v7pm-7grj"
 ignoreUntil = 2027-01-31
 reason = "zip 8.6.0 parser differential ('zip cloaking'): ZipArchive trusts the central directory while ZipStreamReader trusts the local headers, so one archive can name different files to each. Patched only in zip 9.0.5; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: the differential needs both readers on one archive, and nothing in the build uses ZipStreamReader; pond-server's buffalo_l download (model_download.rs) and goose-cli's updater use ZipArchive only."
 
+[[IgnoredVulns]]
+id = "GHSA-8hxf-qr8p-62x4"
+ignoreUntil = 2027-01-31
+reason = "zip 8.6.0 can accept an AES-encrypted entry whose HMAC was never checked when the stream ends early. Patched only in zip 9.0.0; same blocker as RUSTSEC-2026-0367 (candle-core 0.11.0, docx-rs 0.4.22 and umya-spreadsheet 3.1.1, their latest releases, require zip ^8.6.0). Not reachable: AES support is zip's aes-crypto feature, which nothing in GIAP or goose enables (cargo tree -e features -i zip shows only the deflate features)."
+
 # ── A real vulnerability with no upstream fix ────────────────────────────────
 
 [[IgnoredVulns]]

@@ -4116,4 +4116,8 @@ PAI-3 and PAI-4).** Design: [06 section 8.8](./06-multi-agent-orchestration.md).
   - The default tool block grows by 666 raw bytes, so each shape's snapshot compiles again once.
   - A page result is transient: history keeps a stub with the address.
 - **PAI-1.** It touches no personal data, and no member-scoped data passes through it.
-- **Verified on the Orin** (branch `feat/read-web-page`, E4B QAT, 2026-10-30, a member's paired test device). ROUNDS
+- **Verified on the Orin** (branch `feat/read-web-page`, E4B QAT, 2026-10-30, a member's paired test device). Four rounds, fixing between them (small-model-tools §9.5):
+  - Round four: a comparison report took 9.7 minutes (14.4 and 20.0 before its fixes), and a weekend plan 11.9 (19.7). Every short answer took 1.5 to 2.4 minutes. Every answer was right.
+  - A linked page in chat was read in 1.8 s.
+  - A deep-research acknowledgement with a link took 9.9 s once the note said the helpers read it (39.5 s before).
+  - Not verified on the Orin: `reply_as_draft`, since no helper left work in a reply in round four; and the bench (R1).

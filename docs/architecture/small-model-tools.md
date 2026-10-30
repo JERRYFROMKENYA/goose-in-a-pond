@@ -1313,3 +1313,43 @@ What the rule costs: a link found inside a page cannot be followed (9.6).
 - **Nestmaker Goose** holds `giap-knowledge`, so it can read a page too.
 - **The chat turn.** The knowledge instructions name the tool for a link the person gives.
 - **Not the planner or Sentinel Goose,** which hold no knowledge tools.
+
+### 9.5 Measured on the Orin
+
+E4B QAT, a member's paired test device, 2026-10-30, four rounds, fixing between rounds. These are
+functional runs, not a scored benchmark.
+
+| Ask | Path | Time by round | Pages read | Answer |
+|---|---|---|---|---|
+| A Wikipedia link: how long does the Madaraka Express take? | chat | 26 s | 1, in 1.8 s (107 lines, 6 parts) | the page does not say, which is true |
+| A made-up link the person typed | chat | 28 s | 1, answered 404 | "there is no page at that address" |
+| Kenya Railways fares, no link | chat | 19 s | none: the search answered | KES 1,500 |
+| Summarise a linked Wikipedia page | research, member: short | 1.8, then 1.1 min | the helper used the encyclopedia tool | right, linked |
+| Economy fare on the Madaraka Express | research, pond: short | 2.4, 1.8, 1.5 min | 1, then none: three sources agreed | KES 1,500 every round, linked |
+| Fastest way from Nairobi to Mombasa | research, pond: short | 1.9, 2.2, 2.4 min | 1 in round 1 | round 3 took a 1 h 26 min flight from a distance site; round 4 an hour's flight, 2 to 4 hours door to door |
+| Compare the SGR and the bus | research, pond: report | 14.4, 20.0, 9.7 min (5, 9, 5 steps) | 0, 6, 1 | round 3 gave economy as about KES 1,000; round 4 KES 1,500 |
+| A weekend in Naivasha for two | research, pond: report | 19.7, then 11.9 min (7 steps) | 4 to 9 | a full plan; round 3 lost a step and replanned |
+
+- **A fetch and parse** took 0.7 to 6.2 s, mostly the site's own answer time. A part read after a
+  question costs no fetch (`cached=true`, under 20 ms).
+- **What each round found:**
+  - A question quoted one-word list items. They are no longer quoted (9.3).
+  - The acknowledging turn read a linked page twice: 39.5 s, then 9.9 s once the deep-research
+    note said the helpers read it.
+  - A comparison was planned as six gathering steps. A report now gathers once per thing compared.
+  - Helpers read two to four pages a step, and one ran out of turns reading four parts of a page.
+    A step now reads one page, two at most.
+  - A composer wrote its draft as a reply and lost the step twice in two reports. Section 8.14 of
+    PAI-6 has the nudge and `reply_as_draft`.
+- **Reading is not every time.** A helper skips the read when the search's sources agree. That
+  gave the right fare, and in round 3 the wrong flight time.
+
+### 9.6 Open
+
+| item | what | whose |
+|---|---|---|
+| Following a link | a page's own links cannot be read: the address rule (9.2) has no exception for them | design: a link read from a page the tool fetched, kept apart from the person's |
+| The bench | R1 asks the bench for any tool change; this tool ran only the functional rounds above | bench |
+| Pages built by scripts | a page whose text a script writes reads as empty ("needs a browser") | later |
+| PDFs | refused as "a file, not a web page" | later |
+| `reply_as_draft` on the Orin | it is unit-tested only. In round 4 no helper left work in a reply | next long-task round |

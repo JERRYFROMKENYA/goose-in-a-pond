@@ -29,8 +29,8 @@ use async_trait::async_trait;
 use pond_core::mcp::domain::tool_group::TOOL_NAME_SEPARATOR;
 use pond_core::shared::domain::agent::{AgentStreamEvent, SubagentStatus};
 use pond_core::shared::domain::orchestration::{
-    max_concurrent_subagents, BackgroundAvailability, ChildModel, TaskRun, TaskSpec, TaskStatus,
-    REMOTE_SUBAGENT_CONCURRENCY,
+    max_concurrent_subagents, BackgroundAvailability, ChildModel, ReportNudge, TaskRun, TaskSpec,
+    TaskStatus, REMOTE_SUBAGENT_CONCURRENCY,
 };
 use pond_core::shared::ports::orchestrator::Orchestrator;
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
@@ -505,6 +505,19 @@ pub struct ChildPlan {
     pub prefill_retention: Option<std::time::Duration>,
     /// [`TaskSpec::rebuilds_prefill`].
     pub prefill_rebuild: bool,
+    /// [`TaskSpec::nudge`].
+    pub nudge: Option<ReportNudge>,
+}
+
+/// Turns a nudge may take: one to report, and one in case the report call is refused once.
+pub const NUDGE_TURNS: u32 = 2;
+
+/// Nudge only a child that stopped on its own: one out of turns has used its budget, and its
+/// retry gets more turns.
+pub fn should_nudge(plan: &ChildPlan, turns: u32, cancelled: bool) -> bool {
+    plan.nudge
+        .as_ref()
+        .is_some_and(|nudge| !cancelled && turns < plan.max_turns && !(nudge.reported)())
 }
 
 /// What came back from one child run, before it is classified.
@@ -555,6 +568,10 @@ impl ChildTurns {
                 self.last_completed = Some(text);
             }
         }
+    }
+
+    pub fn turns(&self) -> u32 {
+        self.turns
     }
 
     /// End of stream: flush the open run; returns `(last completed answer, assistant turns)`.
@@ -753,6 +770,7 @@ pub fn build_child_plan(
         compile_shape: spec.compile_shape().map(str::to_string),
         prefill_retention: spec.prefill_retention(),
         prefill_rebuild: spec.rebuilds_prefill(),
+        nudge: spec.nudge().cloned(),
     })
 }
 

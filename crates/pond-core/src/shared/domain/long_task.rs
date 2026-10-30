@@ -539,6 +539,18 @@ impl StepKey {
         }
     }
 
+    /// A plan's key, taken as its suggestion when only the spelling is wrong: `step_1` is `step-1`,
+    /// and the plan's `depends_on` is matched the same way.
+    pub fn lenient(raw: &str) -> Result<Self, PlanError> {
+        StepKey::parse(raw).or_else(|refused| match &refused {
+            PlanError::InvalidKey {
+                suggestion: Some(near),
+                ..
+            } => StepKey::parse(near).map_err(|_| refused.clone()),
+            _ => Err(refused),
+        })
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -580,9 +592,9 @@ fn suggest_key(raw: &str) -> Option<String> {
 }
 
 /// One step as the planner's `plan_write` call supplies it. It carries no authority: the role's
-/// tools and scope come from the role and the task, never from here.
+/// tools and scope come from the role and the task, never from here. Fields it does not know are
+/// ignored, because refusing a plan over an extra `title` cost the planner a whole turn.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct StepDraft {
     #[serde(alias = "id", alias = "step_key")]
     pub key: String,
@@ -612,6 +624,73 @@ pub struct StepDraft {
     pub depends_on: Vec<String>,
     #[serde(default, alias = "acceptance_check", alias = "check")]
     pub acceptance: Option<String>,
+}
+
+/// Every name [`StepDraft`] reads, aliases included, so a caller can say which fields it ignored.
+pub const STEP_DRAFT_FIELDS: &[&str] = &[
+    "key",
+    "id",
+    "step_key",
+    "role",
+    "agent",
+    "new_agent",
+    "custom_agent",
+    "instructions",
+    "task",
+    "instruction",
+    "inputs",
+    "input",
+    "artifacts",
+    "depends_on",
+    "dependencies",
+    "depends",
+    "after",
+    "acceptance",
+    "acceptance_check",
+    "check",
+];
+
+/// Read one step of a `plan_write` call. A field spelt like one a step reads, such as `dependsOn`
+/// or `dependson`, is read as that field, since dropping a misspelt `depends_on` would cost the
+/// step its inputs. Returns the draft and the fields it ignored.
+pub fn read_step_draft(
+    value: serde_json::Value,
+) -> Result<(StepDraft, Vec<String>), serde_json::Error> {
+    let squash = |name: &str| -> String {
+        name.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    let mut ignored = Vec::new();
+    let value = match value {
+        serde_json::Value::Object(fields) => {
+            // Exact names first, so a field spelt right wins over a near spelling of it.
+            let mut read = serde_json::Map::with_capacity(fields.len());
+            let mut near = Vec::new();
+            for (name, field) in fields {
+                if STEP_DRAFT_FIELDS.contains(&name.as_str()) {
+                    read.insert(name, field);
+                } else {
+                    near.push((name, field));
+                }
+            }
+            for (name, field) in near {
+                match STEP_DRAFT_FIELDS
+                    .iter()
+                    .find(|known| squash(known) == squash(&name))
+                {
+                    Some(known) if !read.contains_key(*known) => {
+                        read.insert((*known).to_string(), field);
+                    }
+                    _ => ignored.push(name),
+                }
+            }
+            serde_json::Value::Object(read)
+        }
+        other => other,
+    };
+    Ok((serde_json::from_value(value)?, ignored))
 }
 
 /// An agent a plan makes for one step because no saved role fits. The runner builds it from these
@@ -1007,7 +1086,7 @@ pub fn validate_plan(
         .collect();
     let mut keys: Vec<StepKey> = Vec::with_capacity(drafts.len());
     for draft in &drafts {
-        let key = StepKey::parse(&draft.key)?;
+        let key = StepKey::lenient(&draft.key)?;
         if let Some(&state) = kept_states.get(key.as_str()) {
             return Err(PlanError::RewritesSettledStep {
                 key: key.into(),
@@ -1054,7 +1133,11 @@ pub fn validate_plan(
             if raw.is_empty() {
                 continue;
             }
-            let Some(&dep) = known.get(raw) else {
+            let near = suggest_key(raw);
+            let Some(&dep) = known
+                .get(raw)
+                .or_else(|| near.as_deref().and_then(|near| known.get(near)))
+            else {
                 return Err(PlanError::UnknownDependency {
                     step: key.to_string(),
                     missing: raw.to_string(),
@@ -2436,6 +2519,36 @@ mod key_tests {
     }
 
     #[test]
+    fn a_plan_takes_a_misspelt_key_as_its_suggestion_but_never_an_unusable_one() {
+        assert_eq!(StepKey::lenient("step_1").unwrap().as_str(), "step-1");
+        assert_eq!(
+            StepKey::lenient("Find Flights").unwrap().as_str(),
+            "find-flights"
+        );
+        assert_eq!(StepKey::lenient("ok").unwrap().as_str(), "ok");
+        assert!(matches!(
+            StepKey::lenient("!!!"),
+            Err(PlanError::InvalidKey {
+                suggestion: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn every_field_a_step_writes_is_one_it_reads() {
+        let written = serde_json::to_value(StepDraft::default()).unwrap();
+        for name in written.as_object().unwrap().keys() {
+            assert!(
+                STEP_DRAFT_FIELDS.contains(&name.as_str()),
+                "{name} is not listed"
+            );
+        }
+        let extra = serde_json::json!({"key": "a", "role": "r", "instructions": "x", "title": "t"});
+        assert_eq!(serde_json::from_value::<StepDraft>(extra).unwrap().key, "a");
+    }
+
+    #[test]
     fn the_refusal_names_the_key_to_use() {
         let message = StepKey::parse("Find Flights").unwrap_err().to_string();
         assert!(message.contains("`Find Flights`"), "{message}");
@@ -2497,18 +2610,33 @@ mod draft_tests {
     }
 
     #[test]
-    fn an_unknown_field_is_an_error_rather_than_a_dropped_dependency() {
-        let parsed = serde_json::from_str::<StepDraft>(
-            r#"{"key": "b", "role": "r", "instructions": "go", "dependson": ["a"]}"#,
+    fn a_misspelt_field_is_read_as_the_one_it_means_and_an_unknown_one_is_named() {
+        for spelt in ["dependson", "dependsOn", "Depends-On"] {
+            let (draft, ignored) = read_step_draft(serde_json::json!({
+                "key": "b", "role": "r", "instructions": "go", spelt: ["a"]
+            }))
+            .unwrap();
+            assert_eq!(
+                draft.depends_on,
+                vec!["a".to_string()],
+                "{spelt} was dropped"
+            );
+            assert!(ignored.is_empty(), "{spelt}: {ignored:?}");
+        }
+        let (draft, ignored) = read_step_draft(serde_json::json!({
+            "key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"],
+            "depends_on": ["a"], "dependsOn": ["c"]
+        }))
+        .unwrap();
+        assert_eq!(
+            draft.depends_on,
+            vec!["a".to_string()],
+            "the exact name wins"
         );
-        assert!(
-            parsed.is_err(),
-            "a misspelt wait would silently reorder the plan"
-        );
-        let parsed = serde_json::from_str::<StepDraft>(
-            r#"{"key": "b", "role": "r", "instructions": "go", "tools": ["giap-system"]}"#,
-        );
-        assert!(parsed.is_err());
+        let mut ignored = ignored;
+        ignored.sort();
+        assert_eq!(ignored, vec!["dependsOn".to_string(), "tools".to_string()]);
+        assert!(read_step_draft(serde_json::json!({"key": "b", "role": "r"})).is_err());
     }
 }
 

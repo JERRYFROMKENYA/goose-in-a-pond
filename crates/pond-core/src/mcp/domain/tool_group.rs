@@ -288,6 +288,15 @@ pub fn groups_denied_to_guests() -> &'static [&'static str] {
     ]
 }
 
+/// Tools a long task's helper may hold from groups no subagent holds whole. Each reads the house
+/// and changes nothing: it shows no camera picture, sends nothing, and schedules or switches nothing.
+pub const HOUSEHOLD_READ_TOOLS: &[&str] = &[
+    "giap-vision__get_recent_camera_events",
+    "giap-vision__list_vision_automations",
+    "giap-schedule__list_schedules",
+    "giap-device__list_registered_devices",
+];
+
 /// Groups a subagent must never be given, however wide its parent. It has no identity or approval
 /// path, so the tool set is the only boundary; subtract from the DERIVED set or core groups return.
 pub fn groups_denied_to_subagents() -> &'static [&'static str] {

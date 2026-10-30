@@ -1486,7 +1486,7 @@ re-reading. None removes a check.
 
 | Piece | Design |
 |---|---|
-| The lane | `select_next` gave the slot to whichever eligible job had waited longest, so a long task, which runs most often, lost every gap between steps to a chore. A member's task now goes before the pond's chores, after only a compaction a returning member waits on. A chore that has gone `CHORE_PATIENCE` (15 minutes) since its last run still gets one turn. |
+| The lane | `select_next` gave the slot to whichever eligible job had waited longest, so a long task, which runs most often, lost every gap between steps to a chore. A member's task now goes before the pond's chores, after only a compaction a returning member waits on. A chore that has gone `CHORE_PATIENCE` (30 minutes, §8.12) since its last run still gets one turn. |
 | Background subagents | The lane's "turn in flight" now also counts a held subagent permit. A background child outlives its parent's turn, and a chore used to start beside it. |
 | Between steps | A run that moved a task on is followed at once, with no 30 s poll and no 5 s floor, so a chore can't take the gap. The 30 s of quiet before a task starts is kept on purpose: a step is cancelled when the household speaks, so starting sooner mostly wastes work. |
 | Inputs | A step's inputs up to `INLINE_ARTIFACT_TOKENS` each and `INLINE_TOTAL_TOKENS` in all go in its brief whole. A worker then spends no turn and no re-prefill calling `artifact_read` first, and a small model can't skip reading them. Larger inputs stay pull-only (rule 2). |
@@ -1504,9 +1504,29 @@ the plan.
 | Deep research | The pond writes the brief itself from the conversation before the ask, up to `BRIEF_CHARS` (4,000), keeping the newest. The ask itself is the goal. No model call |
 | `task_start` | Takes `brief`. Its description asks for who it is for, dates and places, budget, diets and allergies, and what was decided or ruled out |
 | `delegate` | `instructions` asks for the same: a full brief, since the agent sees nothing of the conversation |
-| Saved or made agents | A plan step names a saved role, or carries `new_agent` (name, instructions, tools) when none fits. It is stored with the step (migration 0071) and named `new:<name>`. `role_for_agent` builds it from the shipped worker's turns and window share. Its tools are those it asked for within `LONG_TASK_ROOT_GROUPS`, always with the task-work tools. It runs on the conversation's model with the task's scope. It has no compiled snapshot, so its first run starts cold |
+| Saved or made agents | A plan step names a saved role, or carries `new_agent` (name, instructions, tools) when none fits. It is stored with the step (migration 0071) and named `new:<name>`. `role_for_agent` builds it from the shipped worker's turns and window share. Its tools are those it asked for within `LONG_TASK_ROOT_GROUPS` and the house's read-only tools (§8.12), always with the task-work tools. It runs on the conversation's model with the task's scope. It has no compiled snapshot, so its first run starts cold |
 | `delegate` with `new_agent` | The prime may make an agent for one request. `made_role` builds it, and `DelegationAuthority::delegate` narrows its tools to the prime's own, as for any delegate. The prime still can't choose a model |
 | Fuller sections | A research step writing a section is asked for 400 to 900 words of specifics, and a plan for every day or item with its times, places and costs. This is in the step's brief, not its role, so no snapshot is rebuilt |
+
+### 8.12 Plans that read the house (Jerry, 2026-10-29)
+
+A deep-research question about what the cameras saw ran 23.7 minutes. 10 of them went to planning,
+where 8 plans were refused, 7 of them for fields a step doesn't read. The steps then searched the
+web for what happened in the house, because no helper could read the house, and the result said
+nothing useful.
+
+| Piece | Design |
+|---|---|
+| Plans | A step's unknown fields are ignored, and `plan_write`'s answer names them. A field spelt like one a step reads (`dependsOn`, `dependson`) is read as that field, since a dropped `depends_on` costs the step its inputs (`read_step_draft`). A key that is only misspelt is taken as its suggestion (`step_1` is `step-1`), and `depends_on` is matched the same way. One refusal names every unreadable step |
+| Refusals | Every refused long-task tool call is traced with the first 400 characters of what the model was told. Goose doesn't keep a helper's session, so this is the only record |
+| Reading the house | `HOUSEHOLD_READ_TOOLS` are single tools a long task's helper may hold from groups no subagent holds whole: `get_recent_camera_events`, `list_vision_automations`, `list_schedules` and `list_registered_devices`. They show no camera picture, send nothing, and schedule or switch nothing. Only `long_task_authority` grants them, through `with_read_tools`, which keeps nothing outside that list. A child gets one only when its role asks for the tool's group, and a guest child gets none that guests can't see. A chat turn's delegations get none. The worker asks for vision, schedule, device and sensors |
+| Where answers live | The planner and every research step are told to decide first whether an answer is in the house or in the world, and to search the web only for the world |
+| Out of reach | When part of the answer is out of every helper's reach, such as old footage or a picture, the plan has no step for it, and the Result says what is missing and how the person can get it |
+| Relevance | The verifier is given the task's goal and brief, and fails a step whose work doesn't serve them, including web results for a question about the house |
+| Save and report | `artifact_write` takes `finish`. On the last save it also reports the step completed with the save's summary and every artifact the run saved. This saves the turn a helper spent calling `step_report` |
+| Nudge | A step or check helper that stops with turns left and no report is sent one more message in its own session (`REPORT_NUDGE`, at most `NUDGE_TURNS`). It costs a short decode on a warm cache, where a retry re-reads its brief and redoes the step. A helper out of turns isn't nudged: its retry gets more turns |
+| Chores | `CHORE_PATIENCE` is 30 minutes. A chore's turn costs a task its slot for about a minute, and a deep-research task runs about 20 |
+| The prime's cold turns | Goose's `SNAPSHOT_MAX_TOKENS` is 10,240, above the chat preamble. E4B stores about 20 KiB a token, so the snapshot is about 200 MB, written once. At 6,144 a cold chat turn re-decoded the rest of the preamble |
 
 ---
 

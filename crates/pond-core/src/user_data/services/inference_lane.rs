@@ -135,10 +135,9 @@ impl LaneDecision {
     }
 }
 
-/// Pick the one job that may run this tick: least-recently-run wins (never-run beats all),
-/// ties go to declaration order. Not a priority queue, which would starve rare jobs.
-/// How long a chore may wait behind a member's long task before it gets one turn anyway.
-pub const CHORE_PATIENCE: Duration = Duration::from_secs(15 * 60);
+/// How long a chore may wait behind a member's long task before it gets one turn anyway. Each such
+/// turn costs the task its slot for a minute or so, and a deep-research task runs about 20.
+pub const CHORE_PATIENCE: Duration = Duration::from_secs(30 * 60);
 
 /// Who goes first between two jobs that may run, before their waits are compared: a compaction a
 /// returning member waits on, then a member's long task, then the pond's own chores, which keep
@@ -170,6 +169,8 @@ fn precedence(a: &JobState, b: &JobState) -> std::cmp::Ordering {
     }
 }
 
+/// Pick the one job that may run this tick: by [`precedence`], then least-recently-run (never-run
+/// beats all), ties in declaration order. Not a priority queue, which would starve rare jobs.
 pub fn select_next(inputs: LaneInputs<'_>) -> LaneDecision {
     let mut best: Option<(&JobState, Duration)> = None;
     let mut blocked: Option<SkipReason> = None;

@@ -269,6 +269,10 @@ enum Commands {
         /// Force a fresh code even if one is still active
         #[arg(long)]
         refresh: bool,
+        /// Issue a fresh code whose device becomes this household member's (a profile id from
+        /// `GET /api/v1/profiles`). Pairing an already-paired phone again with it links that phone.
+        #[arg(long, value_name = "PROFILE_ID")]
+        member: Option<String>,
     },
 
     /// Show this pond's printed setup code, its claim state, and a QR to put on its card.
@@ -672,7 +676,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             whisper_url,
             reset,
         }) => run_calibrate(phrase.as_deref(), samples, whisper_url.as_deref(), reset).await,
-        Some(Commands::Pairing { refresh }) => run_pairing(refresh).await,
+        Some(Commands::Pairing { refresh, member }) => run_pairing(refresh, member).await,
         Some(Commands::AdminCard {
             rotate,
             json,
@@ -2479,7 +2483,7 @@ async fn run_server(
                                 target: "giap::trace",
                                 kind = "session_retitled",
                                 session_id = %session.id,
-                                title = %title,
+                                title_chars = title.chars().count(),
                             );
                         }
                         Ok(RetitleOutcome::Cancelled) => {
@@ -3612,7 +3616,29 @@ async fn run_server(
     > = Some(Arc::new(SqliteOperationalLog::new(db.logs.clone())));
 
     // WARN+ tracing into the SQLite log; `_file_guard` must live until run_server returns.
-    let _file_guard = drain_handle.drain_into(operational_log.clone());
+    let household_names = tracing_setup::HouseholdNames::default();
+    let _file_guard = drain_handle.drain_into(
+        operational_log.clone(),
+        tracing_setup::LogScrubber::household(redactor.clone(), household_names.clone()),
+    );
+    // A new or renamed member is hidden from the Logs viewer within a minute.
+    {
+        let profiles = profile_repo.clone();
+        tokio::spawn(async move {
+            let mut every_minute = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                every_minute.tick().await;
+                match profiles.list().await {
+                    Ok(members) => {
+                        household_names.set(members.iter().map(|m| m.display_name.as_str()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not read members' names to hide from the logs")
+                    }
+                }
+            }
+        });
+    }
 
     let telemetry: Option<Arc<dyn pond_core::security::ports::telemetry::TelemetryPort>> =
         match SqliteTelemetry::new(db.logs.clone()).await {
@@ -3824,6 +3850,14 @@ async fn run_server(
         settings_repo.clone(),
         scheduler.clone(),
     );
+    // Rehydration opened these before phones could be told; ask now, in the background.
+    if let Some(scheduler) = scheduler.clone() {
+        let sender = notification_sender.clone();
+        tokio::spawn(async move {
+            pond_server::system_notices::announce_missed_runs(scheduler.as_ref(), sender.as_ref())
+                .await;
+        });
+    }
     {
         let event_log = event_log.clone();
         let mut events = event_bus.subscribe();
@@ -3897,6 +3931,7 @@ async fn run_server(
         let bells = inference_lane
             .claim(pond_core::user_data::services::inference_lane::LaneJob::LongTaskStep);
         // The nudge, not the hand bell: a task started mid-turn must still wait for quiet.
+        pond_core::shared::services::long_task_open::install_runner_bell(bells.nudge_bell());
         if let Some(repo) = install_long_task_deps(db.system.clone(), Some(bells.nudge_bell())) {
             // Agents a schedule or a household event activates run as one-step long tasks.
             let agent_presence: pond_server::agent_activations::SharedPresence = Default::default();
@@ -7126,8 +7161,9 @@ async fn run_long_task_runner(
     use pond_core::user_data::services::inference_lane::LaneJob;
 
     const POLL_SECS: u64 = 30;
-    // Short, unlike the chores': a member asked for this work and is waiting for it.
-    const QUIET_SECS: u64 = 30;
+    // Short, unlike the chores': a member asked for this work and is waiting for it. A step the
+    // household then interrupts is rerun without spending a try, so a short wait costs little.
+    const QUIET_SECS: u64 = 10;
     // No spacing between runs: the loop asks again at once only after a run that did something,
     // and a gap is the window in which a chore takes the slot for a minute or two.
     const FLOOR_SECS: u64 = 0;
@@ -7167,10 +7203,17 @@ async fn run_long_task_runner(
     );
 
     let mut progressed = false;
+    let mut next_poll: Option<u64> = None;
     loop {
-        // A run that moved a task on is followed at once: the next step is ready now.
-        let poll = if progressed { 0 } else { POLL_SECS };
+        // A run that moved a task on is followed at once: the next step is ready now. A task held
+        // back only by the quiet gate is looked at again when the quiet is due, not a poll later.
+        let poll = if progressed {
+            0
+        } else {
+            next_poll.unwrap_or(POLL_SECS)
+        };
         progressed = false;
+        next_poll = None;
         let tick = crate::inference_lane_runner::wait_for_tick(
             std::time::Duration::from_secs(poll),
             &wake,
@@ -7210,6 +7253,7 @@ async fn run_long_task_runner(
             // A task started before a restart keeps going with nobody speaking first.
             true,
         );
+        let idle_for = sched::combined_idle_for(in_process_at, db_activity, now);
         let Some(slot) = lane
             .acquire(
                 LaneJob::LongTaskStep,
@@ -7223,10 +7267,13 @@ async fn run_long_task_runner(
                     started_at_utc,
                     db_activity,
                 ),
-                sched::combined_idle_for(in_process_at, db_activity, now),
+                idle_for,
             )
             .await
         else {
+            if candidate.is_some() && settings.long_tasks_enabled {
+                next_poll = Some(quiet_due_in(idle_for, QUIET_SECS, POLL_SECS));
+            }
             continue;
         };
         let helpers = LongTaskHelpers {
@@ -7334,20 +7381,13 @@ impl LongTaskHelpers {
         brief: String,
         may_retry: bool,
     ) -> anyhow::Result<pond_core::shared::services::long_task_runner::RunEnd> {
-        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
         use pond_core::shared::services::step_bindings::{process_step_bindings, StepBinding};
 
         let run_id = uuid::Uuid::new_v4().to_string();
         let session_id = runner::long_task_session_id(task.id(), &run_id);
-        let authority = DelegationAuthority::root(
-            &session_id,
-            task.scope().clone(),
-            runner::LONG_TASK_ROOT_GROUPS
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
-        );
+        let authority = runner::long_task_authority(&session_id, task.scope().clone());
         let spec = authority
             .delegate(
                 role,
@@ -7358,8 +7398,10 @@ impl LongTaskHelpers {
                     background: false,
                 },
             )
-            .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("the run was refused: {e:?}"))?
+            .withholding(runner::tools_withheld(role.name()).iter().copied());
 
+        let reports = work != pond_core::shared::services::step_bindings::StepWork::Plan;
         let binding = process_step_bindings().bind(
             &session_id,
             StepBinding {
@@ -7368,6 +7410,16 @@ impl LongTaskHelpers {
                 work,
             },
         );
+        // The planner's hand-back is its plan, so only a step's helpers are asked to report.
+        let spec = if reports {
+            let watch = binding.report_watch();
+            spec.nudging(pond_core::shared::domain::orchestration::ReportNudge {
+                text: runner::REPORT_NUDGE.to_string(),
+                reported: std::sync::Arc::new(move || watch.is_reported()),
+            })
+        } else {
+            spec
+        };
         let cancel = tokio_util::sync::CancellationToken::new();
         let lease = self
             .authorities
@@ -7432,7 +7484,7 @@ impl LongTaskHelpers {
         retention: std::time::Duration,
         rebuild: bool,
     ) -> anyhow::Result<()> {
-        use pond_core::shared::domain::orchestration::{DelegationAuthority, TaskRequest};
+        use pond_core::shared::domain::orchestration::TaskRequest;
         use pond_core::shared::services::long_task_runner as runner;
 
         let session_id = format!(
@@ -7440,13 +7492,9 @@ impl LongTaskHelpers {
             runner::LONG_TASK_SESSION_PREFIX,
             uuid::Uuid::new_v4()
         );
-        let authority = DelegationAuthority::root(
+        let authority = runner::long_task_authority(
             &session_id,
             pond_core::user_data::domain::profile::ProfileScope::household(),
-            runner::LONG_TASK_ROOT_GROUPS
-                .iter()
-                .map(|g| (*g).to_string())
-                .collect(),
         );
         let spec = authority
             .delegate(
@@ -7459,6 +7507,7 @@ impl LongTaskHelpers {
                 },
             )
             .map_err(|e| anyhow::anyhow!("the compile run was refused: {e:?}"))?
+            .withholding(runner::tools_withheld(role.name()).iter().copied())
             .compiling_prefill(format!("role:{}", role.name()))
             .retaining_helpers_for(retention);
         let spec = if rebuild { spec.rebuilding() } else { spec };
@@ -7529,6 +7578,15 @@ fn roles_fingerprint(roles: &[pond_core::shared::domain::orchestration::AgentRol
     hasher.finish()
 }
 
+/// Seconds until a waiting task's quiet is due, at least `RECHECK_SECS`: a turn in flight reads as no
+/// quiet at all, and the turn's end is not announced to the runner.
+fn quiet_due_in(idle_for: std::time::Duration, quiet_secs: u64, poll_secs: u64) -> u64 {
+    const RECHECK_SECS: u64 = 3;
+    quiet_secs
+        .saturating_sub(idle_for.as_secs())
+        .clamp(RECHECK_SECS, poll_secs)
+}
+
 /// One run of one task: plan it, do its next step, or finish it. The ledger is the only state.
 #[allow(clippy::too_many_arguments)]
 async fn advance_long_task(
@@ -7572,12 +7630,30 @@ async fn advance_long_task(
             Ok(true)
         }
         NextRun::Finish => {
+            let mut artifacts = artifacts;
+            if let Some(result) = runner::summary_as_result(task, &steps, &artifacts, now) {
+                tasks.insert_artifact(&result).await?;
+                artifacts.push(result.summary_view());
+            }
             tasks
                 .set_task_state(task.id(), LongTaskState::Completed, now)
                 .await?;
             fruitless.remove(task.id());
-            let body = runner::result_artifact(&artifacts)
-                .map(|a| a.summary.clone())
+            // A short answer is the notification itself; anything longer is a line about it.
+            let short = match runner::answer_artifact(task, &artifacts) {
+                Some(result)
+                    if task.answer()
+                        == pond_core::shared::domain::long_task::AnswerShape::Short =>
+                {
+                    tasks
+                        .get_artifact(task.id(), &result.id)
+                        .await?
+                        .map(|artifact| runner::notification_text(artifact.body()))
+                }
+                _ => None,
+            };
+            let body = short
+                .or_else(|| runner::answer_artifact(task, &artifacts).map(|a| a.summary.clone()))
                 .or_else(|| {
                     steps
                         .iter()
@@ -7693,6 +7769,7 @@ async fn advance_long_task(
                 }
             }
             let mut brief = runner::worker_brief(task, &step, &artifacts, &bodies, now);
+            brief.push_str(runner::last_step_line(&steps, &step).unwrap_or_default());
             brief.push_str(&before_hooks.block_for(role, task.scope(), now).await);
             brief.push_str(&activations::hand_back_offer(role, offered));
             let role = role
@@ -7719,7 +7796,21 @@ async fn advance_long_task(
             let verdict =
                 if outcome.outcome() == OutcomeKind::Completed && step.acceptance().is_some() {
                     let saved = tasks.list_artifacts(task.id()).await?;
-                    let brief = runner::verifier_brief(&step, &outcome, &saved, chrono::Utc::now());
+                    let context = match runner::brief_artifact(&saved) {
+                        Some(found) => tasks
+                            .get_artifact(task.id(), &found.id)
+                            .await?
+                            .map(|artifact| artifact.body().to_string()),
+                        None => None,
+                    };
+                    let brief = runner::verifier_brief(
+                        task,
+                        &step,
+                        &outcome,
+                        &saved,
+                        context.as_deref(),
+                        chrono::Utc::now(),
+                    );
                     Some(
                         helpers
                             .run(task, verifier, StepWork::Check(key), brief, false)
@@ -10844,7 +10935,7 @@ async fn run_setup_code(request: pond_server::setup_code::SetupCodeRequest) -> R
     pond_server::setup_code::run(&store, &request, &mut out, &mut err).await
 }
 
-async fn run_pairing(refresh: bool) -> Result<()> {
+async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
     let data_dir = default_data_dir();
     let port = runtime_api_port(&data_dir);
     let credential = pond_server::host_credential::read(&data_dir)?;
@@ -10861,8 +10952,14 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         .default_headers(headers)
         .build()?;
 
-    // GET returns the current unconsumed code; POST mints a fresh one.
-    let resp = if refresh {
+    // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
+    let resp = if let Some(member) = &member {
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "profile_id": member }))
+            .send()
+            .await
+    } else if refresh {
         client.post(&base).send().await
     } else {
         client.get(&base).send().await
@@ -10875,9 +10972,10 @@ async fn run_pairing(refresh: bool) -> Result<()> {
     })?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let detail = resp.text().await.unwrap_or_default();
         return Err(anyhow::anyhow!(
-            "server returned {} for pairing-code request",
-            resp.status()
+            "server returned {status} for pairing-code request: {detail}"
         ));
     }
 
@@ -10887,12 +10985,15 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         expires_at: Option<String>,
         /// Where the phone connects and which key it pins.
         pairing: serde_json::Value,
+        /// The member a device pairing with this code becomes; `None` is nobody.
+        #[serde(default)]
+        profile_id: Option<String>,
     }
     let body: CodeResp = resp.json().await?;
 
     // A GET can return {"code": null} when no live code exists — mint one via POST.
-    let (code, expires_at, info) = match (body.code, body.expires_at) {
-        (Some(c), Some(e)) => (c, e, body.pairing),
+    let (code, expires_at, info, owner) = match (body.code, body.expires_at) {
+        (Some(c), Some(e)) => (c, e, body.pairing, body.profile_id),
         _ => {
             let minted: CodeResp = client
                 .post(&base)
@@ -10907,6 +11008,7 @@ async fn run_pairing(refresh: bool) -> Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("server did not return a pairing code"))?,
                 minted.expires_at.unwrap_or_default(),
                 minted.pairing,
+                minted.profile_id,
             )
         }
     };
@@ -10929,6 +11031,13 @@ async fn run_pairing(refresh: bool) -> Result<()> {
         info["tailnet_address"].as_str(),
     );
     println!("Pairing code: {code} (expires: {expires_at})");
+    match &owner {
+        Some(id) => println!("A device pairing with it becomes household member {id}'s."),
+        None => println!(
+            "A device pairing with it belongs to nobody, so with two or more members it is a \
+             guest. `--member <PROFILE_ID>` issues one for a member."
+        ),
+    }
     println!("Pond public-key fingerprint: {pin}");
     print_pairing_qr(&pair_url);
     println!("\n  URL: {pair_url}\n");

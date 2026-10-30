@@ -356,6 +356,40 @@ pub struct Schedule {
     pub last_run: Option<DateTime<Utc>>,
     pub next_run: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// After a restart, ask the household before running a fire time missed while the pond was
+    /// down, instead of skipping it. Recurring schedules only.
+    #[serde(default)]
+    pub ask_if_missed: bool,
+    /// The missed fire time waiting for an answer, if any.
+    #[serde(default)]
+    pub missed_run: Option<MissedRun>,
+}
+
+/// Why a missed run did not happen, as its `Skipped` run's result says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// Someone answered "skip".
+    ByMember,
+    /// The next fire time came first.
+    NobodyAnswered,
+    /// Asking was switched off while the question waited.
+    AskingTurnedOff,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::ByMember => "Skipped by a household member",
+            SkipReason::NobodyAnswered => "Nobody answered before the next run",
+            SkipReason::AskingTurnedOff => "Asking was turned off",
+        }
+    }
+}
+
+/// A missed fire time the household has been asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissedRun {
+    pub due_at: DateTime<Utc>,
 }
 
 impl Schedule {
@@ -407,6 +441,19 @@ pub struct ScheduleResultEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_schedule_from_before_missed_runs_reads_as_never_asking() {
+        let stored = serde_json::json!({
+            "id": "s", "label": "Morning", "cron": "0 30 6 * * *", "timezone": "UTC",
+            "kind": {"type": "agent_prompt", "prompt": "good morning"},
+            "paused": false, "currently_running": false, "last_run": null, "next_run": null,
+            "created_at": "2026-10-01T00:00:00Z",
+        });
+        let schedule: Schedule = serde_json::from_value(stored).unwrap();
+        assert!(!schedule.ask_if_missed);
+        assert_eq!(schedule.missed_run, None);
+    }
 
     #[test]
     fn a_skipped_run_is_spelled_skipped_on_the_wire() {

@@ -23,6 +23,9 @@ pub struct CreateScheduleRequest {
     pub timezone: String,
     /// What to do on each fire.
     pub kind: TaskKind,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    pub ask_if_missed: bool,
 }
 
 /// Partial update of a scheduled task: only provided fields change.
@@ -39,6 +42,8 @@ pub struct UpdateScheduleRequest {
     /// Convert to a one-shot at `cron`'s next occurrence; ignored if `fire_at` is set.
     #[serde(default)]
     pub once: bool,
+    #[serde(default)]
+    pub ask_if_missed: Option<bool>,
 }
 
 #[async_trait]

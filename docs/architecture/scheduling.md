@@ -43,7 +43,8 @@ rules when matching events cross the event bus.
 - **`TriggerAction`**: `AgentPrompt { prompt }`, `DevicePower { device_id, on }`,
   `Notify { title, body }`.
 - **`Schedule`**: id, label, cron, fire_at, timezone (IANA), kind, paused, currently_running,
-  last_run, next_run, created_at. `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
+  last_run, next_run, created_at, `ask_if_missed`, and `missed_run` (`MissedRun {due_at}`, the
+  missed fire time waiting for an answer; see [Missed runs](#missed-runs)). `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
   and `"@event"` for a sensor rule; neither is ever parsed.
 - **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed` / `Skipped`),
   result, error, started_at, finished_at, duration_ms, and `caught_up_from` on a missed run someone
@@ -119,6 +120,19 @@ chat path is unchanged: there the user still sees goose's text. A run that speak
 (`voice_mode`, added on main after this change) streams it into the audio bus, and that path
 does not see the provider failure yet: such a run is still recorded `completed`, and the error
 text is spoken.
+
+## Missed runs
+
+A recurring schedule with `ask_if_missed` asks before running a fire time the pond slept through,
+instead of skipping it as every other schedule does. When the pond starts
+(`CronSchedulerAdapter::ask_about_a_missed_run`), such a schedule, unless it is paused, takes the
+latest occurrence of its cron after it last fired (`missed_occurrence`) and keeps it as
+`missed_run`. Only the latest is asked about, however long the outage. A question still open from
+before closes as a `Skipped` run, "Nobody answered before the next run", once a newer fire time has
+passed. One-shots, which already fire late, and event rules ignore the setting.
+
+The decision reads `last_run`, so a schedule that asks writes it to disk as each run starts
+(`durable_fire_stamp`); otherwise a stale stamp would ask about a run that happened.
 
 ## Execution flow
 

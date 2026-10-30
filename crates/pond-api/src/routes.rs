@@ -10477,6 +10477,9 @@ struct ApiCreateScheduleRequest {
     /// Fire once at `cron`'s next occurrence instead of recurring; ignored if `fire_at` is set.
     #[serde(default)]
     once: bool,
+    /// Ask before running a fire time missed while the pond was down.
+    #[serde(default)]
+    ask_if_missed: bool,
 }
 
 /// `POST /api/v1/schedules` — create a new scheduled task.
@@ -10554,6 +10557,7 @@ async fn create_schedule(
     }
 
     let req = CreateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         fire_at: api_req.fire_at,
         once: api_req.once,
         id: api_req
@@ -10616,6 +10620,7 @@ async fn update_schedule(
     let kind = api_req.prompt.map(|p| TaskKind::AgentPrompt { prompt: p });
 
     let req = UpdateScheduleRequest {
+        ask_if_missed: api_req.ask_if_missed,
         label: api_req.name,
         cron: api_req.cron,
         timezone: api_req.timezone,
@@ -10643,6 +10648,7 @@ struct ApiUpdateScheduleRequest {
     /// Fire once at `cron`'s next occurrence instead of recurring.
     #[serde(default)]
     once: bool,
+    ask_if_missed: Option<bool>,
 }
 
 /// `POST /api/v1/schedules/:id/pause` — pause a scheduled task.
@@ -10901,6 +10907,7 @@ async fn create_rule(
 
     // Duplicate ids and the cron are the scheduler's to reject, not this handler's.
     let create = CreateScheduleRequest {
+        ask_if_missed: false,
         fire_at: None,
         once: false,
         id: req.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -10973,6 +10980,7 @@ async fn update_rule(
     }
 
     let update = UpdateScheduleRequest {
+        ask_if_missed: None,
         label: Some(req.name),
         cron: None,
         timezone: None,
@@ -19654,6 +19662,8 @@ mod tests {
 
         fn schedule(id: &str, kind: TaskKind) -> Schedule {
             Schedule {
+                ask_if_missed: false,
+                missed_run: None,
                 fire_at: None,
                 id: id.into(),
                 label: format!("label of {id}"),

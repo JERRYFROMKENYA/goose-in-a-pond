@@ -1069,6 +1069,7 @@ face:<profile_id>). Never for an image attached to the message.")]
             .unwrap_or_else(|_| "UTC".to_string());
         let id = uuid::Uuid::new_v4().to_string();
         let req = CreateScheduleRequest {
+            ask_if_missed: false,
             id: id.clone(),
             label: label.clone(),
             cron: "@event".to_string(),

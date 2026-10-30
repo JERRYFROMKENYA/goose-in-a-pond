@@ -337,6 +337,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
 
         let id = format!("timer-{}", uuid::Uuid::new_v4());
         let req = pond_core::user_data::ports::scheduler::CreateScheduleRequest {
+            ask_if_missed: false,
             id: id.clone(),
             label: label.clone(),
             // Display-only sentinel: a 6-field cron has no year, so it can't express "once".
@@ -490,6 +491,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
 
             let id = uuid::Uuid::new_v4().to_string();
             let req = CreateScheduleRequest {
+                ask_if_missed: false,
                 fire_at: None,
                 once: false,
                 id: id.clone(),
@@ -576,6 +578,7 @@ One-shot timer or reminder: fires ONCE after a delay, then deletes itself \
 
             let req =
                 UpdateScheduleRequest {
+                    ask_if_missed: None,
                     fire_at: None,
                     once: false,
                     label: u.name.as_ref().and_then(|n| {

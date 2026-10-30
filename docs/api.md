@@ -1161,16 +1161,16 @@ See [architecture/scheduling.md](architecture/scheduling.md).
 ## Schedules
 
 Every schedule route answers `503 {"error":"scheduler not configured"}` when the scheduler did not
-start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at}`;
+start. A task is `Schedule {id, label, cron, fire_at, timezone, kind, paused, currently_running, last_run, next_run, created_at, ask_if_missed, missed_run}`, where `missed_run` is `{due_at}` while a missed run waits for an answer and `null` otherwise;
 `kind` is tagged by `type`: `agent_prompt {prompt}`, `webhook {webhook_url}` or `sensor_trigger`.
 `cron` is six fields with a leading seconds field.
 
 | Route | Request | Response |
 |---|---|---|
 | `GET /schedules` | | `[Schedule]` |
-| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?}` | `201` with the task |
+| `POST /schedules` | `ApiCreateScheduleRequest {id?, name (alias label), cron, prompt?, timezone?, kind?, payload?, fire_at?, once?, ask_if_missed?}` | `201` with the task |
 | `GET /schedules/upcoming` | `?limit=` | active tasks by next fire |
-| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, fire_at?, once?}` | the task |
+| `PUT /schedules/{id}` | `ApiUpdateScheduleRequest {name?, cron?, timezone?, prompt?, fire_at?, once?, ask_if_missed?}` | the task |
 | `DELETE /schedules/{id}` | | `{deleted}` |
 | `POST /schedules/{id}/pause` | | `{paused}` |
 | `POST /schedules/{id}/resume` | | `{resumed}`; `409 code: "one_shot_time_passed"` for a one-off whose time passed while paused |

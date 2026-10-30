@@ -422,6 +422,10 @@ export interface Schedule {
   last_run?: string;
   next_run?: string;
   created_at?: string;
+  /** Ask before running a fire time missed while the Pond was down. */
+  ask_if_missed?: boolean;
+  /** The missed fire time waiting for an answer. */
+  missed_run?: { due_at: string } | null;
 }
 
 export interface ScheduleRun {

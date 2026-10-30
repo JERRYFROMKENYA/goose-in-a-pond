@@ -105,6 +105,8 @@ impl SchedulerPort for InMemoryScheduler {
             req.cron
         };
         let schedule = Schedule {
+            ask_if_missed: req.ask_if_missed,
+            missed_run: None,
             fire_at: req.fire_at,
             id: req.id.clone(),
             label: req.label,
@@ -185,6 +187,9 @@ impl SchedulerPort for InMemoryScheduler {
         }
         if let Some(kind) = req.kind {
             task.kind = kind;
+        }
+        if let Some(ask) = req.ask_if_missed {
+            task.ask_if_missed = ask;
         }
         if let Some(at) = req.fire_at {
             task.fire_at = Some(at);
@@ -338,6 +343,16 @@ fn auth_get(uri: &str) -> Request<Body> {
 fn auth_post(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn auth_put(uri: &str, body: serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
         .uri(uri)
         .header("content-type", "application/json")
         .header("Authorization", "Bearer test-token")
@@ -806,4 +821,35 @@ async fn upcoming_returns_active_schedules() {
             .any(|t| t.get("id").and_then(|v| v.as_str()) == Some("upcoming-task")),
         "upcoming task not found: {tasks:?}"
     );
+}
+
+#[tokio::test]
+async fn asking_if_missed_is_set_on_create_and_changed_on_edit() {
+    let (app, _tmp) = make_app().await;
+    let created = app
+        .clone()
+        .oneshot(auth_post(
+            "/api/v1/schedules",
+            serde_json::json!({
+                "id": "morning",
+                "name": "Morning",
+                "cron": "0 30 6 * * *",
+                "prompt": "good morning",
+                "ask_if_missed": true,
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    assert_eq!(json_body(created).await["ask_if_missed"], true);
+
+    let edited = app
+        .clone()
+        .oneshot(auth_put(
+            "/api/v1/schedules/morning",
+            serde_json::json!({"ask_if_missed": false}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(json_body(edited).await["ask_if_missed"], false);
 }

@@ -427,12 +427,14 @@ export interface Schedule {
 export interface ScheduleRun {
   id: string;
   schedule_id: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result?: string;
   error?: string;
   started_at: string;
   finished_at?: string;
   duration_ms?: number;
+  /** Set on a missed run someone chose to make late: when it was originally due. */
+  caught_up_from?: string;
 }
 
 /** Enriched schedule run for UI notification display. */
@@ -440,7 +442,7 @@ export interface ScheduleRunNotification {
   id: string;
   scheduleId: string;
   scheduleName: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "skipped";
   result: string | null;
   error: string | null;
   startedAt: string;

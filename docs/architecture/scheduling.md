@@ -45,8 +45,10 @@ rules when matching events cross the event bus.
 - **`Schedule`**: id, label, cron, fire_at, timezone (IANA), kind, paused, currently_running,
   last_run, next_run, created_at. `cron` holds the sentinel `"@once"` (`CRON_ONCE`) for a one-shot
   and `"@event"` for a sensor rule; neither is ever parsed.
-- **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed`), result, error,
-  started_at, finished_at, duration_ms.
+- **`ScheduleRun`**: id, schedule_id, status (`Running` / `Completed` / `Failed` / `Skipped`),
+  result, error, started_at, finished_at, duration_ms, and `caught_up_from` on a missed run someone
+  chose to make late. A `Skipped` run is a missed fire time that did not happen: `started_at` is when
+  it was due and `result` says why (`JsonRunHistory::record_skipped`). It sends no notification.
 - **`ScheduleResultEvent`**: broadcast when a run starts and when it finishes.
 - **`OneShotTimePassed`**: the error for resuming a paused one-shot whose instant has passed.
 

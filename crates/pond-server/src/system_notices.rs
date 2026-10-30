@@ -29,7 +29,8 @@ use pond_core::user_data::ports::settings::SettingsRepository;
 
 // Schedule and rule runs
 
-/// The phone notification for a finished schedule run, or `None` while it is still running.
+/// The phone notification for a finished schedule run, or `None` for one still running or one
+/// skipped, which a household member chose or nobody asked for.
 ///
 /// It names the schedule and the run in its `open` hint, so a tap opens the schedules screen.
 pub fn schedule_result_notification(ev: &ScheduleResultEvent) -> Option<Notification> {
@@ -41,7 +42,7 @@ pub fn schedule_result_notification(ev: &ScheduleResultEvent) -> Option<Notifica
                 .clone()
                 .unwrap_or_else(|| "Task failed".to_string()),
         ),
-        RunStatus::Running => return None,
+        RunStatus::Running | RunStatus::Skipped => return None,
     };
     let open = OpenScreen::Schedule {
         schedule_id: ev.schedule_id.clone(),
@@ -518,6 +519,7 @@ mod tests {
     #[test]
     fn a_running_schedule_sends_no_notification() {
         assert!(schedule_result_notification(&finished("s-1", RunStatus::Running)).is_none());
+        assert!(schedule_result_notification(&finished("s-1", RunStatus::Skipped)).is_none());
     }
 
     #[test]

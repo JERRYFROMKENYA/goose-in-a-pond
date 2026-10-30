@@ -76,6 +76,7 @@ function friendlyToolStatus(rawName: string): string {
     get_user_profile: "Looking up your profile…",
     list_skills: "Checking my skills…",
     search_web: "Searching the web…",
+    read_web_page: "Reading the page…",
     task_start: "Getting that started…",
   };
   if (map[bare]) return map[bare];

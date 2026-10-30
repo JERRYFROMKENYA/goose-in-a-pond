@@ -7572,6 +7572,8 @@ async fn advance_long_task(
     use pond_core::shared::services::long_task_runner::{self as runner, NextRun, RunEnd};
     use pond_core::shared::services::step_bindings::StepWork;
 
+    // The goal is the person's words, so a page it links stays readable however long the task runs.
+    pond_core::mcp::services::page_addresses::global().note_words(task.goal());
     let steps = tasks.list_steps(task.id()).await?;
     let artifacts = tasks.list_artifacts(task.id()).await?;
     let now = chrono::Utc::now();

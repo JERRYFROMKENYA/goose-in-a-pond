@@ -1082,7 +1082,16 @@ queue), `500 notification_ack_failed`, `503` when no queue is wired.
 `CameraEvent` is `{id, camera_id, event_type, confidence, snapshot_path, snapshot_url, metadata,
 acknowledged, created_at}`. `snapshot_url` is `/api/v1/camera/events/{id}/snapshot`, or null when
 the event has no snapshot. `metadata` is an object or null; pond vision events carry
-`{changed_fraction, source, face_detected, face_unknown, identified_profile?, face_confidence?}`.
+`{changed_fraction?, source, face_detected, face_unknown, track_id?, identified_profile?,
+identified_name?, face_confidence?, face_bbox?, face_landmarks?}`. With the YOLOX detector the pond
+follows people instead of sampling motion: it looks five times a second while anyone is in view or
+for 5 s after any change of 2% of the picture (or `vision_motion_threshold`, if lower), and each
+person seen on two looks running becomes a track. A track raises one
+`person` event when it starts and one more when its face is first recognised (faces are tried once
+a second, five times at most); both carry its `track_id`, and `changed_fraction` only when the
+frame also moved. A person unseen for 3 s is gone, so coming back is a new track. While anyone is
+followed no other motion event is raised; otherwise motion is named by the same look (`pet`,
+`package`, else `motion`) under the cooldown.
 
 With `cameras_enabled` off, the snapshot, stream, event-snapshot and SSE routes and
 `POST /faces/register-from-camera` answer `403 {"error", "reason": "cameras_disabled"}`, read from

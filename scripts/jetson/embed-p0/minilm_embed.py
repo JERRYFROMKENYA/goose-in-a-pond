@@ -3,6 +3,7 @@
 
 Usage: minilm_embed.py MODEL_DIR embed IN.txt OUT.f32
        minilm_embed.py MODEL_DIR latency QUERIES.txt N
+       minilm_embed.py MODEL_DIR mem QUERIES.txt   (stages for memwatch.py: what replacing MiniLM frees)
 MODEL_DIR is the pond's own snapshot (models/embedding/models--Qdrant--all-MiniLM-L6-v2-onnx/snapshots/*).
 """
 
@@ -38,14 +39,28 @@ def embed(tok, sess, texts):
     return pooled / np.linalg.norm(pooled, axis=1, keepdims=True)
 
 
+def stage(name):
+    print(f"HOLD {name}", flush=True)
+    time.sleep(4)
+    rss = next(int(l.split()[1]) for l in open("/proc/self/status") if l.startswith("VmRSS:"))
+    print(f"STAGE {name} rss_kb={rss}", flush=True)
+
+
 def main():
     model_dir, cmd = sys.argv[1], sys.argv[2]
+    if cmd == "mem":
+        stage("imported")
     tok, sess = load(model_dir)
     if cmd == "embed":
         texts = [l for l in Path(sys.argv[3]).read_text().splitlines() if l]
         out = np.concatenate([embed(tok, sess, texts[i:i + 32]) for i in range(0, len(texts), 32)])
         out.astype(np.float32).tofile(sys.argv[4])
         print(f"EMBED n={len(texts)} dim={out.shape[1]}")
+    elif cmd == "mem":
+        stage("loaded")
+        for q in [l for l in Path(sys.argv[3]).read_text().splitlines() if l]:
+            embed(tok, sess, [q])
+        stage("after_queries")
     elif cmd == "latency":
         qs = [l for l in Path(sys.argv[3]).read_text().splitlines() if l]
         n = int(sys.argv[4])

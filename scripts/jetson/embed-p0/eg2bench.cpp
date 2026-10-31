@@ -173,7 +173,7 @@ static double ms_since(clk::time_point t0) {
 int main(int argc, char ** argv) {
     if (argc < 3) {
         fprintf(stderr,
-                "usage: %s MODEL [--dev cpu|gpu] [--threads N] [--ctx N] [--seq N] [--repack 0|1] [--pageout]\n"
+                "usage: %s MODEL [--dev cpu|gpu] [--threads N] [--ctx N] [--seq N] [--repack 0|1] [--pageout] [--no-host]\n"
                 "       [--hold S] [--quiet] vocab | mem | latency Q.txt N | throughput D.txt 1,4,16 R | embed IN OUT\n",
                 argv[0]);
         return 2;
@@ -185,6 +185,7 @@ int main(int argc, char ** argv) {
     int         n_seq      = 16;
     int         repack     = 1;
     bool        pageout    = false;
+    bool        no_host    = false;
     int         i          = 2;
     for (; i < argc && strncmp(argv[i], "--", 2) == 0; i++) {
         const std::string a = argv[i];
@@ -194,6 +195,10 @@ int main(int argc, char ** argv) {
         }
         if (a == "--pageout") {
             pageout = true;
+            continue;
+        }
+        if (a == "--no-host") {
+            no_host = true;
             continue;
         }
         if (i + 1 >= argc) {
@@ -240,6 +245,12 @@ int main(int argc, char ** argv) {
     // Repacking speeds the ARM matmuls but holds a second, anonymous copy of the weights.
     mp.use_extra_bufts    = repack != 0;
     mp.vocab_only         = cmd == "vocab";
+    // On CUDA the token table otherwise moves into 136 MB of pinned host memory instead of staying mapped,
+    // and the automatic load mode stops mapping the file at all.
+    mp.no_host            = no_host;
+    if (no_host) {
+        mp.load_mode = LLAMA_LOAD_MODE_MMAP;
+    }
     const auto t_load     = clk::now();
     Embedder   E;
     E.model = llama_model_load_from_file(model_path.c_str(), mp);

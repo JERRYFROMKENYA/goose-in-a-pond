@@ -37,15 +37,19 @@ step_cpu() {
   gate 450 "cpu throughput" && $WATCH runs/cpu-q8-c1024-throughput.json -- $B/eg2bench "$Q8" --dev cpu \
     --threads 4 --ctx 1024 --seq 64 --hold 3 throughput data/all.docs.eg2.txt 1,2,4,8,16,24,32 5
   $VPY "$H/minilm_embed.py" "$MINILM" latency data/all.queries.minilm.txt 200
+  gate 200 "minilm memory" && $WATCH runs/minilm-cpu-mem.json -- $VPY "$H/minilm_embed.py" "$MINILM" mem \
+    data/all.queries.minilm.txt
 }
 
 step_gpu() {
   gate 400 "gpu latency" && $WATCH runs/gpu-q8-q256.json -- $B/eg2bench "$Q8" --dev gpu --ctx 256 --seq 4 \
     --hold 4 --pageout latency data/all.queries.eg2.txt 200
+  gate 400 "gpu latency, mapped token table" && $WATCH runs/gpu-q8-q256-nohost-mmap.json -- $B/eg2bench "$Q8" \
+    --dev gpu --ctx 256 --seq 4 --no-host --hold 4 --pageout latency data/all.queries.eg2.txt 200
   gate 450 "gpu throughput" && $WATCH runs/gpu-q8-c1024-throughput.json -- $B/eg2bench "$Q8" --dev gpu \
-    --ctx 1024 --seq 64 --hold 3 throughput data/all.docs.eg2.txt 1,2,4,8,16,24,32,48,64 5
+    --ctx 1024 --seq 64 --no-host --hold 3 throughput data/all.docs.eg2.txt 1,2,4,8,16,24,32,48,64 5
   for s in $SETS; do for k in docs queries; do
-    gate 400 "gpu embed" && $B/eg2bench "$Q8" --dev gpu --ctx 1024 --seq 32 --quiet embed \
+    gate 400 "gpu embed" && $B/eg2bench "$Q8" --dev gpu --ctx 1024 --seq 32 --no-host --quiet embed \
       "data/$s.$k.eg2.txt" "out/$s.$k.eg2-q8_0-gpu.f32" 2>/dev/null
   done; done
 }

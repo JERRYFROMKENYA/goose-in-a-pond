@@ -10,8 +10,8 @@ needs a cargo build on the board.
 
 | Step | Command (on the nano) | Cost |
 |---|---|---|
-| llama.cpp, CPU tools | `JOBS=2 bash build-llama.sh ~/p0-embed cpu` | about 25 min beside the pond |
-| llama.cpp, CUDA module | `JOBS=1 bash build-llama.sh ~/p0-embed cuda` | 1.5 to 2 h at one job; two jobs push MemAvailable near 100 MB |
+| llama.cpp, CPU tools | `JOBS=2 bash build-llama.sh ~/p0-embed cpu` | about 15 min beside the pond |
+| llama.cpp, CUDA module | `JOBS=1 bash build-llama.sh ~/p0-embed cuda` | about 65 min at one job (MemAvailable fell to 62 MB); two jobs slowed the pond's vision events tenfold |
 | Weights | `google/embeddinggemma-2` at `f9972ac2` into `~/p0-embed/hf/embeddinggemma-2`; the three `litert-community/embeddinggemma-2-*-litert-lm` files into `~/p0-embed/litert` | 1.5 GB + 1.0 GB, not gated |
 | Python | a venv with torch 2.11 (CPU), transformers 5.20.2, numpy, sentencepiece, onnxruntime, litert-lm-api 0.19.0 | about 1 GB |
 | GGUF | `bash convert.sh`, then `split_mmproj.py llama.cpp gguf/mmproj-eg2-q8_0.gguf gguf/mmproj-eg2-q8_0` | text Q8_0 304 MB, vision 226 MB, audio 328 MB |

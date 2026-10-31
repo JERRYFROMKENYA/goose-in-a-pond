@@ -321,6 +321,37 @@ boot compile pass, which already waits behind the household's turns.
 4. **Recall.** "Mama ana mzio wa karanga", said in a conversation, becomes a fact with that
    conversation as its evidence. A week later "what is mum allergic to?" finds it.
 
+### 7.4 Internet sources
+
+Each connector runs on the pond and opens its own connection outward through the egress gate, so
+nothing on the pond listens on the internet. Each is a source with its own switch and a member's
+consent. What it brings in goes through the ingest pipeline as untrusted content (section 7.2).
+
+| Source | Connector | How it arrives |
+|---|---|---|
+| Mail, any provider | `pond-adapters-imap` with IMAP IDLE (RFC 2177, in `async-imap`), one connection per mailbox | Pushed while the connection holds. A sweep on reconnect catches what a dropped connection missed. Today it is a 30-minute poll |
+| Mail, JMAP providers (Fastmail, Stalwart) | JMAP push over a WebSocket (RFC 8887) | Pushed. The state token resumes a sync after a gap |
+| Calendars | `pond-adapters-caldav`, as now | Its timer, made incremental by the collection's sync token |
+| Home Assistant | The pond as a client of Home Assistant's own MCP server (`/api/mcp`, since 2025.2), signed in with its OAuth (PKCE) | Its tools and its live-context snapshot, covering only the entities the household exposed to it. State changes become `home_event` items, as in P6 |
+| Messages | Matrix (the client-server `/sync`), and a Telegram bot (`getUpdates`) | Long-held requests. A Telegram bot sees only what is sent to it |
+| Webhooks | Signed, over the tailnet only | Pushed |
+
+A connector's tools that send or change anything are actions, and a member approves each one
+(rule 3).
+
+**Left out:**
+
+| Option | Why |
+|---|---|
+| Hosted connector platforms (Composio, Arcade, Pipedream, Zapier, Nango) | Their servers hold the household's tokens and see its content (rule 4) |
+| Personal WhatsApp bridges | They speak WhatsApp's private protocol, against its terms |
+| Signal | No official interface for a personal account |
+| Gmail push (`watch` with Pub/Sub) | Each household would need its own Google Cloud project |
+| Microsoft Graph change notifications | They need a public HTTPS address. Graph's delta queries on a timer do the same job |
+
+The marketplace keeps its bundled servers. It can later search the official MCP registry; a server
+found there runs only after a member installs it, behind the same egress gate.
+
 ---
 
 ## 8. From the phone to the pond
@@ -455,7 +486,7 @@ same release. Before any restart on the nano, check that no long task is running
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
 | P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
 | P6 Multimodal and home | Vision and audio encoders; `home_event` items from cameras, sensors and Matter | n/a | Encoders within the measured budget |
-| P7 Internet | IMAP IDLE in place of 30-minute polling, CalDAV, signed webhooks over the tailnet only | n/a | A new email becomes a suggestion with no public port open |
+| P7 Internet | The connectors in section 7.4: IMAP IDLE in place of 30-minute polling, JMAP push, CalDAV, Home Assistant's MCP server, Matrix and a Telegram bot, and signed webhooks over the tailnet only | The mail poll | A new email becomes a suggestion with no public port open |
 | P8 Fused boards | Secure boot and the EKB on shipped units | n/a | Decision 2 |
 
 **What has to land first:**
@@ -478,6 +509,7 @@ same release. Before any restart on the nano, check that no long task is running
 | 6 | The admin card as the data volume's recovery key | Yes. Rotating the card re-wraps that keyslot |
 | 7 | The paid Apple developer team, for iOS wakes | Needed before iOS syncs while the app is closed |
 | 8 | Conversation and Consolidation on by default; Understanding, Profile and Proposal suggested | Yes, as P19 already handles templates |
+| 9 | Mail sign-in beyond app passwords: OAuth for Gmail and Outlook | App passwords first. Read Google's and Microsoft's terms for mail scopes before building OAuth |
 
 ---
 
@@ -488,7 +520,7 @@ same release. Before any restart on the nano, check that no long task is running
 | Does it move the KV prefix? | Once, at upgrade. Per-turn context stays in `<system-context>` |
 | Does it add preamble tokens? | No. One tool group replaces two. Each default agent has its own compiled prefill |
 | Can `profile_id` be `None`? | Only for household items, enforced by a `CHECK` |
-| New egress without the gate? | No. IMAP and CalDAV gate themselves, webhooks arrive over the tailnet, and push carries no content |
+| New egress without the gate? | No. Every connector in section 7.4 goes through the gate, webhooks arrive over the tailnet, and push carries no content |
 | A secret on `Settings`? | No. Keys are sealed to the fTPM |
 | Can a guest reach personal data? | No |
 | Does a turn block on an LLM call? | No. Only a query embed sits on the turn path, and it is measured |

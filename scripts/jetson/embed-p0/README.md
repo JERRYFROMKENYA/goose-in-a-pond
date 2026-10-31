@@ -6,6 +6,8 @@ whether it retrieves better than today's MiniLM-L6. Everything runs on the nano 
 directory (default `~/p0-embed`), never in the pond's checkout or data directory, and nothing here
 needs a cargo build on the board.
 
+What it measured on 2026-10-31, and the verdict, are in [RESULTS.md](RESULTS.md).
+
 ## Setup, once
 
 | Step | Command (on the nano) | Cost |

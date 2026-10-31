@@ -33,7 +33,7 @@ kills the measured process if MemAvailable falls under 250 MB.
 
 | Tool | Measures |
 |---|---|
-| `eg2bench` | the text encoder in process on libllama: load, memory per stage, query latency, batch throughput, vectors. `--pageout` drops the model's mapped pages after warm-up, so RSS-file afterwards is the working set rather than the whole GGUF that `MAP_POPULATE` faulted in |
+| `eg2bench` | the text encoder in process on libllama: load, memory per stage, query latency, batch throughput, vectors. `--pageout` drops the model's mapped pages after warm-up, so RSS-file afterwards is the working set rather than the whole GGUF that `MAP_POPULATE` faulted in. `--no-host` keeps the 136 MB token table mapped on CUDA instead of copied into pinned memory |
 | `mtmdbench` | one media encoder alone on libmtmd (the text GGUF loads vocab-only) |
 | `server_bench.py` | image embeddings end to end through `llama-server`, the only upstream path that pools media tokens |
 | `litert_bench.py` | the same measurements on Google's LiteRT-LM embedding engine |

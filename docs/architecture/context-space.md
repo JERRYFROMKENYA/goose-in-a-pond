@@ -4,13 +4,13 @@ One store, one multimodal index and a set of shipped agents for everything a pon
 household, from its phones, its home and its conversations. The model and the household search the
 same space, and each sees only what its principal may see.
 
-**Status: DESIGNED 2026-10-28, re-planned 2026-10-30** against `main` at `0309bf0d`. The re-plan
-builds on what landed on 28 and 29 October, summarised in
-[changes-2026-10-28-29.md](./changes-2026-10-28-29.md): long tasks, agents as recipes, deep research,
-the line, My Pond and `agamemnon`. The context, memory and index code is unchanged since the first
-draft. No code has changed. This design replaces memories, summaries, the index, suggestions and
-proactive review; section 3 lists what goes. It cuts across PAI-1, -2, -3, -6, -7 and -8, so
-[the PAI checklist](./pai/00-checklist.md) governs every phase.
+**Status: DESIGNED 2026-10-28, re-planned 2026-10-30, storage chosen 2026-10-31** against `main` at
+`0309bf0d`. The re-plan builds on what landed on 28 and 29 October, summarised in
+[changes-2026-10-28-29.md](./changes-2026-10-28-29.md): long tasks, agents as recipes, deep
+research, the line, My Pond and `agamemnon`. The context, memory and index code is unchanged since
+the first draft. No code has changed. This design replaces memories, summaries, the index,
+suggestions and proactive review; section 3 lists what goes. It cuts across PAI-1, -2, -3, -6, -7
+and -8, so [the PAI checklist](./pai/00-checklist.md) governs every phase.
 
 ---
 
@@ -76,17 +76,18 @@ Measured on the nano on 2026-10-28:
 
 **What changes:**
 
-- Every piece of knowledge becomes an **item**, with:
+- Every piece of knowledge gets an **item** header, with:
   - an owner and an audience;
   - its provenance;
   - one vector in one multimodal space.
 - Memories, summaries, mail, photos, camera events, suggestions and finished reports are item
-  *kinds*.
+  *kinds*. Each keeps its own table for the fields only it has (section 4.1).
 - Each kind declares its lifecycle (section 4.2), instead of inheriting it from the table it sits in.
 
-This reverses the personal-context index's "one index, separate stores" deliberately. The concern
-behind it, that "a merged store cannot be unmerged", is met by the `kind` column and a declared
-lifecycle per kind. The index's other decisions stand:
+This keeps the personal-context index's "one index, separate stores" where it counted: a kind's own
+fields stay in its own table, so nothing is merged that cannot be unmerged. The header unifies what
+each system got wrong on its own: scope, provenance, lifecycle and deletion. The index's other
+decisions stand:
 
 - vectors live in `pond_vectors.db` and hold no text;
 - staleness is a `LEFT JOIN`, not a queue;
@@ -99,9 +100,9 @@ lifecycle per kind. The index's other decisions stand:
 
 | Today | Becomes | Phase |
 |---|---|---|
-| Batch extraction (`BatchExtractionService`, lane job `MemoryExtraction`), summary refresh, titling | The Conversation agent (7.2) | P3 |
+| Batch extraction (`BatchExtractionService`, lane job `MemoryExtraction`), summary refresh, titling | The Conversation agent, with contextual extraction (7.3) | P3 |
 | Dedup and ranking (`memory_relevance.rs`) | One ranker in the unified retriever; dedup moves to Consolidation, with a threshold measured on EmbeddingGemma 2 | P3 |
-| Consolidation (lane job, plus `POST /memory/consolidate`, which bypasses the lane) | The Consolidation agent, lane only | P3 |
+| Consolidation (lane job, plus `POST /memory/consolidate`, which bypasses the lane) | The Consolidation agent, adversarial by default (7.3), lane only | P3 |
 | Cleanup and decay (a 6-hour SQL timer) | The lifecycle per kind, enforced by one sweep | P1 |
 | Per-turn recall (`topical_memories`), by brute-force cosine over `memory_fragments.embedding` | The unified retriever, over the index | P3 |
 | Three corpora, plus vectors stored on source rows with no `model_id` | One index keyed by item, holding every vector | P1, P2 |
@@ -140,7 +141,12 @@ without a replacement:
 
 ## 4. The store
 
-### 4.1 Items
+### 4.1 Items: one header, each kind's own details
+
+Every item has one row in `items`, the header that every policy reads. What only one kind has stays
+in that kind's own table, keyed by `item_id`. Today's tables become those detail tables: P1 gives
+each an `item_id` and writes a header for every row, its text moves to the header, and its own
+columns stay where they are.
 
 | Column | Meaning |
 |---|---|
@@ -153,13 +159,26 @@ without a replacement:
 | `modality` | `text`, `image`, `audio`, `video` |
 | `observed_at`, `valid_until` | When it happened, and when it stops mattering |
 | `title`, `body` | Redacted text: for media, the OCR or caption text when there is any |
-| `blob_id` | Encrypted media bytes |
+| `context` | One line that places the item: who, when, where it came from, and what it refers to (section 7.3). It is embedded and keyword-indexed with the body |
 | `state` | `active`, `superseded`, `dismissed`, `accepted` |
 | `produced_by` | `ingest`, or the recipe name and its definition hash, so a bad agent version's output can be found and withdrawn |
 | `confidence` | For derived items |
 
 `item_links(from_id, to_id, relation)` records `derived_from`, `evidence_for`, `mentions`,
 `same_as` and `supersedes`.
+
+| Kind | Details in | Holds |
+|---|---|---|
+| `fact`, `entity`, `trait` | `memory_fragments` | Segment, importance, `corrects`, kept, tier |
+| `message`, `conversation` | `session_messages`, `sessions` | Role, turn and session fields. The rolling summary becomes the conversation's body |
+| `mail`, `notification`, `event` from an account | `context_items` | Sender, thread, start and end, place: what the account sources fill today |
+| `media` | `media_details` (new) | `blob_id` for the encrypted bytes, type, size, content hash |
+| `home_event` | `home_event_details` (new) | Device, and the state before and after |
+| `visit` | `visit_details` (new) | Place cluster, arrival and departure |
+| `suggestion` | `suggestion_queue` | Status, decision, feedback |
+| `report` | Long-task artifacts | Task and artifact |
+
+A guard test fails the build when a kind names no detail table or no lifecycle.
 
 ### 4.2 Lifecycle per kind
 
@@ -301,7 +320,71 @@ Untrusted text reaches the model inside a data block, never as instructions.
 **Cost.** Each default agent adds one compiled prefill (about 20-30 MB on disk) and one entry to the
 boot compile pass, which already waits behind the household's turns.
 
-### 7.3 Four flows
+### 7.3 Memory: contextual extraction and adversarial consolidation
+
+Both build on code that exists. Batch extraction already shows the model up to eight known memories
+(about 200 tokens), mines only conversations whose speaker is known, and puts every candidate
+through a write gate in code, because a 4B model ignores parts of its prompt. Consolidation already
+has a Proposer, an Adversary and a Judge (`three_stage_consolidator.rs`), off by default behind
+`memory_consolidation_mode`.
+
+**Contextual extraction** is how the Conversation agent writes, and Understanding for ingested
+items:
+
+1. **What the call sees.** The window (complete exchanges, up to 6,000 characters) and its context:
+   - who is speaking, as the session resolves it, never from the text;
+   - the date, and whether it was typed, spoken or sent from a phone;
+   - the conversation so far, as its `conversation` item's body;
+   - the items already known at the speaker's scope, from the unified retriever: facts, entities
+     and events, within today's token budget.
+2. **What it writes for each candidate:**
+   - the fact, its subject and its kind;
+   - how it relates to a shown item: new, an update to it, or a contradiction of it;
+   - a context line saying who, when, and what "it" or "there" refers to.
+3. **The context goes into the vector.** An item is embedded and keyword-indexed as its context line
+   plus its body. On Anthropic's retrieval sets,
+   [contextual embeddings](https://www.anthropic.com/news/contextual-retrieval) cut top-20 retrieval
+   failures by 35%, and by 49% with a contextual keyword index. Here the line costs no extra call:
+   the extraction call already holds the window.
+4. **The write gate stays in code.** `fact_defect`, the subject gate and banding by vector run on
+   every candidate. The owner comes from the principal, never from the model's output. Each fact
+   links `evidence_for` to the items it came from.
+
+A fact whose only evidence is untrusted (mail, a notification, a page, text read off a screenshot)
+is visible as such from its sources' kinds. Turns see it labelled, and Profile and Proposal never
+build on it until a consolidation run has passed it.
+
+**Adversarial consolidation** makes the three stages the Consolidation agent's default:
+
+1. **Proposer.** Merges, splits, supersedes, prunes and recategorises within a bounded batch, as
+   today, now seeing each fact's context line and its sources.
+2. **Adversary.** Challenges every proposal. Today it guards against lost information and against a
+   correction being overridden. It gains three challenges:
+   - *unsupported*: the result says more than its sources do, and it is shown those sources;
+   - *scope*: it would widen a member's private fact to the household, or merge two members' facts;
+   - *planted*: its only evidence is untrusted content that tells the assistant how to behave, or
+     makes a lasting claim about a member. Memory injection works: in
+     [MINJA](https://arxiv.org/abs/2503.03704), ordinary queries alone planted records in an
+     agent's memory 98.2% of the time.
+3. **Judge.** Decides each disputed proposal, as today.
+4. **Code has the last word.** `apply_actions` stays the only write path. It already protects
+   corrections and kept items. It adds that scope never widens and that a merge keeps every
+   source's evidence. Nothing is deleted: a replaced item becomes `superseded` with a link, so a
+   bad run can be withdrawn by its recipe hash.
+
+The *planted* challenge is the model's judgement plus provenance read from the item's sources,
+never a keyword filter.
+
+**Cost.** Three calls a batch instead of one, as a chore in quiet hours, so it spends idle time and
+never turn time. P3 measures calls, seconds and accepted changes per run on the Orin.
+`memory_consolidation_mode = single` stays selectable for a pond whose quiet hours are too short.
+
+**Tested by P3's gate:**
+- contextualised recall beats plain recall on the memory-reachability fixture, on the Orin;
+- a planted set (instructions and false facts about members, hidden in mail and pages) leaves no
+  unflagged fact that a turn or an agent would act on.
+
+### 7.4 Four flows
 
 1. **Screenshot to outing.**
    1. A member shares a screenshot of a restaurant. The phone sends it with its OCR text.
@@ -321,7 +404,7 @@ boot compile pass, which already waits behind the household's turns.
 4. **Recall.** "Mama ana mzio wa karanga", said in a conversation, becomes a fact with that
    conversation as its evidence. A week later "what is mum allergic to?" finds it.
 
-### 7.4 Internet sources
+### 7.5 Internet sources
 
 Each connector runs on the pond and opens its own connection outward through the egress gate, so
 nothing on the pond listens on the internet. Each is a source with its own switch and a member's
@@ -480,13 +563,13 @@ same release. Before any restart on the nano, check that no long task is running
 | Phase | Builds | Deletes | Gate |
 |---|---|---|---|
 | P0 Measure | EmbeddingGemma 2 on the Orin: RAM per encoder beside E4B and its drafter; query-embed latency against the warm TTFT; recall against MiniLM on the two corpora, a Swahili and mixed-language set, and image queries. Pick the runtime | Nothing | It fits the budget and beats MiniLM |
-| P1 Store and keys | Items, links, lifecycle, migration of memories, summaries, context items and suggestions. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
+| P1 Store and keys | The item header and links, with a header for every memory, summary, context item and suggestion, each table kept as that kind's details; the lifecycle per kind. The LUKS2 volume on the fTPM with the admin card as recovery; TLS and secrets keys sealed; per-blob keys | The `Corpus` split, the unwired code, and the old tables a release later | The nano's real store migrated, then re-run; the volume opens at boot and not from a disk copy |
 | P2 Embedding slot | The slot in the lane's order, the text encoder, re-embedding | Startup backfill, `IndexMaintenance` | No turn or long-task step measurably slower while it runs |
-| P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context` | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet) |
+| P3 Recipe catalog and default agents | `context.ingest` and `session.quiet` activations; `context`, `save_items` and `propose` hooks; Conversation and Consolidation; the unified retriever and `search_context`; contextual extraction and adversarial consolidation (7.3) | Extraction, summary refresh, titling, consolidation, `topical_memories`, `giap-memory`, `giap-context` | pai-bench PAI-3 and PAI-8 on the Orin; one activation fired there (P16 has none yet); the two memory tests in 7.3 |
 | P4 Phone | The ingest route, the share target, the outbox, wakes and APNs. Then OCR, visits, notifications and albums, each behind its switch | The chat-only photo path, as an ingest case | A shared screenshot is found by a text search on the Orin |
 | P5 Suggested agents | Understanding, Profile and Proposal; long-task results as items; feedback | Suggestion generation, proactive review | A real suggestion reaches a phone and is decided there |
 | P6 Multimodal and home | Vision and audio encoders; `home_event` items from cameras, sensors and Matter | n/a | Encoders within the measured budget |
-| P7 Internet | The connectors in section 7.4: IMAP IDLE in place of 30-minute polling, JMAP push, CalDAV, Home Assistant's MCP server, Matrix and a Telegram bot, and signed webhooks over the tailnet only | The mail poll | A new email becomes a suggestion with no public port open |
+| P7 Internet | The connectors in section 7.5: IMAP IDLE in place of 30-minute polling, JMAP push, CalDAV, Home Assistant's MCP server, Matrix and a Telegram bot, and signed webhooks over the tailnet only | The mail poll | A new email becomes a suggestion with no public port open |
 | P8 Fused boards | Secure boot and the EKB on shipped units | n/a | Decision 2 |
 
 **What has to land first:**
@@ -501,7 +584,7 @@ same release. Before any restart on the nano, check that no long task is running
 
 | # | Decision | Recommendation |
 |---|---|---|
-| 1 | One item store, reversing "one index, separate stores" | Yes |
+| 1 | Storage: one item header over each kind's own detail table, rather than one table holding everything | Chosen 2026-10-31 |
 | 2 | Fuse OemK1 on shipped ponds: irreversible, and it alone protects a whole stolen board | Yes for shipped units, after a rehearsal on a spare board. No longer a prerequisite: the fTPM covers a copied disk now |
 | 3 | SQLCipher on top of the encrypted volume | Decide from P0's per-turn cost |
 | 4 | Mail: subjects or bodies | Subjects, senders and dates first |
@@ -510,6 +593,7 @@ same release. Before any restart on the nano, check that no long task is running
 | 7 | The paid Apple developer team, for iOS wakes | Needed before iOS syncs while the app is closed |
 | 8 | Conversation and Consolidation on by default; Understanding, Profile and Proposal suggested | Yes, as P19 already handles templates |
 | 9 | Mail sign-in beyond app passwords: OAuth for Gmail and Outlook | App passwords first. Read Google's and Microsoft's terms for mail scopes before building OAuth |
+| 10 | Adversarial consolidation by default: three calls a batch | Yes, once P3 shows it fits the Orin's quiet hours |
 
 ---
 
@@ -520,7 +604,7 @@ same release. Before any restart on the nano, check that no long task is running
 | Does it move the KV prefix? | Once, at upgrade. Per-turn context stays in `<system-context>` |
 | Does it add preamble tokens? | No. One tool group replaces two. Each default agent has its own compiled prefill |
 | Can `profile_id` be `None`? | Only for household items, enforced by a `CHECK` |
-| New egress without the gate? | No. Every connector in section 7.4 goes through the gate, webhooks arrive over the tailnet, and push carries no content |
+| New egress without the gate? | No. Every connector in section 7.5 goes through the gate, webhooks arrive over the tailnet, and push carries no content |
 | A secret on `Settings`? | No. Keys are sealed to the fTPM |
 | Can a guest reach personal data? | No |
 | Does a turn block on an LLM call? | No. Only a query embed sits on the turn path, and it is measured |

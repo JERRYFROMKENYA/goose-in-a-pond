@@ -16,6 +16,13 @@ export function lockLines(lock: PairingLock, ownerName: string | null): { state:
   };
 }
 
+/** What kind of device is asking, in a word; the pond's own name for it when it is neither. */
+export function clientLabel(clientType: string): string {
+  if (clientType === "gotg") return "Phone";
+  if (clientType === "desktop") return "Desktop";
+  return clientType;
+}
+
 /** What is wrong with a PIN, or null. Digits only, between the pond's minimum and 12. */
 export function pinProblem(pin: string, minDigits: number): string | null {
   const floor = Math.max(minDigits, 6);

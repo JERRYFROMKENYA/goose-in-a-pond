@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Check, KeyRound, Lock, LockOpen, ShieldAlert, X } from "lucide-react";
 import { api } from "../api/PondApiClient";
 import type { PairingLock, PairingRequest } from "../api/types";
-import { isReadOnlyRefusal, lockLines, MAX_PIN_DIGITS, pinProblem } from "./pairingLockView";
+import { clientLabel, isReadOnlyRefusal, lockLines, MAX_PIN_DIGITS, pinProblem } from "./pairingLockView";
 import "./network.css";
 
 const POLL_MS = 4000;
@@ -148,16 +148,18 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
           </div>
           {pinError && <p className="net__quiet" id={`recovery-pin-err-${variant}`} role="alert">{pinError}</p>}
 
-          <div className="net__text">
-            <span className="net__title">Phones asking to pair</span>
-            {requests.length === 0 && <span className="net__line">None right now.</span>}
+          <div className="net__item net__item--flat">
+            <div className="net__text">
+              <span className="net__title">Phones asking to pair</span>
+              {requests.length === 0 && <span className="net__line">None right now.</span>}
+            </div>
           </div>
           {requests.length > 0 && (
             <ul className="net__list">
               {requests.map((r) => (
                 <li className="net__item" key={r.id}>
                   <div className="net__text">
-                    <span className="net__title">{r.device_name}<span className="net__tag">{r.client_type}</span></span>
+                    <span className="net__title">{r.device_name}<span className="net__tag">{clientLabel(r.client_type)}</span></span>
                   </div>
                   <div className="net__rowActions">
                     <button type="button" className="net__btn" disabled={busy} onClick={() => void act(() => api.approvePairingRequest(r.id))}>

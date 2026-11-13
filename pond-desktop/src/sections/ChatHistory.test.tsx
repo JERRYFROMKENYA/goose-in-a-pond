@@ -209,6 +209,8 @@ describe("where a conversation started", () => {
     );
     expect(screen.getByText("Started on: Phone")).toBeTruthy();
     expect(screen.getByLabelText("The Goose thread")).toBeTruthy();
+    expect(screen.getByText("What Goose did by itself")).toBeTruthy();
+    expect(screen.queryByText("Started on: Goose")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Phone" }));
     expect(document.querySelectorAll(".chist__card").length).toBe(1);
     expect(screen.getByText("From my phone")).toBeTruthy();

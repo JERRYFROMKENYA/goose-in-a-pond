@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api/types";
 import type { PairingLock } from "../api/types";
-import { isReadOnlyRefusal, lockLines, pinProblem } from "./pairingLockView";
+import { clientLabel, isReadOnlyRefusal, lockLines, pinProblem } from "./pairingLockView";
 
 const lock = (over: Partial<PairingLock> = {}): PairingLock => ({
   locked: true, enforced: true, owner_profile_id: "p1", has_recovery_pin: false,
@@ -41,5 +41,13 @@ describe("isReadOnlyRefusal", () => {
     expect(isReadOnlyRefusal(new ApiError(403, "pairing_main_member_only"))).toBe(true);
     expect(isReadOnlyRefusal(new ApiError(500, "x"))).toBe(false);
     expect(isReadOnlyRefusal(new Error("x"))).toBe(false);
+  });
+});
+
+describe("clientLabel", () => {
+  it("says what kind of device is asking in a word", () => {
+    expect(clientLabel("gotg")).toBe("Phone");
+    expect(clientLabel("desktop")).toBe("Desktop");
+    expect(clientLabel("kiosk")).toBe("kiosk");
   });
 });

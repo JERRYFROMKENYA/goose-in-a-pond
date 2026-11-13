@@ -141,7 +141,9 @@ export function ChatHistory({ sessions, loading, onOpen, onNewChat, onDelete }: 
                   {goose && <Bird size={13} className="chist__gooseIcon" aria-label="The Goose thread" role="img" />}
                   {relativeWhen(session.updated_at)}
                 </span>
-                {from && <span className="chist__from">Started on: {from}</span>}
+                {goose
+                  ? <span className="chist__from">What Goose did by itself</span>
+                  : from && <span className="chist__from">Started on: {from}</span>}
                 <h2 className="chist__cardTitle">{title}</h2>
                 {session.preview && <p className="chist__preview">{session.preview}</p>}
                 {count && <span className="chist__count">{count}</span>}

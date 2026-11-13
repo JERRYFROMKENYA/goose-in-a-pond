@@ -103,6 +103,46 @@ describe("Hub voice settings — thinking tone", () => {
   });
 });
 
+function gpuSpeechSwitch(): HTMLButtonElement {
+  const row = screen.getByText("Faster long speech").closest(".srow");
+  const btn = row?.querySelector("button.htoggle");
+  if (!btn) throw new Error("faster long speech row has no switch");
+  return btn as HTMLButtonElement;
+}
+
+describe("Hub voice settings \u2014 faster long speech", () => {
+  it("draws ON when the key is absent", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue(voiceSettings() as never);
+    await renderVoice();
+
+    expect(gpuSpeechSwitch().getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("draws OFF when the stored setting is off", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue(
+      voiceSettings({ voice_tts_gpu_enabled: false }) as never,
+    );
+    await renderVoice();
+
+    await waitFor(() => {
+      expect(gpuSpeechSwitch().getAttribute("aria-pressed")).toBe("false");
+    });
+  });
+
+  it("writes voice_tts_gpu_enabled and nothing else", async () => {
+    vi.mocked(api.getSettings).mockResolvedValue(voiceSettings() as never);
+    await renderVoice();
+
+    fireEvent.click(gpuSpeechSwitch());
+
+    await waitFor(() => {
+      expect(vi.mocked(api.updateSettings)).toHaveBeenCalledWith({
+        voice_tts_gpu_enabled: false,
+      });
+    });
+  });
+});
+
 // Stored as the engine's `speed` multiplier, shown in percent; asserted in both directions.
 describe("Hub voice settings \u2014 speaking pace", () => {
   it("draws the saved pace rather than the default", async () => {

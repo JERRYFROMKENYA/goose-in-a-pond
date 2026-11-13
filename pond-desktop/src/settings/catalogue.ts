@@ -210,6 +210,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "voice_tts_quality", label: "Voice quality", description: "How much detail the voice is made with. Higher sounds smoother and takes longer.", control: { kind: "select", options: TTS_QUALITY }, consumer: "live" },
           // No `note`: notes mark unconnected controls; the Voice view's subtitle explains the tone.
           { key: "voice_thinking_tone_enabled", label: "Sound while it thinks", description: "Play a soft tone while it is thinking, so silence does not read as broken.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "voice_tts_gpu_enabled", label: "Faster long speech", description: "Make long answers and briefings on the graphics processor, where the Pond has one set up and memory to spare. Short replies are not affected.", control: { kind: "toggle" }, consumer: "live" },
           { key: "active_tts_model", label: "Speech model", ownedBy: "models", description: "The voice used for speaking. Chosen on the Models page.", control: { kind: "text", placeholder: "af_heart" }, consumer: "live" },
           { key: "voice_max_turns", label: "Steps before answering aloud", description: "How much work it may do before answering aloud. Fewer steps means a faster reply.", control: { kind: "number", min: 0, max: 50 }, consumer: "live", proposed: true, validate: all(integer, range(0, 50)) },
         ],

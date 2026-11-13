@@ -91,6 +91,8 @@ export interface Settings {
   /** Kokoro quantization (`q8` | `q8f16` | `q4f16` | `fp16` | `fp32`); picks the `.onnx` file. */
   voice_tts_quality?: string;
   voice_thinking_tone_enabled?: boolean;
+  /** Long speech is made on the graphics processor where the Pond has one set up. */
+  voice_tts_gpu_enabled?: boolean;
   /** Pinned microphone, by its system name; "" picks one that works. */
   audio_input_device?: string;
   /** Pinned speaker, by its system name; "" picks one that works. */

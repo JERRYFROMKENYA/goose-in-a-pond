@@ -115,7 +115,9 @@ pub struct GpuSpeech {
     start: Box<dyn Fn() -> Result<Link> + Send + Sync>,
     /// The weights the helper loads; `None` when the starter needs no file.
     model: Option<PathBuf>,
-    enabled: AtomicBool,
+    /// Read as each long speech begins, so the household's switch needs no restart.
+    switch: Box<dyn Fn() -> bool + Send + Sync>,
+    fetch_model: Box<dyn Fn() + Send + Sync>,
     make_room: Box<dyn Fn() + Send + Sync>,
     available_mb: Box<dyn Fn() -> Option<u64> + Send + Sync>,
     idle_after: Duration,
@@ -140,7 +142,8 @@ impl GpuSpeech {
         Self {
             start: Box::new(start),
             model: None,
-            enabled: AtomicBool::new(true),
+            switch: Box::new(|| true),
+            fetch_model: Box::new(|| {}),
             make_room: Box::new(|| {}),
             available_mb: Box::new(mem_available_mb),
             idle_after: IDLE_AFTER,
@@ -170,15 +173,15 @@ impl GpuSpeech {
         self
     }
 
-    pub fn set_enabled(&self, on: bool) {
-        self.enabled.store(on, Ordering::SeqCst);
-        if !on {
-            self.end("switched_off");
-        }
+    pub fn with_switch(mut self, switch: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.switch = Box::new(switch);
+        self
     }
 
-    pub fn enabled(&self) -> bool {
-        self.enabled.load(Ordering::SeqCst)
+    /// Called when long speech finds the weights missing, to fetch them for the next one.
+    pub fn with_model_fetcher(mut self, fetch: impl Fn() + Send + Sync + 'static) -> Self {
+        self.fetch_model = Box::new(fetch);
+        self
     }
 
     pub fn is_running(&self) -> bool {
@@ -188,10 +191,13 @@ impl GpuSpeech {
     /// Whether this unit is said on the GPU, starting the helper for a long one that more
     /// follows. Blocks while the helper loads.
     pub fn takes(self: &Arc<Self>, tokens: usize, last: bool) -> bool {
-        if !self.enabled() {
+        let mut running = lock(&self.running);
+        if !(self.switch)() {
+            if let Some(helper) = running.take() {
+                self.finish(helper, "switched_off");
+            }
             return false;
         }
-        let mut running = lock(&self.running);
         if let Some(helper) = running.take() {
             if helper.alive() {
                 *running = Some(helper);
@@ -207,6 +213,7 @@ impl GpuSpeech {
         }
         if self.model.as_ref().is_some_and(|model| !model.exists()) {
             skipped("model_missing", None);
+            (self.fetch_model)();
             return false;
         }
         (self.make_room)();
@@ -494,6 +501,9 @@ pub fn mem_available_mb() -> Option<u64> {
 
 /// The helper's whole life: load on the GPU, then answer passes until the pond closes the pipe.
 pub fn run_helper(model: &Path, threads: usize) -> Result<()> {
+    // Short of memory, the kernel should end the helper, which speech survives, before the pond.
+    #[cfg(target_os = "linux")]
+    let _ = std::fs::write("/proc/self/oom_score_adj", "1000");
     let mut session = load_on_gpu(model, threads)?;
     serve(
         std::io::stdin().lock(),
@@ -704,13 +714,31 @@ mod tests {
     #[test]
     fn switched_off_nothing_goes_to_the_gpu_and_a_running_helper_ends() {
         let starts = Arc::new(AtomicUsize::new(0));
-        let gpu = Arc::new(speech(&starts));
+        let on = Arc::new(AtomicBool::new(true));
+        let switch = on.clone();
+        let gpu = Arc::new(speech(&starts).with_switch(move || switch.load(Ordering::SeqCst)));
 
         assert!(gpu.takes(300, false));
-        gpu.set_enabled(false);
-        assert!(!gpu.is_running());
+        on.store(false, Ordering::SeqCst);
         assert!(!gpu.takes(300, false));
+        assert!(!gpu.is_running());
         assert_eq!(starts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn missing_weights_keep_speech_on_the_cpu_and_ask_for_their_fetch() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let counting = asked.clone();
+        let mut gpu = speech(&starts).with_model_fetcher(move || {
+            counting.fetch_add(1, Ordering::SeqCst);
+        });
+        gpu.model = Some(PathBuf::from("/nope/model.onnx"));
+        let gpu = Arc::new(gpu);
+
+        assert!(!gpu.takes(300, false));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
     }
 
     #[test]

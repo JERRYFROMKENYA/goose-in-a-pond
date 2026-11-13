@@ -22,12 +22,17 @@ pub struct PairingLockState {
     /// The main member: who set the pond up, until they hand the role on.
     pub owner_profile_id: Option<String>,
     pub has_recovery_pin: bool,
+    /// Whether the main member has a paired phone to accept a request on.
+    pub owner_has_a_phone: bool,
 }
 
 impl PairingLockState {
-    /// A pond nobody owns has nobody to ask, so its lock holds nothing.
+    /// The lock holds only while somebody can answer: a pond nobody owns has nobody to ask,
+    /// and a main member with no phone and no recovery PIN could never let a phone in again.
     pub fn enforced(&self) -> bool {
-        self.locked && self.owner_profile_id.is_some()
+        self.locked
+            && self.owner_profile_id.is_some()
+            && (self.owner_has_a_phone || self.has_recovery_pin)
     }
 }
 
@@ -126,10 +131,15 @@ mod tests {
             locked: true,
             owner_profile_id: None,
             has_recovery_pin: false,
+            owner_has_a_phone: true,
         };
         assert!(!state.enforced());
         state.owner_profile_id = Some("jerry".into());
         assert!(state.enforced());
+        state.owner_has_a_phone = false;
+        assert!(!state.enforced(), "nobody could accept, so nothing is held");
+        state.has_recovery_pin = true;
+        assert!(state.enforced(), "the PIN is a way in");
         state.locked = false;
         assert!(!state.enforced());
     }

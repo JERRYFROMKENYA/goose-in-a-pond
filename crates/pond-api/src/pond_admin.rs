@@ -93,6 +93,30 @@ async fn member_device(
     }
 }
 
+/// Who may change the pairing lock and answer a waiting phone: the main member, from any of
+/// their own devices, or a member whose My Pond unlock is live. The device that asked.
+pub(crate) async fn may_answer_pairing(
+    state: &AppState,
+    principal: Option<&Extension<Principal>>,
+    owner: Option<&str>,
+) -> Result<String, Response> {
+    let caller = member_device(state, principal).await?;
+    if owner == Some(caller.member.as_str()) {
+        return Ok(caller.device);
+    }
+    if let Some(admin) = &state.pond_admin {
+        let unlocked = admin
+            .elevation
+            .status(&caller.device, Instant::now())
+            .await
+            .is_ok_and(|status| status.unlocked_for.is_some());
+        if unlocked {
+            return Ok(caller.device);
+        }
+    }
+    Err(refuse(StatusCode::FORBIDDEN, "pairing_main_member_only"))
+}
+
 /// A member's device whose unlock is live; each admitted request renews it.
 async fn unlocked(
     state: &AppState,

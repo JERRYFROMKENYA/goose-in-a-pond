@@ -5,6 +5,7 @@
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use chrono::{DateTime, Duration, Utc};
+use pond_core::mcp::ports::notification_recipients::PHONE_CLIENT_TYPE;
 use pond_core::security::domain::pairing_lock::{
     lockout_after, pin_is_acceptable, PairedTokens, PairingClaim, PairingLockState, PairingRequest,
     PendingPairing, PinCheck, FREE_PIN_TRIES, MAX_PENDING_REQUESTS, REQUEST_TTL_MINUTES,
@@ -73,17 +74,33 @@ impl SqliteHandshakeAdapter {
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(match row {
-            Some(row) => PairingLockState {
-                locked: row.get::<i64, _>("locked") != 0,
-                owner_profile_id: row.get("owner_profile_id"),
-                has_recovery_pin: row.get::<Option<String>, _>("pin_verifier").is_some(),
-            },
-            None => PairingLockState {
+        let Some(row) = row else {
+            return Ok(PairingLockState {
                 locked: true,
                 owner_profile_id: None,
                 has_recovery_pin: false,
-            },
+                owner_has_a_phone: false,
+            });
+        };
+        let owner_profile_id: Option<String> = row.get("owner_profile_id");
+        let owner_has_a_phone = match &owner_profile_id {
+            Some(owner) => sqlx::query_scalar::<_, i64>(
+                "SELECT 1 FROM devices d WHERE d.profile_id = ? AND d.device_type = ? \
+                 AND EXISTS (SELECT 1 FROM session_tokens t \
+                             WHERE t.device_id = d.id AND t.revoked_at IS NULL) LIMIT 1",
+            )
+            .bind(owner)
+            .bind(PHONE_CLIENT_TYPE)
+            .fetch_optional(&self.pool)
+            .await?
+            .is_some(),
+            None => false,
+        };
+        Ok(PairingLockState {
+            locked: row.get::<i64, _>("locked") != 0,
+            owner_profile_id,
+            has_recovery_pin: row.get::<Option<String>, _>("pin_verifier").is_some(),
+            owner_has_a_phone,
         })
     }
 

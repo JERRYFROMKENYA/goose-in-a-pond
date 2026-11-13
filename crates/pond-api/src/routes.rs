@@ -127,6 +127,15 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/handshake/spoken-code",
             post(crate::spoken_code::handshake_spoken_code),
         )
+        // A phone the pairing lock held, back for its request or letting itself in by PIN.
+        .route(
+            "/handshake/pairing-request/claim",
+            post(crate::pairing_lock::claim).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/handshake/pairing-request/recover",
+            post(crate::pairing_lock::recover).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/onboard", post(start_onboarding))
         .route("/onboard/complete", post(complete_onboarding))
         .route("/onboard/status", get(onboarding_status))
@@ -628,6 +637,25 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/long-tasks/{id}/report", get(get_long_task_report))
         .route("/long-tasks/{id}/export", get(export_long_task))
         // My Pond: a member's device, unlocked with the admin card (`pond_admin.rs`).
+        // The pairing lock: read by any member, changed and answered by the main one.
+        .route(
+            "/pairing/lock",
+            get(crate::pairing_lock::lock_state).put(crate::pairing_lock::set_lock),
+        )
+        .route(
+            "/pairing/recovery-pin",
+            put(crate::pairing_lock::set_pin).delete(crate::pairing_lock::clear_pin),
+        )
+        .route("/pairing/owner", put(crate::pairing_lock::set_owner))
+        .route("/pairing/requests", get(crate::pairing_lock::requests))
+        .route(
+            "/pairing/requests/{id}/approve",
+            post(crate::pairing_lock::approve),
+        )
+        .route(
+            "/pairing/requests/{id}/decline",
+            post(crate::pairing_lock::decline),
+        )
         .route("/admin/status", get(crate::pond_admin::status))
         .route("/admin/unlock", post(crate::pond_admin::unlock))
         .route("/admin/lock", post(crate::pond_admin::lock))
@@ -1111,6 +1139,22 @@ async fn emit_pairing_outcome(
     }
 }
 
+/// The household's notice for a phone that was let in after asking: the same "new device
+/// paired" a code pairing sends.
+pub(crate) async fn announce_paired_by_request(state: &AppState, device_name: &str) {
+    emit_pairing_outcome(
+        state,
+        true,
+        Some(device_name),
+        None,
+        false,
+        "request",
+        false,
+        false,
+    )
+    .await;
+}
+
 /// Whether an accepted pairing tells the household a device was paired.
 ///
 /// Every pairing does except the dashboard re-pairing under a device row it already had: it
@@ -1342,17 +1386,27 @@ async fn handshake_pake_verify(
             return Err(handshake_error("pake_verify", e));
         }
     };
-    emit_pairing_outcome(
-        &state,
-        resp.accepted,
-        device_name.as_deref(),
-        resp.rejection_reason.as_deref(),
-        insecure_dev,
-        method,
-        resp.returning_device,
-        resp.test_device,
-    )
-    .await;
+    // Held by the pairing lock: not a failed attempt, and nobody was paired yet.
+    if let Some(pending) = &resp.pairing_request {
+        crate::pairing_lock::announce_request(
+            &state,
+            device_name.as_deref().unwrap_or("A phone"),
+            pending,
+        )
+        .await;
+    } else {
+        emit_pairing_outcome(
+            &state,
+            resp.accepted,
+            device_name.as_deref(),
+            resp.rejection_reason.as_deref(),
+            insecure_dev,
+            method,
+            resp.returning_device,
+            resp.test_device,
+        )
+        .await;
+    }
     let mut body = serde_json::to_value(&resp).map_err(|e| handshake_error("pake_verify", e))?;
     if let Some(reason) = resp.rejection_reason.as_deref().filter(|_| !resp.accepted) {
         body["error"] = json!(reason);
@@ -1503,6 +1557,10 @@ struct IssuePairingCodeRequest {
     /// notices and is left out of the reliability report.
     #[serde(default)]
     test: bool,
+    /// Already accepted by whoever holds the host credential: its phone is let in without a
+    /// request while the pairing lock is on.
+    #[serde(default)]
+    approved: bool,
 }
 
 /// Issues a fresh single-use pairing code, optionally bound to a member. Loopback and the
@@ -1590,11 +1648,19 @@ async fn handshake_issue_pairing_code(
             .await
             .map_err(|e| handshake_error("mark_pairing_code_test", e))?;
     }
+    if request.approved {
+        state
+            .handshake
+            .mark_pairing_code_approved(&pc.code)
+            .await
+            .map_err(|e| handshake_error("mark_pairing_code_approved", e))?;
+    }
     Ok(Json(json!({
         "code": pc.code,
         "expires_at": pc.expires_at,
         "profile_id": pc.profile_id,
         "test": request.test,
+        "approved": request.approved,
         "pairing": pairing_material(transport, embedded),
     })))
 }
@@ -1735,6 +1801,10 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
         Ok(current) => current,
         Err(e) => return failed(Some(&claimant), format!("{e:#}")),
     };
+    // Whoever set the pond up is its main member, until they hand the role on.
+    if let Some(theirs) = current.as_deref() {
+        name_main_member(state, theirs).await;
+    }
     let members: Vec<String> = match state.profile_repo.list().await {
         Ok(profiles) => profiles.into_iter().map(|p| p.id).collect(),
         Err(e) => return failed(Some(&claimant), format!("{e:#}")),
@@ -1757,6 +1827,20 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             "the device that claimed this pond now belongs to its owner"
         ),
         Err(e) => failed(Some(&claimant), format!("{e:#}")),
+    }
+    name_main_member(state, &owner).await;
+}
+
+/// Fills the main member's seat if it is empty; never takes it from somebody.
+async fn name_main_member(state: &Arc<AppState>, profile_id: &str) {
+    match state.handshake.set_pairing_owner(profile_id, false).await {
+        Ok(true) => tracing::info!(
+            kind = "pairing_owner_named",
+            profile_id,
+            "the member who set this pond up is its main member"
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::debug!(%error, "the main member could not be named"),
     }
 }
 

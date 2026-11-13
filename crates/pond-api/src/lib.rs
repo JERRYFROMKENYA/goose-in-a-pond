@@ -35,6 +35,7 @@ pub mod musickit;
 pub mod network;
 mod news;
 pub mod oauth_callback;
+pub mod pairing_lock;
 pub mod player;
 pub mod pond_admin;
 pub mod quiet_pass;

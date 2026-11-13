@@ -314,6 +314,7 @@ pub trait Handshake: Send + Sync {
             locked: false,
             owner_profile_id: None,
             has_recovery_pin: false,
+            owner_has_a_phone: false,
         })
     }
 
@@ -429,6 +430,14 @@ pub trait Handshake: Send + Sync {
     /// Exchange a refresh token for a fresh session+refresh pair.
     async fn refresh(&self, _request: RefreshRequest) -> Result<HandshakeResponse> {
         Err(anyhow::anyhow!("refresh not supported by this adapter"))
+    }
+
+    /// Mark an unredeemed pairing code as already accepted: its phone is let in without a
+    /// request while the pairing lock is on. Host-only, like issuing the code.
+    async fn mark_pairing_code_approved(&self, _code: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "approved pairing codes are not supported by this adapter"
+        ))
     }
 
     /// Mark an unredeemed pairing code as a test harness's: the device that redeems it is a

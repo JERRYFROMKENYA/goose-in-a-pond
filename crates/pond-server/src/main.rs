@@ -4406,6 +4406,34 @@ async fn run_server(
         SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone()))
             .with_setup_claims(setup_claims.clone()),
     );
+    // A pond set up before the pairing lock gets its main member: the only member, else the
+    // one settings name. A pond with no members yet names one when it is set up.
+    match handshake.pairing_lock().await {
+        Ok(lock) if lock.owner_profile_id.is_none() => {
+            let members: Vec<String> = profile_repo
+                .list()
+                .await
+                .map(|members| members.into_iter().map(|m| m.id).collect())
+                .unwrap_or_default();
+            let named = settings_repo
+                .get()
+                .await
+                .ok()
+                .and_then(|s| s.primary_profile_id)
+                .filter(|id| members.contains(id));
+            let main = match members.as_slice() {
+                [only] => Some(only.clone()),
+                _ => named,
+            };
+            if let Some(main) = main {
+                if let Err(error) = handshake.set_pairing_owner(&main, false).await {
+                    tracing::warn!(%error, "the pond's main member could not be named");
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "the pairing lock could not be read"),
+    }
     // A phone that stopped connecting is removed after the household's chosen number of days.
     pond_server::phone_retirement::spawn(
         pond_core::user_data::services::phone_retirement::PhoneRetirement::new(
@@ -11866,13 +11894,18 @@ async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
 
     // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
     let resp = if let Some(member) = &member {
+        // Whoever runs this holds the pond itself, so the code needs no second yes.
         client
             .post(&base)
-            .json(&serde_json::json!({ "profile_id": member }))
+            .json(&serde_json::json!({ "profile_id": member, "approved": true }))
             .send()
             .await
     } else if refresh {
-        client.post(&base).send().await
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "approved": true }))
+            .send()
+            .await
     } else {
         client.get(&base).send().await
     }

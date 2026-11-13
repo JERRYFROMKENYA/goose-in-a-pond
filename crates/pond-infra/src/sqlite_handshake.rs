@@ -39,6 +39,9 @@ use pond_core::network::domain::claim::ClaimRefusal;
 use pond_core::network::domain::credential::Credential;
 use pond_core::network::services::device_resume_throttle::DeviceResumeThrottle;
 use pond_core::network::services::setup_claim::SetupClaimService;
+use pond_core::security::domain::pairing_lock::{
+    PairingClaim, PairingLockState, PairingRequest, PendingPairing, PinCheck,
+};
 use pond_core::security::ports::handshake::{
     ChallengeResponse, ChannelKeys, ChannelVerify, Handshake, HandshakeRequest, HandshakeResponse,
     InitRequest, PairingCode, PakeChallenge, PakeInitRequest, PakeRefusal, PakeVerifyRequest,
@@ -49,8 +52,6 @@ use pond_core::user_data::services::member_attribution::sole_member;
 
 use crate::pairing_cpace::{self, Confirmed, CpaceError, Initiator};
 
-// Not called yet: the lock is wired into pairing in the next change.
-#[allow(dead_code)]
 mod pairing_lock;
 
 const PAIRING_CODE_TTL_MIN: i64 = 10;
@@ -129,6 +130,17 @@ struct CompletedPairing {
     returning: bool,
     /// See [`HandshakeResponse::test_device`].
     test: bool,
+    /// Set when the pairing lock held the phone back: no device was registered and no session
+    /// minted, so the fields above are empty.
+    held: Option<Held>,
+}
+
+/// What a locked pond did with a phone that proved its code.
+enum Held {
+    /// It left a request for somebody to answer.
+    Asked(PendingPairing),
+    /// Too many phones are already waiting; this one must ask again later.
+    Crowded,
 }
 
 /// The password a run committed to, which decides the limits it is held to.
@@ -679,11 +691,50 @@ impl SqliteHandshakeAdapter {
             return Ok(None);
         }
         let device_id = client_id.to_string();
+        let device_name = Self::device_name_for(client_id, device_name);
+
+        // A phone's code pairing is the one path a stranger in the room can take, so it is the
+        // one the lock holds. The host's own approved or test code, the dashboard and the setup
+        // card are already somebody with the pond in their hands.
+        let approved: bool =
+            sqlx::query_scalar::<_, i64>("SELECT approved FROM pairing_codes WHERE code_hash = ?")
+                .bind(code_hash)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some_and(|flag| flag != 0);
+        if method == "cpace" && !approved && !test && self.lock_state().await?.enforced() {
+            let held = match self
+                .open_request(pairing_lock::Asking {
+                    client_id,
+                    client_type,
+                    device_name: &device_name,
+                    profile_id: code_profile.as_deref(),
+                })
+                .await?
+            {
+                Some(pending) => Held::Asked(pending),
+                None => Held::Crowded,
+            };
+            tracing::info!(
+                kind = "pairing_held_by_lock",
+                client_id = %client_id,
+                device = %device_name,
+                asked = matches!(held, Held::Asked(_)),
+                "the pairing lock is on: the phone was not let in"
+            );
+            return Ok(Some(CompletedPairing {
+                session: String::new(),
+                refresh: String::new(),
+                expires: Self::now(),
+                returning: false,
+                test: false,
+                held: Some(held),
+            }));
+        }
         self.latch_setup_claim(method, &device_id).await;
 
         // Read before `register_device` writes the row, or every pairing looks like a return.
         let returning = self.is_returning_device(&device_id, client_type).await;
-        let device_name = Self::device_name_for(client_id, device_name);
         self.register_device(
             &device_id,
             &device_name,
@@ -717,6 +768,7 @@ impl SqliteHandshakeAdapter {
             expires,
             returning,
             test,
+            held: None,
         }))
     }
 
@@ -1007,6 +1059,7 @@ impl SqliteHandshakeAdapter {
         else {
             return Ok((self.reject("code_retired"), None));
         };
+        let held = completed.held;
         let (mut response, keys) = self.accepted(
             &confirmed,
             completed.session,
@@ -1014,6 +1067,24 @@ impl SqliteHandshakeAdapter {
             completed.expires,
             transport,
         );
+        if let Some(held) = held {
+            // The pond still proves itself, so the phone knows who holds its request. No keys:
+            // a phone not yet let in must not open the setup channel's sealed phase.
+            response.accepted = false;
+            response.session_token = None;
+            response.refresh_token = None;
+            response.expires_at = None;
+            match held {
+                Held::Asked(pending) => {
+                    response.rejection_reason = Some("approval_required".to_string());
+                    response.pairing_request = Some(pending);
+                }
+                Held::Crowded => {
+                    response.rejection_reason = Some("pairing_requests_full".to_string());
+                }
+            }
+            return Ok((response, None));
+        }
         response.returning_device = completed.returning;
         response.test_device = completed.test;
         Ok((response, keys))
@@ -1292,6 +1363,68 @@ impl Handshake for SqliteHandshakeAdapter {
             Some(expires.to_rfc3339()),
             None,
         ))
+    }
+
+    async fn pairing_lock(&self) -> Result<PairingLockState> {
+        self.lock_state().await
+    }
+
+    async fn set_pairing_locked(&self, locked: bool) -> Result<()> {
+        self.lock_set(locked).await
+    }
+
+    async fn set_pairing_owner(&self, profile_id: &str, replace: bool) -> Result<bool> {
+        self.lock_owner(profile_id, replace).await
+    }
+
+    async fn set_recovery_pin(&self, pin: Option<&str>) -> Result<()> {
+        self.lock_pin(pin).await
+    }
+
+    async fn pairing_requests(&self) -> Result<Vec<PairingRequest>> {
+        self.waiting_requests().await
+    }
+
+    async fn decide_pairing_request(
+        &self,
+        request_id: &str,
+        accept: bool,
+        by_device: Option<&str>,
+        profile_id: Option<&str>,
+    ) -> Result<bool> {
+        self.decide_request(request_id, accept, by_device, profile_id)
+            .await
+    }
+
+    async fn claim_pairing_request(
+        &self,
+        request_id: &str,
+        claim_secret: &str,
+    ) -> Result<PairingClaim> {
+        self.claim_request(request_id, claim_secret).await
+    }
+
+    async fn recover_pairing_request(
+        &self,
+        request_id: &str,
+        claim_secret: &str,
+        pin: &str,
+    ) -> Result<PinCheck> {
+        self.recover_request(request_id, claim_secret, pin).await
+    }
+
+    async fn mark_pairing_code_approved(&self, code: &str) -> Result<()> {
+        let marked = sqlx::query(
+            "UPDATE pairing_codes SET approved = 1 WHERE code_hash = ? AND consumed_at IS NULL",
+        )
+        .bind(Self::sha256_hex(code.as_bytes()))
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            marked.rows_affected() == 1,
+            "no unredeemed pairing code to mark"
+        );
+        Ok(())
     }
 
     async fn mark_pairing_code_test(&self, code: &str) -> Result<()> {

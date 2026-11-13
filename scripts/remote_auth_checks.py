@@ -41,7 +41,8 @@ def run():
     host_only = {"X-Pond-Host-Credential": host_credential}
 
     def pair_phone(client):
-        issued = call("POST", "/handshake/pairing-code", extra=host_only)
+        # Already accepted: the pairing lock would otherwise hold a phone for the main member's yes.
+        issued = call("POST", "/handshake/pairing-code", {"approved": True}, extra=host_only)
         result = pond_cpace.pair(call, issued["code"], issued["pairing"]["tls_spki_sha256"], client)
         assert result["accepted"] is True, result
         return result

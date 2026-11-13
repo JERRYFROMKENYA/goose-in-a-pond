@@ -182,6 +182,7 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "voice_kws_energy_threshold", label: "Ignore sound quieter than", description: "How loud a sound must be before the pond bothers listening for its name.", control: { kind: "number", step: 0.001, min: 0, max: 1 }, consumer: "live", validate: range(0, 1) },
           { key: "voice_kws_post_trigger_silence_ms", label: "Stop after silence", description: "How long a pause means you have finished speaking.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
           { key: "voice_kws_cooldown_ms", label: "Wait before listening again", description: "How long to wait after answering before listening for its name again.", control: { kind: "number", min: 0, unit: "ms" }, consumer: "live", validate: all(integer, atLeast(0, "ms")) },
+          { key: "lone_voice_sets_reminders", label: "A voice the Pond does not know may set reminders", description: "In a household of one, a voice the Pond cannot identify may set reminders and to-dos as that member. Nothing else is opened to it.", control: { kind: "toggle" }, consumer: "live" },
           {
             key: "voice_recording_duration_secs", label: "Recording length", description: "How long it records after you speak to it.",
             control: { kind: "number", min: 1, unit: "seconds" }, consumer: "app",
@@ -399,6 +400,8 @@ export const CATALOGUE: CatalogueCategory[] = [
         name: "Pairing",
         entries: [
           { key: "spoken_pairing_codes", label: "Say pairing codes aloud", description: "Let a phone on your home network ask the pond to read out a code for pairing. Only someone in the room can hear it.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "unseen_phone_skip_days", label: "Stop notifying a phone not seen for", description: "A paired phone that has not connected for this many days stops getting notices until it connects again. 0 never stops.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
+          { key: "unseen_phone_remove_days", label: "Remove a phone not seen for", description: "A paired phone that has not connected for this many days is removed and listed in what Goose did. 0 never removes.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
         ],
       },
     ],
@@ -490,9 +493,11 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "schedule_max_runs_per_task", label: "History per task", description: "How much history to keep for each scheduled job.", control: { kind: "number", min: 0, max: 10000 }, consumer: "live", validate: all(integer, range(0, 10000)) },
           { key: "schedule_result_notify", label: "Tell me when a task finishes", description: "Tell your phones when a scheduled job or rule finishes.", control: { kind: "toggle" }, consumer: "live" },
           { key: "system_notices_enabled", label: "Tell me when something needs attention", description: "Tell your phones about downloads, parts that did not start, a full disk and remote access. A removed device is always told.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "lone_voice_sets_reminders", label: "A voice the Pond does not know may set reminders", description: "In a household of one, a voice the Pond cannot identify may set reminders and to-dos as that member. Nothing else is opened to it.", control: { kind: "toggle" }, consumer: "live" },
-          { key: "unseen_phone_remove_days", label: "Remove a phone not seen for", description: "A paired phone that has not connected for this many days is removed and listed in what Goose did. 0 never removes.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
-          { key: "unseen_phone_skip_days", label: "Stop notifying a phone not seen for", description: "A paired phone that has not connected for this many days stops getting notices until it connects again. 0 never stops.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
+        ],
+      },
+      {
+        name: "Notices",
+        entries: [
           { key: "speak_unfetched_reminders", label: "Say a reminder no phone picked up", description: "When no phone fetches a reminder within five minutes, the Pond says it once in the room, outside quiet hours.", control: { kind: "toggle" }, consumer: "live" },
           { key: "notices_wait_in_quiet_hours", label: "Hold notices in quiet hours", description: "In quiet hours, alerts and reminders set for that time still arrive; everything else waits for one notice when quiet hours end.", control: { kind: "toggle" }, consumer: "live" },
         ],

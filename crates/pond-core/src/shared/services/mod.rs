@@ -8,6 +8,7 @@ pub mod connector_hub;
 pub mod deep_research;
 pub mod delegation;
 pub mod egress;
+pub mod goose_thread;
 pub mod in_process_event_bus;
 pub mod long_task_open;
 pub mod long_task_queue;

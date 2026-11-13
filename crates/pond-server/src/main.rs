@@ -1633,6 +1633,11 @@ async fn run_server(
     let profile_repo: Arc<
         dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
     > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
+    // Where the pond keeps what it did by itself, one conversation per member.
+    pond_core::shared::services::goose_thread::install(Arc::new(
+        pond_core::shared::services::goose_thread::GooseThread::new(session_storage.clone())
+            .with_members(profile_repo.clone()),
+    ));
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
@@ -7645,6 +7650,16 @@ async fn run_proactive_reviewer(
                 "the heartbeat looked something into"
             );
             if let Some(answer) = answer {
+                pond_core::shared::services::goose_thread::post(
+                    Some(audience.profile_id()),
+                    answer,
+                    pond_core::user_data::domain::message_note::MessageNote::from_source(
+                        pond_core::user_data::domain::message_note::SourceKind::Lookup,
+                        text.to_string(),
+                        None,
+                    ),
+                )
+                .await;
                 did.push(
                     pond_core::shared::domain::goose_activity::GooseActivity::errand(
                         audience.profile_id(),
@@ -8567,12 +8582,23 @@ async fn notify_long_task_owner(
     let Some(owner) = task.owner_profile_id() else {
         return;
     };
-    let report = sender
-        .send_to_profile(
-            owner,
-            pond_server::system_notices::long_task_notification(task, finished, body),
-        )
-        .await;
+    let mut notice =
+        pond_server::system_notices::long_task_notification(task, finished, body.clone());
+    // The answer is kept in the owner's thread, and the notice opens it there.
+    let posted = pond_core::shared::services::goose_thread::post(
+        Some(owner),
+        &body,
+        pond_core::user_data::domain::message_note::MessageNote::from_source(
+            pond_core::user_data::domain::message_note::SourceKind::Task,
+            notice.title.clone(),
+            Some(task.id().to_string()),
+        ),
+    )
+    .await;
+    if let (Some(posted), Some(serde_json::Value::Object(fields))) = (&posted, &mut notice.data) {
+        fields.insert("session_id".into(), serde_json::json!(posted.session_id));
+    }
+    let report = sender.send_to_profile(owner, notice).await;
     tracing::info!(
         kind = "long_task_notice_sent",
         task = %task.id(),

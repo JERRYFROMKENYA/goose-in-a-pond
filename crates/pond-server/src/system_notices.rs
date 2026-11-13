@@ -105,6 +105,30 @@ async fn result_silence(
     notifies_itself(&task.kind).then_some(ResultSilence::RuleSpokeForItself)
 }
 
+/// Keeps a finished run's answer, or why it did not finish, in the Goose thread.
+async fn post_schedule_result(
+    ev: &ScheduleResultEvent,
+) -> Option<pond_core::shared::services::goose_thread::Posted> {
+    use pond_core::user_data::domain::message_note::{MessageNote, SourceKind};
+    let text = match ev.status {
+        RunStatus::Completed => ev.result.clone().unwrap_or_default(),
+        RunStatus::Failed => format!(
+            "This did not finish: {}",
+            ev.error.as_deref().unwrap_or("the run failed")
+        ),
+        RunStatus::Running | RunStatus::Skipped => return None,
+    };
+    if text.trim().is_empty() {
+        return None;
+    }
+    let note = MessageNote::from_source(
+        SourceKind::Schedule,
+        ev.schedule_label.clone(),
+        Some(ev.schedule_id.clone()),
+    );
+    pond_core::shared::services::goose_thread::post(None, &text, note).await
+}
+
 /// Announce each finished schedule or rule run to the household's phones, unless the household
 /// switched that off or the run was a rule or routine that already notified.
 pub fn spawn_schedule_result_notices(
@@ -129,12 +153,17 @@ pub fn spawn_schedule_result_notices(
                 Err(RecvError::Closed) => break,
             };
             // A running schedule is not news.
-            let Some(notification) = schedule_result_notification(&ev) else {
+            let Some(mut notification) = schedule_result_notification(&ev) else {
                 continue;
             };
-            if let Some(silence) =
-                result_silence(&ev, settings.as_ref(), scheduler.as_deref()).await
-            {
+            let silence = result_silence(&ev, settings.as_ref(), scheduler.as_deref()).await;
+            // The answer is kept in the thread whether or not a phone is told.
+            if !matches!(silence, Some(ResultSilence::RuleSpokeForItself)) {
+                if let Some(posted) = post_schedule_result(&ev).await {
+                    notification.data = Some(OpenScreen::chat(Some(&posted.session_id)).data());
+                }
+            }
+            if let Some(silence) = silence {
                 tracing::debug!(
                     kind = "schedule_notice_skipped",
                     schedule = %ev.schedule_id,

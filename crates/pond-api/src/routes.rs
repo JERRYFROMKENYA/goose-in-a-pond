@@ -4451,6 +4451,7 @@ async fn list_sessions(
         .iter()
         .filter(|s| {
             !pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+                && !pond_core::shared::services::goose_thread::is_thread(&s.id)
         })
         .count();
     if machine > 0 {
@@ -4462,8 +4463,10 @@ async fn list_sessions(
         );
     }
     let mut list_fetches = 0usize;
+    // The Goose thread is the pond's own writing, and still a conversation its member reads.
     for s in sessions.iter().filter(|s| {
-        pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+        (pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+            || pond_core::shared::services::goose_thread::is_thread(&s.id))
             && query.keeps(s.surface)
     }) {
         let message_count = state

@@ -16,6 +16,8 @@ use crate::shared::domain::todo::{
     question_for, rfc3339, EventKey, PushKind, Todo, MAX_ASKS, STALE_EVENT_MINUTES,
 };
 use crate::shared::ports::todo::{HookEventQueue, TodoRepository};
+use crate::shared::services::goose_thread;
+use crate::user_data::domain::message_note::{MessageNote, SourceKind};
 
 /// Events read per pass; a backlog drains over the next passes.
 pub const EVENT_BATCH: usize = 200;
@@ -142,12 +144,26 @@ impl TodoHookEngine {
         let Some(kind) = todo.push_kind() else {
             return Ok(false);
         };
-        let delivery = self
-            .notifier
-            .notify_member(&todo.owner, notice_for(todo, kind, why, now))
+        let notice = notice_for(todo, kind, why, now);
+        if kind == PushKind::Reminder {
+            let text = match notice.body.trim() {
+                "" => notice.title.clone(),
+                body => format!("{}\n{body}", notice.title),
+            };
+            goose_thread::post(
+                Some(&todo.owner),
+                &text,
+                MessageNote::from_source(
+                    SourceKind::Reminder,
+                    todo.text.clone(),
+                    Some(todo.id.clone()),
+                ),
+            )
             .await;
+        }
+        let delivery = self.notifier.notify_member(&todo.owner, notice).await;
         let outcome = match &delivery {
-            MemberDelivery::Reached(devices) => format!("reached {}", devices.len()),
+            MemberDelivery::Reached(devices) => format!("queued for {}", devices.len()),
             MemberDelivery::NoPhone => "no_phone".to_string(),
             MemberDelivery::Failed(why) => format!("failed: {why}"),
         };

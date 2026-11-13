@@ -289,3 +289,73 @@ async fn another_members_conversation_cannot_be_deleted_or_continued() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{route}: {body}");
     }
 }
+
+/// Each screen lists its own conversations. The thread the pond writes into is listed for its
+/// member, and for nobody else.
+#[tokio::test]
+async fn the_list_keeps_the_surfaces_asked_for_and_shows_a_member_her_goose_thread() {
+    use pond_core::shared::services::goose_thread::GooseThread;
+    use pond_core::user_data::domain::message_note::{MessageNote, SourceKind};
+    use pond_core::user_data::domain::session::SessionSurface;
+
+    let pond = pond(true).await;
+    let (amina, baraka) = (pond.amina.clone(), pond.baraka.clone());
+    conversation(&pond, "s-phone", Some(&amina)).await;
+    conversation(&pond, "s-room", Some(&amina)).await;
+    conversation(&pond, "s-earlier", Some(&amina)).await;
+    pond.sessions
+        .mark_surface("s-phone", SessionSurface::Phone, None)
+        .await
+        .unwrap();
+    pond.sessions
+        .mark_surface("s-room", SessionSurface::Room, None)
+        .await
+        .unwrap();
+    let thread = GooseThread::new(pond.sessions.clone());
+    let note = MessageNote::from_source(SourceKind::Schedule, "Daily Briefing", None);
+    let hers = thread
+        .post(Some(&amina), "Here is your brief.", note.clone())
+        .await
+        .unwrap();
+    let his = thread
+        .post(Some(&baraka), "Here is your brief.", note)
+        .await
+        .unwrap();
+
+    let (status, all) = send(&pond, call(Method::GET, "/api/v1/sessions", None)).await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    assert!(ids(&all).contains(&hers.session_id), "{all}");
+    assert!(
+        !ids(&all).contains(&his.session_id),
+        "another member's thread"
+    );
+
+    let listed = |surface: &'static str| {
+        let pond = &pond;
+        async move {
+            let uri = format!("/api/v1/sessions?surface={surface}");
+            ids(&send(pond, call(Method::GET, &uri, None)).await.1)
+        }
+    };
+    assert_eq!(listed("phone").await, ["s-phone"]);
+    assert_eq!(
+        listed("phone,goose").await,
+        [hers.session_id.as_str(), "s-phone"]
+    );
+    assert_eq!(listed("room").await, ["s-room"]);
+    assert_eq!(
+        listed("unknown").await,
+        ["s-earlier"],
+        "begun before surfaces were recorded"
+    );
+
+    let uri = format!("/api/v1/sessions/{}/messages", hers.session_id);
+    let (status, messages) = send(&pond, call(Method::GET, &uri, None)).await;
+    assert_eq!(status, StatusCode::OK, "{messages}");
+    let rows = messages
+        .as_array()
+        .or_else(|| messages["messages"].as_array())
+        .expect("a list of messages");
+    assert_eq!(rows[0]["note"]["from"]["kind"], "schedule", "{messages}");
+    assert_eq!(rows[0]["note"]["from"]["label"], "Daily Briefing");
+}

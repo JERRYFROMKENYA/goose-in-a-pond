@@ -153,6 +153,14 @@ impl AgentScheduleExecutor {
             .session_storage
             .create_session(session_id.clone())
             .await;
+        let _ = self
+            .session_storage
+            .mark_surface(
+                &session_id,
+                pond_core::user_data::domain::session::SessionSurface::Schedule,
+                None,
+            )
+            .await;
 
         let should_speak = match (&self.announcer, &self.settings_repo) {
             (Some(_), Some(repo)) => match repo.get().await {

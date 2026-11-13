@@ -185,6 +185,64 @@ impl ExtractionCursor {
     }
 }
 
+/// Where a conversation was started, so each screen can list its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSurface {
+    /// The phone app.
+    Phone,
+    /// The desktop app on another computer.
+    Desktop,
+    /// The command line.
+    Cli,
+    /// The pond's own screen or a browser on it, where no paired device is on the request.
+    Pond,
+    /// Spoken to the pond in the room.
+    Room,
+    /// A schedule's run.
+    Schedule,
+    /// The thread the pond writes its own results and suggestions into.
+    Goose,
+}
+
+impl SessionSurface {
+    pub const ALL: [SessionSurface; 7] = [
+        SessionSurface::Phone,
+        SessionSurface::Desktop,
+        SessionSurface::Cli,
+        SessionSurface::Pond,
+        SessionSurface::Room,
+        SessionSurface::Schedule,
+        SessionSurface::Goose,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionSurface::Phone => "phone",
+            SessionSurface::Desktop => "desktop",
+            SessionSurface::Cli => "cli",
+            SessionSurface::Pond => "pond",
+            SessionSurface::Room => "room",
+            SessionSurface::Schedule => "schedule",
+            SessionSurface::Goose => "goose",
+        }
+    }
+
+    pub fn parse(stored: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.as_str() == stored)
+    }
+
+    /// The surface a paired device's `device_type` speaks for; `None` for anything else.
+    pub fn of_device_type(device_type: &str) -> Option<Self> {
+        match device_type {
+            "gotg" => Some(SessionSurface::Phone),
+            "desktop" => Some(SessionSurface::Desktop),
+            "cli" => Some(SessionSurface::Cli),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
@@ -199,6 +257,9 @@ pub struct Session {
     /// The model most recently used in this session.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_name: Option<String>,
+    /// `None` for a conversation begun before surfaces were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SessionSurface>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -213,6 +274,7 @@ impl Session {
             total_prompt_tokens: 0,
             total_completion_tokens: 0,
             model_name: None,
+            surface: None,
             created_at: now,
             updated_at: now,
         }
@@ -222,6 +284,19 @@ impl Session {
 #[cfg(test)]
 mod session_identity_tests {
     use super::*;
+
+    #[test]
+    fn every_surface_round_trips_through_its_stored_form() {
+        for surface in SessionSurface::ALL {
+            assert_eq!(SessionSurface::parse(surface.as_str()), Some(surface));
+        }
+        assert_eq!(SessionSurface::parse("somewhere"), None);
+        assert_eq!(
+            SessionSurface::of_device_type("gotg"),
+            Some(SessionSurface::Phone)
+        );
+        assert_eq!(SessionSurface::of_device_type("light"), None);
+    }
 
     #[test]
     fn every_source_round_trips_through_its_stored_form() {

@@ -1,6 +1,6 @@
 use crate::models::domain::message::ImageAttachment;
 use crate::user_data::domain::session::{
-    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
+    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage, SessionSurface,
 };
 use thiserror::Error;
 
@@ -23,6 +23,17 @@ pub enum SessionStorageError {
 #[async_trait::async_trait]
 pub trait SessionStorage: Send + Sync {
     async fn create_session(&self, session_id: String) -> Result<Session, SessionStorageError>;
+
+    /// Records where a conversation was started, once: a later turn from another screen does
+    /// not move it. `device_id` is the paired device that began it, when there was one.
+    async fn mark_surface(
+        &self,
+        _session_id: &str,
+        _surface: SessionSurface,
+        _device_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        Ok(())
+    }
 
     async fn get_session(&self, session_id: &str) -> Result<Session, SessionStorageError>;
 

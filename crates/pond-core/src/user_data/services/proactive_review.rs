@@ -2762,6 +2762,7 @@ mod tests {
             total_prompt_tokens: 0,
             total_completion_tokens: 0,
             model_name: None,
+            surface: None,
             created_at: updated_at,
             updated_at,
         }

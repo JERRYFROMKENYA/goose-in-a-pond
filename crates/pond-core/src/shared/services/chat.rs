@@ -16,7 +16,7 @@ use crate::shared::domain::agent::{
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::shared::services::voice_control::{StopReason, VoiceControl};
-use crate::user_data::domain::session::SessionMessage;
+use crate::user_data::domain::session::{SessionMessage, SessionSurface};
 use crate::user_data::ports::session_storage::SessionStorage;
 use anyhow::Result;
 use futures::StreamExt as _;
@@ -391,6 +391,8 @@ pub struct ChatService {
     /// The session row is made at the first turn, so a loop nobody talks to leaves none.
     session_on_first_turn: bool,
     session_made: Arc<std::sync::atomic::AtomicBool>,
+    /// Where a session this service makes was started.
+    surface: Option<SessionSurface>,
     /// Voice Match names the speaker: their context, and their own session.
     voice_identity: Option<SpeakerContext>,
     /// Who woke the loop for the turn under way; `None` when nobody was recognised.
@@ -528,6 +530,7 @@ impl ChatService {
             spoken_observer: None,
             session_on_first_turn: false,
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            surface: None,
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
             unrecognised_scope: None,
@@ -872,6 +875,12 @@ impl ChatService {
         self
     }
 
+    /// Names where a session made on the first turn was started.
+    pub fn with_surface(mut self, surface: SessionSurface) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
     /// Makes the session row the first time a turn needs it; a failure is left to the write.
     async fn ensure_session(&self) {
         use std::sync::atomic::Ordering;
@@ -881,7 +890,18 @@ impl ChatService {
         let made = match self.session_storage.get_session(&self.session_id()).await {
             Ok(_) => true,
             Err(_) => match self.session_storage.create_session(self.session_id()).await {
-                Ok(_) => true,
+                Ok(_) => {
+                    if let Some(surface) = self.surface {
+                        let marked = self
+                            .session_storage
+                            .mark_surface(&self.session_id(), surface, None)
+                            .await;
+                        if let Err(e) = marked {
+                            tracing::warn!(error = %e, "could not record where a session began");
+                        }
+                    }
+                    true
+                }
                 Err(e) => {
                     tracing::warn!(
                         session_id = %self.session_id(),

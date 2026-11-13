@@ -42,7 +42,9 @@ use pond_core::user_data::domain::schedule::{
     SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
-use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
+use pond_core::user_data::domain::session::{
+    IdentificationSource, SessionIdentity, SessionSurface,
+};
 use pond_core::user_data::domain::settings::Settings;
 use pond_core::user_data::ports::device_attribution::DeviceAttribution;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
@@ -1973,6 +1975,7 @@ async fn chat(
                     Json(json!({"error": format!("Failed to create session: {}", e)})),
                 )
             })?;
+        mark_session_surface(&state, &session_id, &device).await;
     }
 
     let model_role = "chat";
@@ -3388,6 +3391,7 @@ async fn drive_turn(
             run.finish(crate::runs::RunState::Failed);
             return;
         }
+        mark_session_surface(state, &session_id, &device).await;
     }
 
     let settings = state.settings_repo.get().await.unwrap_or_default();
@@ -4335,12 +4339,53 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
     run.cancel.cancel();
 }
 
+/// Records where a conversation just made was started: the paired device's kind, else the pond.
+async fn mark_session_surface(state: &AppState, session_id: &str, device: &ProvenDevice) {
+    let surface = match device.id() {
+        None => SessionSurface::Pond,
+        Some(id) => match state.device_registry.get_device(id).await {
+            Ok(Some(row)) => {
+                SessionSurface::of_device_type(&row.device_type).unwrap_or(SessionSurface::Pond)
+            }
+            Ok(None) => SessionSurface::Pond,
+            Err(error) => {
+                tracing::warn!(%error, session_id, "could not read the device a conversation began on");
+                return;
+            }
+        },
+    };
+    if let Err(error) = state
+        .session_storage
+        .mark_surface(session_id, surface, device.id())
+        .await
+    {
+        tracing::warn!(%error, session_id, "could not record where a conversation began");
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionListQuery {
+    /// Comma-separated surfaces to keep (`phone`, `room`, ...); `unknown` keeps the unrecorded.
+    surface: Option<String>,
+}
+
+impl SessionListQuery {
+    fn keeps(&self, surface: Option<SessionSurface>) -> bool {
+        let Some(wanted) = self.surface.as_deref() else {
+            return true;
+        };
+        let name = surface.map_or("unknown", SessionSurface::as_str);
+        wanted.split(',').any(|w| w.trim() == name)
+    }
+}
+
 /// List the household's conversations, most recently updated first. Sessions the pond opened for
 /// its own work (`SessionOrigin::Machine`, the scheduler's `sched-…`) are not conversations and are
 /// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Query(query): Query<SessionListQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::user_data::domain::session::SessionIdentity;
 
@@ -4387,6 +4432,7 @@ async fn list_sessions(
     let mut list_fetches = 0usize;
     for s in sessions.iter().filter(|s| {
         pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+            && query.keeps(s.surface)
     }) {
         let message_count = state
             .session_storage
@@ -4429,6 +4475,7 @@ async fn list_sessions(
             "total_prompt_tokens": s.total_prompt_tokens,
             "total_completion_tokens": s.total_completion_tokens,
             "model_name": s.model_name,
+            "surface": s.surface,
             "created_at": s.created_at.to_rfc3339(),
             "updated_at": s.updated_at.to_rfc3339(),
         }));
@@ -13144,6 +13191,7 @@ async fn agent_chat_stream(
                 yield Ok(Event::default().data(json!({"error": e.to_string()}).to_string()));
                 return;
             }
+            mark_session_surface(&state, &session_id, &device).await;
         }
 
         // After the session row exists, and before `ChatService`: its default scope is Household,

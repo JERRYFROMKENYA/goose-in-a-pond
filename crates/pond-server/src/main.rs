@@ -5847,6 +5847,14 @@ async fn run_chat(
             other => return Err(other.into()),
         }
     }
+    let surface = if voice_mode {
+        pond_core::user_data::domain::session::SessionSurface::Room
+    } else {
+        pond_core::user_data::domain::session::SessionSurface::Cli
+    };
+    if let Err(e) = storage.mark_surface(&session_id, surface, None).await {
+        tracing::debug!("could not record where this session began: {e}");
+    }
 
     let warm_agent = agent.clone();
     let mut chat_service = ChatService::new(agent, session_id.clone(), storage)

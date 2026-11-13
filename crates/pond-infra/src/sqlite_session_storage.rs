@@ -6,7 +6,7 @@ use pond_core::models::domain::image_limits::extension_for_mime;
 use pond_core::models::domain::message::{ChatMessage, ImageAttachment, Role, ToolCallRecord};
 use pond_core::user_data::domain::session::{
     ExtractionCursor, IdentificationSource, MessageAttachment, Session, SessionIdentity,
-    SessionMessage,
+    SessionMessage, SessionSurface,
 };
 use pond_core::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
 use sqlx::{Pool, Row, Sqlite};
@@ -23,6 +23,7 @@ struct SessionRow {
     total_prompt_tokens: i64,
     total_completion_tokens: i64,
     model_name: Option<String>,
+    surface: Option<String>,
     created_at: String,
     updated_at: String,
 }
@@ -91,6 +92,7 @@ impl TryFrom<SessionRow> for Session {
             total_prompt_tokens: r.total_prompt_tokens as u32,
             total_completion_tokens: r.total_completion_tokens as u32,
             model_name: r.model_name,
+            surface: r.surface.as_deref().and_then(SessionSurface::parse),
             created_at: parse_dt(&r.created_at),
             updated_at: parse_dt(&r.updated_at),
         })
@@ -338,9 +340,28 @@ impl SessionStorage for SqliteSessionStorage {
         self.get_session(&session_id).await
     }
 
+    async fn mark_surface(
+        &self,
+        session_id: &str,
+        surface: SessionSurface,
+        device_id: Option<&str>,
+    ) -> Result<(), SessionStorageError> {
+        sqlx::query(
+            "UPDATE sessions SET surface = ?, surface_device_id = ? \
+             WHERE id = ? AND surface IS NULL",
+        )
+        .bind(surface.as_str())
+        .bind(device_id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        Ok(())
+    }
+
     async fn get_session(&self, session_id: &str) -> Result<Session, SessionStorageError> {
         let row = sqlx::query_as::<_, SessionRow>(
-            "SELECT id, title, profile_id, total_prompt_tokens, total_completion_tokens, model_name, created_at, updated_at FROM sessions WHERE id = ?",
+            "SELECT id, title, profile_id, total_prompt_tokens, total_completion_tokens, model_name, surface, created_at, updated_at FROM sessions WHERE id = ?",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
@@ -920,7 +941,7 @@ impl SessionStorage for SqliteSessionStorage {
 
     async fn list_sessions(&self) -> Result<Vec<Session>, SessionStorageError> {
         let rows = sqlx::query_as::<_, SessionRow>(
-            "SELECT id, title, profile_id, total_prompt_tokens, total_completion_tokens, model_name, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
+            "SELECT id, title, profile_id, total_prompt_tokens, total_completion_tokens, model_name, surface, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
         .await
@@ -1633,6 +1654,23 @@ mod tests {
             result,
             Err(SessionStorageError::SessionNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_conversation_keeps_the_surface_it_was_started_on() {
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+        assert_eq!(s.get_session("sess-1").await.unwrap().surface, None);
+
+        s.mark_surface("sess-1", SessionSurface::Phone, Some("phone-1"))
+            .await
+            .unwrap();
+        s.mark_surface("sess-1", SessionSurface::Room, None)
+            .await
+            .unwrap();
+
+        let listed = s.list_sessions().await.unwrap();
+        assert_eq!(listed[0].surface, Some(SessionSurface::Phone));
     }
 
     #[tokio::test]

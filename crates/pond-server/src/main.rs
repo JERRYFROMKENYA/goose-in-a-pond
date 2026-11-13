@@ -682,9 +682,7 @@ fn kokoro_gpu_speech(
                     .block_on(settings.get())
                     .is_ok_and(|s| s.voice_tts_gpu_enabled)
             })
-            .with_room_maker(|| {
-                pond_adapters_goose::release_idle_encoder("long_speech");
-            })
+            .with_room_maker(|| pond_adapters_goose::release_idle_encoder("long_speech"))
             .with_model_fetcher(move || {
                 fetching.spawn(model_download::ensure_kokoro_gpu_weights(data_dir.clone()));
             }),

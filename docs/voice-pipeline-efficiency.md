@@ -53,7 +53,8 @@ eight units is two minutes of synthesis. On a Jetson with the GPU runtime instal
   the pipe by exiting. Its memory is back as soon as it has exited.
 - **Room for it.** Before it starts, the multimodal encoder is released if no generation holds
   the model (`release_idle_encoders`; the next spoken or picture turn loads it again in about
-  2 s), and it starts only with `GPU_NEEDS_MB` (750) available. Otherwise the speech is made on
+  2 s), and it starts only with `GPU_NEEDS_MB` (750) available. A released encoder's memory is
+  waited for, up to 3 s: it is not yet available when the release returns. Otherwise the speech is made on
   the CPU as before.
 - **Out of memory.** The helper sets its own `oom_score_adj` to 1000, so a kernel short of
   memory ends the helper, and the speech carries on from the CPU, before it ends the pond.

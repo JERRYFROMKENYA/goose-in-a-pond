@@ -178,7 +178,7 @@ mod tests {
             rendered.join("\n")
         );
 
-        assert_eq!(entries.len(), 35, "tool count moved");
+        assert_eq!(entries.len(), 36, "tool count moved");
     }
 
     /// Storing one key adds its one schema inside `giap-knowledge`: the prefix moves from there

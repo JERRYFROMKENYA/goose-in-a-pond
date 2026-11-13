@@ -4384,6 +4384,23 @@ async fn run_server(
         SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone()))
             .with_setup_claims(setup_claims.clone()),
     );
+    // A phone that stopped connecting is removed after the household's chosen number of days.
+    pond_server::phone_retirement::spawn(
+        pond_core::user_data::services::phone_retirement::PhoneRetirement::new(
+            Arc::new(
+                pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
+                    db.system.clone(),
+                ),
+            ),
+            handshake.clone(),
+            device_registry.clone(),
+            Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
+                db.system.clone(),
+            )),
+            profile_repo.clone(),
+            settings_repo.clone(),
+        ),
+    );
     let pairing_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "pond".to_string());

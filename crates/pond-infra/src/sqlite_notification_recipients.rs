@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use pond_core::mcp::ports::notification_recipients::{NotificationRecipients, PHONE_CLIENT_TYPE};
+use pond_core::user_data::ports::idle_phones::{IdlePhone, IdlePhones};
 use pond_core::user_data::ports::settings::SettingsRepository;
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Row, Sqlite};
 
 pub struct SqliteNotificationRecipients {
     pool: Pool<Sqlite>,
@@ -64,6 +65,39 @@ impl NotificationRecipients for SqliteNotificationRecipients {
         .fetch_all(&self.pool)
         .await?;
         Ok(ids)
+    }
+}
+
+#[async_trait]
+impl IdlePhones for SqliteNotificationRecipients {
+    async fn unseen_since(&self, cutoff: DateTime<Utc>) -> Result<Vec<IdlePhone>> {
+        // The newest touch across a phone's live sessions is when it was last here.
+        let rows = sqlx::query(
+            "SELECT d.id, d.name, d.profile_id, MAX(t.last_seen_at) AS last_seen \
+             FROM devices d JOIN session_tokens t ON t.device_id = d.id \
+             WHERE d.device_type = ? AND t.revoked_at IS NULL \
+             GROUP BY d.id \
+             HAVING MAX(COALESCE(t.last_seen_at, '')) != '' AND MAX(t.last_seen_at) < ? \
+             ORDER BY last_seen, d.id",
+        )
+        .bind(PHONE_CLIENT_TYPE)
+        .bind(cutoff.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                let last_seen: String = row.get("last_seen");
+                Some(IdlePhone {
+                    device_id: row.get("id"),
+                    name: row.get("name"),
+                    profile_id: row.get("profile_id"),
+                    last_seen: DateTime::parse_from_rfc3339(&last_seen)
+                        .ok()?
+                        .with_timezone(&Utc),
+                })
+            })
+            .collect())
     }
 }
 
@@ -147,6 +181,28 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_a_phone_whose_every_session_is_old_counts_as_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Database::init(tmp.path()).await.unwrap();
+        let pool = db.system.clone();
+        for phone in ["daily", "drawer", "never-stamped", "gone"] {
+            insert_device(&pool, phone, PHONE_CLIENT_TYPE).await;
+            insert_token(&pool, phone, phone == "gone").await;
+        }
+        seen(&pool, "daily", 1).await;
+        seen(&pool, "drawer", 45).await;
+        seen(&pool, "gone", 45).await;
+
+        let idle = SqliteNotificationRecipients::new(pool)
+            .unseen_since(Utc::now() - Duration::days(30))
+            .await
+            .unwrap();
+        assert_eq!(idle.len(), 1, "{idle:?}");
+        assert_eq!(idle[0].device_id, "drawer");
+        assert!((Utc::now() - idle[0].last_seen).num_days() >= 44);
     }
 
     #[tokio::test]

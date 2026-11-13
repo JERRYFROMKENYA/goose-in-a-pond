@@ -17,10 +17,12 @@ use std::time::Duration;
 use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
 
 pub mod engine;
+pub mod gpu;
 pub mod tokenizer;
 pub mod voices;
 
 pub use engine::{Engine, SAMPLE_RATE};
+pub use gpu::{GpuSpeech, HelperCommand};
 pub use tokenizer::Vocab;
 pub use voices::StyleTable;
 
@@ -72,6 +74,8 @@ pub struct KokoroOutput {
     voice_name: RwLock<String>,
     /// Pace, as `f32::to_bits` so it can live in an atomic.
     speed_bits: AtomicU64,
+    /// Where long speech is said on the GPU; `None` where this host cannot.
+    gpu: Option<Arc<GpuSpeech>>,
 
     thinking_for: Arc<AtomicU64>,
     utterance: Arc<AtomicU64>,
@@ -105,6 +109,7 @@ impl KokoroOutput {
             style: RwLock::new(None),
             voice_name: RwLock::new(DEFAULT_VOICE.to_string()),
             speed_bits: AtomicU64::new(DEFAULT_SPEED.to_bits() as u64),
+            gpu: None,
             thinking_for: Arc::new(AtomicU64::new(TONE_OFF)),
             utterance: Arc::new(AtomicU64::new(1)),
             speech_interrupted: Arc::new(AtomicBool::new(false)),
@@ -120,6 +125,16 @@ impl KokoroOutput {
     pub fn with_audio_level_sink(mut self, sink: Arc<ThrottledAudioLevelSink>) -> Self {
         self.audio_level_sink = Some(sink);
         self
+    }
+
+    /// Long speech is said on the GPU through `gpu` whenever it takes it.
+    pub fn with_gpu_speech(mut self, gpu: GpuSpeech) -> Self {
+        self.gpu = Some(Arc::new(gpu));
+        self
+    }
+
+    pub fn gpu_speech(&self) -> Option<&Arc<GpuSpeech>> {
+        self.gpu.as_ref()
     }
 
     /// Select the voice. Swaps a 522 KB table; the session is untouched.
@@ -276,22 +291,43 @@ impl KokoroOutput {
             return Ok(Vec::new());
         }
 
+        // A preview in another voice is one short line, and must not end a speech's helper.
+        let gpu = self.gpu.clone().filter(|_| style.is_none());
         let style = match style {
             Some(style) => style,
             None => self.ensure_style().await?,
         };
         let speed = self.speed();
         let mut engine = self.loaded_engine().await?;
+        let tokens: usize = chunks.iter().map(|(chunk, _)| chunk.tokens.len()).sum();
 
         let samples = off_the_runtime(move || {
             let Some(engine) = engine.as_mut() else {
                 anyhow::bail!("the Kokoro engine was unloaded before synthesis");
             };
+            let mut gpu = gpu.filter(|gpu| gpu.takes(tokens, last));
             let mut samples = Vec::new();
             for (chunk, gap) in &chunks {
                 push_checked(&mut samples, chunk, *gap, speed, |part| {
-                    engine.synthesize(part, style.style_for(part.tokens.len()), speed)
+                    let row = style.style_for(part.tokens.len());
+                    if let Some(helper) = &gpu {
+                        match helper.synthesize(&part.padded(), row, speed) {
+                            Ok(audio) => return Ok(audio),
+                            Err(e) => {
+                                tracing::warn!(
+                                    kind = "kokoro_gpu_failed",
+                                    error = %format!("{e:#}"),
+                                    "a pass of long speech came back to the CPU"
+                                );
+                                gpu = None;
+                            }
+                        }
+                    }
+                    engine.synthesize(part, row, speed)
                 })?;
+            }
+            if let Some(gpu) = gpu.filter(|_| last) {
+                gpu.end("speech_ended");
             }
             Ok(samples)
         })
@@ -322,6 +358,14 @@ impl KokoroOutput {
 
     pub fn last_sample_rate(&self) -> Option<u32> {
         *self.last_sample_rate.lock().unwrap()
+    }
+
+    /// A turn that begins, or a reply cut short, needs the helper's memory back at once: the
+    /// turn's recording is heard only if its encoder fits.
+    fn free_the_gpu(&self) {
+        if let Some(gpu) = &self.gpu {
+            gpu.stop_now();
+        }
     }
 }
 
@@ -473,6 +517,7 @@ impl VoiceOutput for KokoroOutput {
         self.speech_interrupted.store(false, Ordering::SeqCst);
         self.turn.release();
         self.in_turn.store(true, Ordering::SeqCst);
+        self.free_the_gpu();
         let (utterance, interrupted) = (self.utterance.clone(), self.speech_interrupted.clone());
         self.turn.begin(move || {
             utterance.load(Ordering::Relaxed) == mine && !interrupted.load(Ordering::Relaxed)
@@ -487,6 +532,7 @@ impl VoiceOutput for KokoroOutput {
     fn stop_speaking(&self) {
         self.speech_interrupted.store(true, Ordering::SeqCst);
         self.turn.release();
+        self.free_the_gpu();
     }
 
     fn start_thinking_tone(&self) {

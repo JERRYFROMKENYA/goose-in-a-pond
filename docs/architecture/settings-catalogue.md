@@ -105,6 +105,7 @@ gives it a control, and the server-side rule if any.
 | `voice_tts_speed` | `1.0` |  |
 | `voice_tts_quality` | `"q8f16"` | rule: one of `q4`, `q4f16`, `q8`, `q8f16`, `fp16`, `fp32` |
 | `voice_thinking_tone_enabled` | `true` |  |
+| `voice_tts_gpu_enabled` | `true` | read as each long speech begins; no effect without the Jetson GPU runtime |
 | `active_tts_model` | `""` | mirror of `model_role_assignments`; the catalogue links to Models |
 | `voice_max_turns` | `0` | Rust classifies it headless; read through `Settings::effective_max_turns` |
 

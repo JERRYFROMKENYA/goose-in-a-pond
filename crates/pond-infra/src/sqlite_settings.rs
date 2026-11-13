@@ -680,6 +680,14 @@ impl SettingsRepository for SqliteSettingsRepository {
                 "false"
             }
         );
+        upsert!(
+            "voice_tts_gpu_enabled",
+            if settings.voice_tts_gpu_enabled {
+                "true"
+            } else {
+                "false"
+            }
+        );
         upsert!("audio_input_device", &settings.audio_input_device);
         upsert!("audio_output_device", &settings.audio_output_device);
         upsert!(
@@ -1250,6 +1258,8 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         "ext_travel_enabled" => s.ext_travel_enabled = value == "true",
         // Defaults ON, but a corrupt row still reads false: silence is the safe failure for audio.
         "voice_thinking_tone_enabled" => s.voice_thinking_tone_enabled = value == "true",
+        // A corrupt row reads false: the CPU is the path that always speaks.
+        "voice_tts_gpu_enabled" => s.voice_tts_gpu_enabled = value == "true",
         "audio_input_device" => s.audio_input_device = value.to_string(),
         "audio_output_device" => s.audio_output_device = value.to_string(),
         "audio_sound_test" => s.audio_sound_test = value == "true",

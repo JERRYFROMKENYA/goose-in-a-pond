@@ -65,6 +65,20 @@ pub fn format_no_results(what: &str, alternatives: &[&str]) -> String {
     )
 }
 
+/// A tool's words for the model, with the receipt of what it set or did not set beside them:
+/// the turn keeps the receipt, and a failed set is said to the person whatever the model writes.
+pub fn with_receipt(
+    text: impl Into<String>,
+    receipt: pond_core::user_data::domain::message_note::Receipt,
+) -> rmcp::model::CallToolResult {
+    let mut result =
+        rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(text.into())]);
+    result.meta = Some(rmcp::model::Meta(
+        pond_core::mcp::domain::tool_outcome::with_outcome(None, &receipt),
+    ));
+    result
+}
+
 /// A miss where chaining would be wrong (e.g. an unstored personal fact), with the reason why.
 pub fn format_dead_end(what: &str, why: &str) -> String {
     format!("No results: {what}. {why}")

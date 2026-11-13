@@ -6,6 +6,7 @@
 
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
+use pond_core::mcp::domain::tool_outcome::with_outcome;
 use pond_core::shared::domain::long_task::{
     match_waits_by_name, next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact,
     ArtifactKind, ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused,
@@ -22,6 +23,7 @@ use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -232,6 +234,16 @@ fn quoted(items: &[String]) -> String {
         .join(", ")
 }
 
+/// The id in `run_start`'s own "Started task {id}. ..." line.
+fn started_task_id(said: &str) -> Option<String> {
+    let id = said
+        .strip_prefix("Started task ")?
+        .split('.')
+        .next()?
+        .trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// Wrap an answer or a refusal as tool success, logging the refusal.
 const REFUSAL_TRACE_CHARS: usize = 400;
 
@@ -380,10 +392,15 @@ anything you can answer now.")]
         params: Parameters<TaskStartParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("task_start");
-        Ok(answer(
-            "task_start",
-            self.run_start(&ctx.meta, params.0).await,
-        ))
+        let goal = params.0.goal.clone().unwrap_or_default();
+        let outcome = self.run_start(&ctx.meta, params.0).await;
+        let receipt = match &outcome {
+            Ok(said) => Receipt::set("task", goal, started_task_id(said)),
+            Err(_) => Receipt::not_set("task", goal, "The Pond could not start that task."),
+        };
+        let mut result = answer("task_start", outcome);
+        result.meta = Some(Meta(with_outcome(result.meta.map(|meta| meta.0), &receipt)));
+        Ok(result)
     }
 
     #[tool(description = "\

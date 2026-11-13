@@ -4,6 +4,7 @@ pub mod notice_delivery;
 pub mod notification_history;
 pub mod system_notice;
 pub mod tool_group;
+pub mod tool_outcome;
 pub mod tool_result;
 pub mod transient_result;
 pub mod web_search;

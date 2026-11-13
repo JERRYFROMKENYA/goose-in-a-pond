@@ -16,6 +16,7 @@ use crate::shared::domain::agent::{
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::shared::services::voice_control::{StopReason, VoiceControl};
+use crate::user_data::domain::message_note::{MessageNote, Receipt};
 use crate::user_data::domain::session::{SessionMessage, SessionSurface};
 use crate::user_data::ports::session_storage::SessionStorage;
 use anyhow::Result;
@@ -406,6 +407,8 @@ pub struct ChatService {
     session_made: Arc<std::sync::atomic::AtomicBool>,
     /// Where a session this service makes was started.
     surface: Option<SessionSurface>,
+    /// What this turn's tools set or failed to set, kept with the reply when it is stored.
+    turn_receipts: Arc<std::sync::Mutex<Vec<Receipt>>>,
     /// Voice Match names the speaker: their context, and their own session.
     voice_identity: Option<SpeakerContext>,
     /// Who woke the loop for the turn under way; `None` when nobody was recognised.
@@ -544,6 +547,7 @@ impl ChatService {
             session_on_first_turn: false,
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             surface: None,
+            turn_receipts: Arc::new(std::sync::Mutex::new(Vec::new())),
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
             unrecognised_scope: None,
@@ -888,6 +892,24 @@ impl ChatService {
         self
     }
 
+    /// Hands over what the turn's tools set or failed to set, for the reply about to be stored.
+    pub fn note_turn_receipts(&self, receipts: Vec<Receipt>) {
+        self.turn_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(receipts);
+    }
+
+    /// Takes the turn's receipts as the note for its reply; nothing is left for the next turn.
+    fn take_turn_note(&self) -> MessageNote {
+        MessageNote {
+            receipts: std::mem::take(
+                &mut *self.turn_receipts.lock().unwrap_or_else(|e| e.into_inner()),
+            ),
+            ..MessageNote::default()
+        }
+    }
+
     /// Names where a session made on the first turn was started.
     pub fn with_surface(mut self, surface: SessionSurface) -> Self {
         self.surface = Some(surface);
@@ -1204,7 +1226,8 @@ impl ChatService {
             self.session_id(),
             ChatMessage::assistant_with_tool_calls(assistant_text, tool_calls),
         )
-        .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c));
+        .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c))
+        .with_note(self.take_turn_note());
         self.session_storage
             .add_message(self.session_id(), sm)
             .await?;
@@ -1547,8 +1570,13 @@ impl ChatService {
                     return Err(anyhow::anyhow!("Agent stream error: {}", content));
                 }
                 AgentStreamEvent::ToolResult {
-                    id, tool, content, ..
+                    id,
+                    tool,
+                    content,
+                    outcome,
+                    ..
                 } => {
+                    self.note_turn_receipts(outcome.into_iter().collect());
                     // Not spoken; truncated so a huge payload cannot bloat one NDJSON line.
                     let content = truncate_tool_result(content);
                     self.emit_event(WorkflowEvent::ToolResult { tool, id, content });
@@ -1775,7 +1803,8 @@ impl ChatService {
                     usage.map(|u| u.completion_tokens),
                 )
                 // `persist_assistant_turn`'s tuple can't carry this: its rows stay NULL, not zero.
-                .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens));
+                .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens))
+                .with_note(self.take_turn_note());
         self.session_storage
             .add_message(self.session_id(), session_msg)
             .await?;

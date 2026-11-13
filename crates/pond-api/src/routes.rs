@@ -3160,6 +3160,8 @@ struct TurnAccumulator {
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
+    /// What the turn's tools set or failed to set, kept with the reply.
+    receipts: Vec<pond_core::user_data::domain::message_note::Receipt>,
     /// Tool-call id -> arguments, kept from `ToolCall` because `ToolResult` doesn't repeat them.
     tool_call_inputs: std::collections::HashMap<String, String>,
     /// First visible token time; fallback TTFT for engines that report none.
@@ -3177,11 +3179,25 @@ impl TurnAccumulator {
             thought,
             full_text: String::new(),
             tool_results: Vec::new(),
+            receipts: Vec::new(),
             tool_call_inputs: std::collections::HashMap::new(),
             ttft: None,
             tool_call_start: None,
             last_tool_name: None,
             last_tool_latency_ms: None,
+        }
+    }
+
+    /// The reply with each failed set said in it. The agent adds the line itself; this puts it
+    /// back when a later step replaced the reply's text.
+    fn keep_not_set_lines(&mut self) {
+        for line in self.receipts.iter().filter_map(|r| r.not_set_line()) {
+            if !self.full_text.contains(&line) {
+                if !self.full_text.trim().is_empty() {
+                    self.full_text.push_str("\n\n");
+                }
+                self.full_text.push_str(&line);
+            }
         }
     }
 
@@ -3240,6 +3256,7 @@ impl TurnAccumulator {
                 content,
                 card,
                 keep,
+                outcome,
             } => {
                 if let Some(start) = self.tool_call_start.take() {
                     self.last_tool_latency_ms = Some(start.elapsed().as_millis() as u64);
@@ -3263,6 +3280,10 @@ impl TurnAccumulator {
                 // Shown during the turn; a client must not keep it, as history keeps only the stub.
                 if keep.is_some() {
                     frame["transient"] = json!(true);
+                }
+                if let Some(receipt) = outcome {
+                    frame["receipt"] = json!(receipt);
+                    self.receipts.push(receipt);
                 }
                 StreamStep::Frame(frame.to_string())
             }
@@ -3869,6 +3890,8 @@ async fn drive_turn(
             ),
         }
     } else {
+        turn.keep_not_set_lines();
+        chat_service.note_turn_receipts(std::mem::take(&mut turn.receipts));
         let _ = chat_service
             .persist_assistant_turn(
                 std::mem::take(&mut turn.tool_results),
@@ -13426,6 +13449,8 @@ async fn agent_chat_stream(
 
         // ── Persist assistant turn ──────────────────────────────────────────
         // No extraction wiring: the batch engine reads every persisted turn.
+        turn.keep_not_set_lines();
+        chat_service.note_turn_receipts(std::mem::take(&mut turn.receipts));
         let _ = chat_service.persist_assistant_turn(
             std::mem::take(&mut turn.tool_results),
             &turn.full_text,
@@ -22753,6 +22778,7 @@ mod tests {
             content: "24C and clear".to_string(),
             card: None,
             keep: None,
+            outcome: None,
         }));
         assert_eq!(
             result,
@@ -22804,6 +22830,7 @@ mod tests {
             content: "[[[mcp-ui:weather:{\"temp\":24}]]]\n24C and clear".to_string(),
             card: None,
             keep: None,
+            outcome: None,
         }));
 
         assert_eq!(
@@ -22837,6 +22864,7 @@ mod tests {
             content: "Web results for: q\nPassage.".to_string(),
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
             keep: None,
+            outcome: None,
         }));
         assert_eq!(frame["content"], "Web results for: q\nPassage.");
         assert_eq!(
@@ -22860,6 +22888,7 @@ mod tests {
             content: "Web results for: q\nThe park closes at 6:00 PM.".to_string(),
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
             keep: Some(stub.to_string()),
+            outcome: None,
         }));
         assert_eq!(
             frame["content"],

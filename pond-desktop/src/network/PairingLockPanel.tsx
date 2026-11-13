@@ -109,7 +109,7 @@ export function PairingLockPanel({ variant }: { variant: "hub" | "catalogue" }) 
           <span>{lines.warning}</span>
         </div>
       )}
-      {!mayChange && lock.can_change === false && (
+      {!mayChange && (
         <p className="net__quiet">Only the main member's phone can change this.</p>
       )}
       {problem && <p className="net__quiet" role="alert">{problem}</p>}

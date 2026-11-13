@@ -94,6 +94,7 @@ fn vectors() -> Value {
         server_proof: Some(server_proof.clone()),
         returning_device: false,
         test_device: false,
+        pairing_request: None,
     };
     let p2c_0 = serde_json::to_string(&handshake).unwrap();
     let c2p_0 = r#"{"id":3,"type":"wifi_scan"}"#;

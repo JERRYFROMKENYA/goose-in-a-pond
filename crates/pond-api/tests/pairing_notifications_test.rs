@@ -58,6 +58,7 @@ impl Handshake for RejectingHandshake {
             server_proof: None,
             returning_device: false,
             test_device: false,
+            pairing_request: None,
         })
     }
 }
@@ -92,6 +93,7 @@ impl Handshake for AcceptingHandshake {
             server_proof: None,
             returning_device: false,
             test_device: false,
+            pairing_request: None,
         })
     }
 }

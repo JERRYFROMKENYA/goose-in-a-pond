@@ -49,6 +49,10 @@ use pond_core::user_data::services::member_attribution::sole_member;
 
 use crate::pairing_cpace::{self, Confirmed, CpaceError, Initiator};
 
+// Not called yet: the lock is wired into pairing in the next change.
+#[allow(dead_code)]
+mod pairing_lock;
+
 const PAIRING_CODE_TTL_MIN: i64 = 10;
 const CHALLENGE_TTL_SEC: i64 = 60;
 const SESSION_TTL_HOURS: i64 = 24;
@@ -228,6 +232,7 @@ impl SqliteHandshakeAdapter {
             // Only `complete_pairing` knows; it sets this on the response it accepts.
             returning_device: false,
             test_device: false,
+            pairing_request: None,
         }
     }
 
@@ -1230,6 +1235,7 @@ impl Handshake for SqliteHandshakeAdapter {
         Ok(HandshakeResponse {
             returning_device: completed.returning,
             test_device: completed.test,
+            pairing_request: None,
             ..self.response(
                 true,
                 Some(completed.session),

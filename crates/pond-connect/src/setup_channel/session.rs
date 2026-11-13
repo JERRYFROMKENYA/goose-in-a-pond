@@ -1043,6 +1043,7 @@ mod tests {
                     server_proof: accepted.then(|| "ab".repeat(64)),
                     returning_device: false,
                     test_device: false,
+                    pairing_request: None,
                 },
                 keys: accepted.then(|| ChannelKeys::new(&P2C, &C2P)),
             })

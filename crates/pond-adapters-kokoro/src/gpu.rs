@@ -39,6 +39,8 @@ const IDLE_AFTER: Duration = Duration::from_secs(20);
 /// After a failure, how long speech stays on the CPU before the helper is tried again.
 const RETRY_AFTER: Duration = Duration::from_secs(600);
 const EXIT_WITHIN: Duration = Duration::from_secs(5);
+/// On the Orin Nano a released encoder's 595 MB was not yet available when the release returned.
+const ROOM_SHOWS_WITHIN: Duration = Duration::from_secs(3);
 
 /// How to start the helper: the pond's own binary and the arguments that make it one.
 #[derive(Debug, Clone)]
@@ -118,7 +120,7 @@ pub struct GpuSpeech {
     /// Read as each long speech begins, so the household's switch needs no restart.
     switch: Box<dyn Fn() -> bool + Send + Sync>,
     fetch_model: Box<dyn Fn() + Send + Sync>,
-    make_room: Box<dyn Fn() + Send + Sync>,
+    make_room: Box<dyn Fn() -> bool + Send + Sync>,
     available_mb: Box<dyn Fn() -> Option<u64> + Send + Sync>,
     idle_after: Duration,
     running: Mutex<Option<Helper>>,
@@ -144,7 +146,7 @@ impl GpuSpeech {
             model: None,
             switch: Box::new(|| true),
             fetch_model: Box::new(|| {}),
-            make_room: Box::new(|| {}),
+            make_room: Box::new(|| false),
             available_mb: Box::new(mem_available_mb),
             idle_after: IDLE_AFTER,
             running: Mutex::new(None),
@@ -154,8 +156,9 @@ impl GpuSpeech {
         }
     }
 
-    /// Called before the helper starts, to free what speech does not need.
-    pub fn with_room_maker(mut self, make_room: impl Fn() + Send + Sync + 'static) -> Self {
+    /// Called before the helper starts, to free what speech does not need; whether it freed
+    /// anything.
+    pub fn with_room_maker(mut self, make_room: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         self.make_room = Box::new(make_room);
         self
     }
@@ -216,8 +219,13 @@ impl GpuSpeech {
             (self.fetch_model)();
             return false;
         }
-        (self.make_room)();
-        let available = (self.available_mb)();
+        let made_room = (self.make_room)();
+        let mut available = (self.available_mb)();
+        let until = Instant::now() + ROOM_SHOWS_WITHIN;
+        while made_room && available.is_some_and(|mb| mb < GPU_NEEDS_MB) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(100));
+            available = (self.available_mb)();
+        }
         if available.is_some_and(|mb| mb < GPU_NEEDS_MB) {
             skipped("memory", available);
             return false;
@@ -657,6 +665,7 @@ mod tests {
             speech(&starts)
                 .with_room_maker(move || {
                     counting.fetch_add(1, Ordering::SeqCst);
+                    false
                 })
                 .with_memory_probe(|| Some(GPU_NEEDS_MB - 1)),
         );
@@ -664,6 +673,28 @@ mod tests {
         assert!(!gpu.takes(300, false));
         assert_eq!(made.load(Ordering::SeqCst), 1);
         assert_eq!(starts.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn room_that_was_just_made_is_waited_for() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let probes = Arc::new(AtomicUsize::new(0));
+        let counting = probes.clone();
+        let gpu = Arc::new(
+            speech(&starts)
+                .with_room_maker(|| true)
+                .with_memory_probe(move || {
+                    let freed = counting.fetch_add(1, Ordering::SeqCst) >= 2;
+                    Some(if freed {
+                        GPU_NEEDS_MB + 300
+                    } else {
+                        GPU_NEEDS_MB - 300
+                    })
+                }),
+        );
+
+        assert!(gpu.takes(300, false));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
     }
 
     #[test]

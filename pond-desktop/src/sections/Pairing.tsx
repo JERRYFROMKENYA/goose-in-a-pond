@@ -9,6 +9,7 @@ import type { PairingCodeBinding } from "../api/types";
 import { isSignInRequired } from "../api/hostCredential";
 import { signInRefusalKey } from "../api/signInRefusal";
 import { PageHeader } from "../components/shared";
+import { PairingLockPanel } from "../network/PairingLockPanel";
 
 interface PairingInfo {
   code: string;
@@ -246,6 +247,7 @@ export function Pairing() {
               <code style={{ fontSize: 11 }}>_pond._tcp.local.</code> via mDNS.
             </Step>
           </div>
+          <div style={{ marginTop: 20 }}><PairingLockPanel variant="catalogue" /></div>
           <RemoteAccess />
         </div>
       </div>

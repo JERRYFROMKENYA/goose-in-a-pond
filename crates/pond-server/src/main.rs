@@ -5437,50 +5437,89 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     }
 }
 
-/// Background wake-ups for phones: FCM v1 when a service-account key exists (data-only pings,
-/// no content via Google), else the logging stub.
+/// Background wake-ups for phones: FCM for Android and APNs for iPhones, each when its key
+/// exists. Neither push carries a notice's words. With no usable key, the logging stub.
 fn push_relay(
     data_dir: &std::path::Path,
     push_tokens: Arc<dyn pond_core::user_data::ports::push_token::PushTokenRepository>,
 ) -> Arc<dyn pond_core::mcp::ports::notification_relay::NotificationRelay> {
+    let mut senders: Vec<Arc<dyn pond_core::mcp::ports::notification_relay::NotificationRelay>> =
+        Vec::new();
+
     let fcm_key_path = std::env::var("POND_FCM_KEY_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| data_dir.join("secrets").join("fcm-service-account.json"));
-    // Only the key's path is logged, never its contents.
+        .unwrap_or_else(|_| data_dir.join(pond_infra::reliability::ANDROID_PUSH_KEY));
+    // Only a key's path is logged, never its contents.
     if !fcm_key_path.exists() {
         tracing::warn!(
             kind = "push_relay_stubbed",
             reason = "no_key",
             expected_path = %fcm_key_path.display(),
-            "no FCM service-account key; asleep phones are not woken for notices \
+            "no FCM service-account key; asleep Android phones are not woken for notices \
              (docs/api.md, \"Setting up push\")"
         );
-        return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
-    }
-    match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
-        &fcm_key_path,
-        push_tokens.clone(),
-    ) {
-        Ok(relay) => {
-            tracing::info!(
-                kind = "push_relay_fcm",
-                path = %fcm_key_path.display(),
-                "background push active: FCM wakes paired phones"
-            );
-            Arc::new(relay)
-        }
-        Err(e) => {
+    } else {
+        match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
+            &fcm_key_path,
+            push_tokens.clone(),
+        ) {
+            Ok(relay) => {
+                tracing::info!(
+                    kind = "push_relay_fcm",
+                    path = %fcm_key_path.display(),
+                    "background push active: FCM wakes paired Android phones"
+                );
+                senders.push(Arc::new(relay));
+            }
             // The reason names a field, a scheme or a host, never key material.
-            tracing::warn!(
+            Err(e) => tracing::warn!(
                 kind = "push_relay_stubbed",
                 reason = "key_unusable",
                 error = %format!("{e:#}"),
                 expected_path = %fcm_key_path.display(),
-                "FCM key unusable; background push falls back to the logging stub"
-            );
-            Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens))
+                "FCM key unusable; Android phones are not woken"
+            ),
         }
     }
+
+    let apns_key_path = std::env::var("POND_APNS_KEY_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join(pond_infra::reliability::APPLE_PUSH_KEY));
+    if !apns_key_path.exists() {
+        tracing::warn!(
+            kind = "push_relay_stubbed",
+            reason = "no_apple_key",
+            expected_path = %apns_key_path.display(),
+            "no Apple push key; asleep iPhones are not woken for notices \
+             (docs/api.md, \"Setting up push\")"
+        );
+    } else {
+        match pond_infra::apns_push_relay::ApnsPushRelay::from_key_file(
+            &apns_key_path,
+            push_tokens.clone(),
+        ) {
+            Ok(relay) => {
+                tracing::info!(
+                    kind = "push_relay_apns",
+                    path = %apns_key_path.display(),
+                    "background push active: APNs wakes paired iPhones"
+                );
+                senders.push(Arc::new(relay));
+            }
+            Err(e) => tracing::warn!(
+                kind = "push_relay_stubbed",
+                reason = "apple_key_unusable",
+                error = %format!("{e:#}"),
+                expected_path = %apns_key_path.display(),
+                "Apple push key unusable; iPhones are not woken"
+            ),
+        }
+    }
+
+    if senders.is_empty() {
+        return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
+    }
+    Arc::new(pond_infra::apns_push_relay::PushRelays::new(senders))
 }
 
 #[allow(clippy::too_many_arguments)]

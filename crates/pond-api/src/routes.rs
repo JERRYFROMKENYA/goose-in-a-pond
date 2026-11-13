@@ -1014,6 +1014,7 @@ async fn emit_pairing_outcome(
     insecure_dev: bool,
     method: &'static str,
     returning: bool,
+    test: bool,
 ) {
     use pond_core::security::domain::event::{Event, EventCategory, PrivacySensitivity};
 
@@ -1058,12 +1059,24 @@ async fn emit_pairing_outcome(
         if paired && returning {
             event = event.attr("returning_device", true);
         }
+        if paired && test {
+            event = event.attr("test_device", true);
+        }
         if let Err(e) = event_log.append(event).await {
             tracing::warn!(error = %e, action, "failed to record pairing event");
         }
     }
 
     // After the event: the audit trail keeps every pairing, only the phone alert is spared.
+    if paired && test {
+        tracing::info!(
+            kind = "pairing_notice_skipped",
+            device = device_name.unwrap_or("unnamed"),
+            method,
+            "a test harness paired; nobody is told"
+        );
+        return;
+    }
     if paired && !announces_pairing(method, returning) {
         tracing::info!(
             kind = "pairing_notice_skipped",
@@ -1190,6 +1203,7 @@ async fn handshake_verify(
             insecure.is_some(),
             "loopback_hmac",
             false,
+            false,
         )
         .await;
         return Err(refusal);
@@ -1205,6 +1219,7 @@ async fn handshake_verify(
                 false,
                 "loopback_hmac",
                 false,
+                false,
             )
             .await;
             return Err(handshake_error("verify", e));
@@ -1218,6 +1233,7 @@ async fn handshake_verify(
         false,
         "loopback_hmac",
         resp.returning_device,
+        resp.test_device,
     )
     .await;
     Ok(Json(resp))
@@ -1255,6 +1271,7 @@ async fn handshake_pake_init(
                 Some(refusal.code()),
                 insecure.is_some(),
                 method,
+                false,
                 false,
             )
             .await;
@@ -1318,6 +1335,7 @@ async fn handshake_pake_verify(
                 insecure_dev,
                 method,
                 false,
+                false,
             )
             .await;
             return Err(handshake_error("pake_verify", e));
@@ -1331,6 +1349,7 @@ async fn handshake_pake_verify(
         insecure_dev,
         method,
         resp.returning_device,
+        resp.test_device,
     )
     .await;
     let mut body = serde_json::to_value(&resp).map_err(|e| handshake_error("pake_verify", e))?;
@@ -1479,6 +1498,10 @@ struct IssuePairingCodeRequest {
     /// Bind to nobody even when a member could be inferred (e.g. a guest's phone).
     #[serde(default)]
     unattributed: bool,
+    /// A test harness's code: the device that redeems it is not announced, gets no household
+    /// notices and is left out of the reliability report.
+    #[serde(default)]
+    test: bool,
 }
 
 /// Issues a fresh single-use pairing code, optionally bound to a member. Loopback and the
@@ -1559,10 +1582,18 @@ async fn handshake_issue_pairing_code(
                 internal
             }
         })?;
+    if request.test {
+        state
+            .handshake
+            .mark_pairing_code_test(&pc.code)
+            .await
+            .map_err(|e| handshake_error("mark_pairing_code_test", e))?;
+    }
     Ok(Json(json!({
         "code": pc.code,
         "expires_at": pc.expires_at,
         "profile_id": pc.profile_id,
+        "test": request.test,
         "pairing": pairing_material(transport, embedded),
     })))
 }

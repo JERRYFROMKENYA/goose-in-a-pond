@@ -1042,6 +1042,7 @@ mod tests {
                     rejection_reason: (!accepted).then(|| "invalid_confirmation".into()),
                     server_proof: accepted.then(|| "ab".repeat(64)),
                     returning_device: false,
+                    test_device: false,
                 },
                 keys: accepted.then(|| ChannelKeys::new(&P2C, &C2P)),
             })

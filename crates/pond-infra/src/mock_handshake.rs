@@ -67,6 +67,7 @@ impl Handshake for MockHandshake {
             // nothing to prove.
             server_proof: None,
             returning_device: false,
+            test_device: false,
         })
     }
 

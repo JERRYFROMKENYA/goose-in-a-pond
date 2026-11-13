@@ -64,6 +64,10 @@ pub struct HandshakeResponse {
     /// may quiet the "new device paired" notice is the caller's decision, per method.
     #[serde(skip)]
     pub returning_device: bool,
+    /// True when the accepted pairing redeemed a code minted for a test harness. Server-side
+    /// only: such a device is not announced and gets no household notices.
+    #[serde(skip)]
+    pub test_device: bool,
 }
 
 /// Phase 1 of loopback pairing: the dashboard asks for a challenge.
@@ -358,6 +362,14 @@ pub trait Handshake: Send + Sync {
     /// Exchange a refresh token for a fresh session+refresh pair.
     async fn refresh(&self, _request: RefreshRequest) -> Result<HandshakeResponse> {
         Err(anyhow::anyhow!("refresh not supported by this adapter"))
+    }
+
+    /// Mark an unredeemed pairing code as a test harness's: the device that redeems it is a
+    /// test device. Host-only, like issuing the code.
+    async fn mark_pairing_code_test(&self, _code: &str) -> Result<()> {
+        Err(anyhow::anyhow!(
+            "test pairing codes are not supported by this adapter"
+        ))
     }
 
     /// Issue a single-use pairing code bound to a member; returns the only plaintext copy.

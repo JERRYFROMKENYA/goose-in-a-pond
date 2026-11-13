@@ -123,6 +123,8 @@ struct CompletedPairing {
     expires: DateTime<Utc>,
     /// See [`HandshakeResponse::returning_device`].
     returning: bool,
+    /// See [`HandshakeResponse::test_device`].
+    test: bool,
 }
 
 /// The password a run committed to, which decides the limits it is held to.
@@ -225,6 +227,7 @@ impl SqliteHandshakeAdapter {
             server_proof: None,
             // Only `complete_pairing` knows; it sets this on the response it accepts.
             returning_device: false,
+            test_device: false,
         }
     }
 
@@ -644,6 +647,12 @@ impl SqliteHandshakeAdapter {
                 .fetch_optional(&self.pool)
                 .await?
                 .flatten();
+        let test: bool =
+            sqlx::query_scalar::<_, i64>("SELECT is_test FROM pairing_codes WHERE code_hash = ?")
+                .bind(code_hash)
+                .fetch_optional(&self.pool)
+                .await?
+                .is_some_and(|flag| flag != 0);
 
         let consumed = sqlx::query(
             "UPDATE pairing_codes SET consumed_at = ?
@@ -678,6 +687,12 @@ impl SqliteHandshakeAdapter {
             &at,
         )
         .await;
+        // Set either way: a device a household code re-admits stops being a harness's.
+        sqlx::query("UPDATE devices SET is_test = ? WHERE id = ?")
+            .bind(i64::from(test))
+            .bind(&device_id)
+            .execute(&self.pool)
+            .await?;
 
         let (session, refresh, expires) = self
             .issue_session_pair(client_id, client_type, &device_id)
@@ -696,6 +711,7 @@ impl SqliteHandshakeAdapter {
             refresh,
             expires,
             returning,
+            test,
         }))
     }
 
@@ -994,6 +1010,7 @@ impl SqliteHandshakeAdapter {
             transport,
         );
         response.returning_device = completed.returning;
+        response.test_device = completed.test;
         Ok((response, keys))
     }
 }
@@ -1212,6 +1229,7 @@ impl Handshake for SqliteHandshakeAdapter {
         };
         Ok(HandshakeResponse {
             returning_device: completed.returning,
+            test_device: completed.test,
             ..self.response(
                 true,
                 Some(completed.session),
@@ -1268,6 +1286,20 @@ impl Handshake for SqliteHandshakeAdapter {
             Some(expires.to_rfc3339()),
             None,
         ))
+    }
+
+    async fn mark_pairing_code_test(&self, code: &str) -> Result<()> {
+        let marked = sqlx::query(
+            "UPDATE pairing_codes SET is_test = 1 WHERE code_hash = ? AND consumed_at IS NULL",
+        )
+        .bind(Self::sha256_hex(code.as_bytes()))
+        .execute(&self.pool)
+        .await?;
+        anyhow::ensure!(
+            marked.rows_affected() == 1,
+            "no unredeemed pairing code to mark"
+        );
+        Ok(())
     }
 
     async fn issue_pairing_code_for(&self, profile_id: Option<&str>) -> Result<PairingCode> {

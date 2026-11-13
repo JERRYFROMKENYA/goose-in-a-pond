@@ -3652,7 +3652,8 @@ async fn run_server(
         .with_household_recipients(Arc::new(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
-            ),
+            )
+            .with_idle_limit(settings_repo.clone()),
         ))
         .with_history(notification_history.clone())
         .with_quiet_hours(settings_repo.clone()),

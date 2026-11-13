@@ -600,7 +600,18 @@ async fn status_text(
         let task = reached_task(deps, scope, &task_id).await?;
         let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
         let result = result_of(deps.repo.as_ref(), &task).await?;
-        return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
+        let mut said = task_summary_for_notice(&task, &steps, result.as_ref());
+        // The summary names the result; the answer is its body, which the caller came for.
+        if let Some(found) = &result {
+            if let Ok(Some(artifact)) = deps.repo.get_artifact(task.id(), &found.id).await {
+                let body: String = artifact.body().chars().take(RESULT_BODY_CHARS).collect();
+                if !body.trim().is_empty() {
+                    said.push_str("\n\nThe result:\n");
+                    said.push_str(body.trim());
+                }
+            }
+        }
+        return Ok(said);
     }
     let tasks = reached_tasks(deps, scope).await?;
     if tasks.is_empty() {
@@ -613,6 +624,9 @@ async fn status_text(
     }
     Ok(lines.join("\n"))
 }
+
+/// How much of a finished task's result its status hands the model.
+const RESULT_BODY_CHARS: usize = 6000;
 
 const NO_TASKS_RUNNING: &str = "There are no long tasks running for this person.";
 

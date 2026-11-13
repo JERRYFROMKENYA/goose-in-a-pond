@@ -517,6 +517,45 @@ pub const PROMPT_HEARTBEAT: &str = "\
 Say nothing when nothing needs them.
 ";
 
+/// The checklist's closing line, which a new item goes above.
+const HEARTBEAT_CLOSING: &str = "Say nothing when nothing needs them.";
+
+/// Why an item was not added to the heartbeat's checklist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeartbeatItemRefused {
+    Empty,
+    AlreadyThere,
+    /// The checklist rides a prompt, so it has a length it cannot pass.
+    Full,
+}
+
+/// `checklist` with `item` added as its own line, above the closing line when there is one.
+pub fn add_heartbeat_item(checklist: &str, item: &str) -> Result<String, HeartbeatItemRefused> {
+    let item = item.split_whitespace().collect::<Vec<_>>().join(" ");
+    let item = item.trim_start_matches(['-', '*', ' ']).trim();
+    if item.is_empty() {
+        return Err(HeartbeatItemRefused::Empty);
+    }
+    let line = format!("- {item}");
+    if checklist
+        .lines()
+        .any(|l| l.trim().eq_ignore_ascii_case(&line))
+    {
+        return Err(HeartbeatItemRefused::AlreadyThere);
+    }
+    let mut lines: Vec<&str> = checklist.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.trim() == HEARTBEAT_CLOSING)
+        .unwrap_or(lines.len());
+    lines.insert(at, &line);
+    let added = format!("{}\n", lines.join("\n"));
+    if added.chars().count() > AGENT_DOCUMENT_CHARS {
+        return Err(HeartbeatItemRefused::Full);
+    }
+    Ok(added)
+}
+
 /// The rules Goose keeps memory by. It replaces the `<memory-rules>` block of whichever style
 /// is in use.
 pub const PROMPT_SCRATCHPAD: &str = "\
@@ -941,6 +980,39 @@ pub fn build_system_prompt_from_template_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_heartbeat_item_goes_above_the_closing_line_once_and_only_while_it_fits() {
+        let added = add_heartbeat_item(PROMPT_HEARTBEAT, "  - is the dollar under 130 shillings? ")
+            .expect("it fits");
+        let lines: Vec<&str> = added.lines().collect();
+        assert_eq!(
+            lines[lines.len() - 2],
+            "- is the dollar under 130 shillings?"
+        );
+        assert_eq!(
+            lines[lines.len() - 1],
+            "Say nothing when nothing needs them."
+        );
+
+        assert_eq!(
+            add_heartbeat_item(&added, "Is the dollar under 130 shillings?"),
+            Err(HeartbeatItemRefused::AlreadyThere)
+        );
+        assert_eq!(
+            add_heartbeat_item(&added, " - "),
+            Err(HeartbeatItemRefused::Empty)
+        );
+        assert_eq!(
+            add_heartbeat_item(&added, &"word ".repeat(400)),
+            Err(HeartbeatItemRefused::Full)
+        );
+        assert_eq!(
+            add_heartbeat_item("", "check the gate").as_deref(),
+            Ok("- check the gate\n"),
+            "a checklist with no closing line takes it at the end"
+        );
+    }
 
     // ── Goose's documents ─────────────────────────────────────────────────────
 

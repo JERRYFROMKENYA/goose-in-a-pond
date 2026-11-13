@@ -180,6 +180,19 @@ impl ReminderRepository for SqliteReminderRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn assign(&self, id: &str, profile_id: &str) -> Result<bool> {
+        let result = sqlx::query(
+            "UPDATE reminders SET profile_id = ? \
+             WHERE id = ? AND disposition = 'pending' AND profile_id IS NULL",
+        )
+        .bind(profile_id)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .with_context(|| format!("assigning reminder {id}"))?;
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn offer(&self, id: &str, at: DateTime<Utc>) -> Result<bool> {
         let result = sqlx::query(
             "UPDATE reminders SET disposition = 'offered', decided_at = ?, offered_at = ? \

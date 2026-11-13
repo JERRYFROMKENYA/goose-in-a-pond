@@ -2737,6 +2737,11 @@ async fn run_server(
                         ])
                     }
                 };
+                // In a household of one, a mention nobody was named for is offered to that member.
+                let lone_reminder_member = settings
+                    .lone_voice_sets_reminders
+                    .then(|| roster.sole_member().map(str::to_string))
+                    .flatten();
                 let config = BatchExtractionConfig::from_settings(&settings).with_household(roster);
 
                 let db_activity = newest_session_activity(extraction_storage.as_ref()).await;
@@ -2836,11 +2841,12 @@ async fn run_server(
                 status.write().await.record(config.mode, &report);
 
                 // After the pass, not inside it, so a proposal failure never costs a stored date.
-                match todo_offers::offer_pending_reminders(
+                match todo_offers::offer_pending_reminders_for(
                     promotion_reminders.as_ref(),
                     promotion_proposals.as_ref(),
                     REMINDER_PROMOTION_LIMIT,
                     chrono::Utc::now(),
+                    lone_reminder_member.as_deref(),
                 )
                 .await
                 {
@@ -7769,6 +7775,9 @@ fn install_long_task_deps(
     );
     pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
         pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
+    ));
+    pond_mcp_server::todo_tools::init_heartbeat_docs(Arc::new(
+        SqlitePromptTemplateRepository::new(pool.clone()),
     ));
     pond_mcp_server::memory::init_memory_profiles(Arc::new(
         pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),

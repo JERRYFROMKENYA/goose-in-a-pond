@@ -13,6 +13,7 @@ use pond_core::shared::domain::when_said::due_from_words;
 use pond_core::shared::ports::todo::TodoRepository;
 use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
+use pond_core::user_data::ports::prompt_template::PromptTemplateRepository;
 use rmcp::{
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock, ErrorData, Meta},
@@ -36,6 +37,13 @@ static TODO_DEPS: OnceLock<Arc<dyn TodoRepository>> = OnceLock::new();
 /// Install the store once, at startup; later calls are ignored.
 pub fn init_todo_deps(repo: Arc<dyn TodoRepository>) {
     let _ = TODO_DEPS.set(repo);
+}
+
+static HEARTBEAT_DOCS: OnceLock<Arc<dyn PromptTemplateRepository>> = OnceLock::new();
+
+/// Where the heartbeat's checklist is kept, for `add_to_heartbeat`.
+pub fn init_heartbeat_docs(documents: Arc<dyn PromptTemplateRepository>) {
+    let _ = HEARTBEAT_DOCS.set(documents);
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
@@ -102,6 +110,19 @@ stretch\", \"add renew the logbook to my to-dos\". Any reminder goes here, not t
     }
 
     #[tool(description = "\
+Add something for Goose to check by itself each time it looks in on the house: \"keep \
+checking whether the dollar is under 130\", \"add this to your heartbeat\". `check` is the \
+question to ask each time. For one page use web_watch; for a time or place, add_reminder.")]
+    async fn add_to_heartbeat(
+        &self,
+        _ctx: RequestContext<RoleServer>,
+        params: Parameters<AddToHeartbeatParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::set_current_tool("add_to_heartbeat");
+        Ok(add_to_heartbeat(params.0).await)
+    }
+
+    #[tool(description = "\
 List the person's to-dos and reminders in My Goose, with what fires each one.")]
     async fn list_todos(
         &self,
@@ -127,6 +148,99 @@ garage\").")]
 
 fn said(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct AddToHeartbeatParams {
+    /// What to check each time, as one question.
+    #[serde(default)]
+    pub check: String,
+    #[serde(flatten)]
+    #[schemars(skip)]
+    pub extra: std::collections::HashMap<String, Value>,
+}
+
+async fn add_to_heartbeat(p: AddToHeartbeatParams) -> CallToolResult {
+    use pond_core::prompts::{
+        add_heartbeat_item, HeartbeatItemRefused, HEARTBEAT, PROMPT_HEARTBEAT,
+    };
+    let what = "adding that to the heartbeat";
+    let asked = match p.check.trim() {
+        "" => ["item", "text", "question", "task"]
+            .iter()
+            .find_map(|k| p.extra.get(*k).and_then(Value::as_str))
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
+        check => check.to_string(),
+    };
+    let refuse = |said: &str, why: &str| {
+        crate::format::with_receipt(
+            format_dead_end(what, why),
+            Receipt::not_set("standing", asked.clone(), said),
+        )
+    };
+    let Some(documents) = HEARTBEAT_DOCS.get().cloned() else {
+        return refuse(
+            "The heartbeat is not set up on this Pond yet.",
+            "The heartbeat's checklist is not available on this Pond.",
+        );
+    };
+    let existing = documents.get(HEARTBEAT).await.ok().flatten();
+    let checklist = existing
+        .as_ref()
+        .map(|t| t.content.clone())
+        .unwrap_or_else(|| PROMPT_HEARTBEAT.to_string());
+    let added = match add_heartbeat_item(&checklist, &asked) {
+        Ok(added) => added,
+        Err(HeartbeatItemRefused::Empty) => {
+            return refuse(
+                "I could not tell what to keep an eye on.",
+                "Send `check`: what Goose should ask itself each time, in one line.",
+            )
+        }
+        Err(HeartbeatItemRefused::AlreadyThere) => {
+            return crate::format::with_receipt(
+                "That is already on the heartbeat's checklist. Tell them it already is.",
+                Receipt::set("standing", asked, None),
+            )
+        }
+        Err(HeartbeatItemRefused::Full) => {
+            return refuse(
+                "The heartbeat's list is full. Remove something from it in My Goose first.",
+                "The checklist is at its longest. Tell them to remove an item in My Goose, \
+                 under Heartbeat, and ask again.",
+            )
+        }
+    };
+    let document = pond_core::user_data::domain::prompt_template::PromptTemplate {
+        name: HEARTBEAT.to_string(),
+        content: added,
+        description: existing
+            .as_ref()
+            .map(|t| t.description.clone())
+            .unwrap_or_default(),
+        is_system: existing.as_ref().is_some_and(|t| t.is_system),
+        is_customized: true,
+        factory_version: existing.as_ref().map(|t| t.factory_version).unwrap_or(0),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    if let Err(e) = documents.upsert(&document).await {
+        tracing::warn!(target: "giap::trace", kind = "heartbeat_item_failed", error = %e);
+        return refuse(
+            "The Pond could not save it. Ask again in a moment.",
+            "The Pond could not save it just now; try again shortly.",
+        );
+    }
+    tracing::info!(target: "giap::trace", kind = "heartbeat_item_added");
+    crate::format::with_receipt(
+        format!(
+            "Added to the heartbeat's checklist: \"{asked}\". Goose looks at it each time it \
+             checks in on the house by itself, about once an hour, and tells them when it \
+             needs them. Tell them in one short sentence."
+        ),
+        Receipt::set("standing", asked, None),
+    )
 }
 
 /// The household member speaking in this call: the turn's owner, else a one-member household's

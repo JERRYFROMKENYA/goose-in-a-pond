@@ -554,6 +554,14 @@ impl HouseholdRoster {
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
+
+    /// The only member's id, when the household has exactly one.
+    pub fn sole_member(&self) -> Option<&str> {
+        match self.members.as_slice() {
+            [(id, _)] => Some(id.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Who a window is about, or the refusal to guess.

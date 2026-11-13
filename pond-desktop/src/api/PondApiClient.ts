@@ -64,6 +64,10 @@ import {
   type ModelMemoryStatus,
   type OllamaModel,
   type PairingCodeBinding,
+  type OfferAnswer,
+  type PairingLock,
+  type PairingRequest,
+  type ReliabilityReport,
   type PairingCodeResponse,
   type PrefillReport,
   type PromptTemplate,
@@ -1630,9 +1634,11 @@ export class PondApiClient {
 
   // ── Sessions ──────────────────────────────────────────────
 
-  listSessions(): Promise<SessionSummary[]> {
+  /** `surfaces` narrows to where conversations started; `unknown` matches rows with none. */
+  listSessions(surfaces?: readonly string[]): Promise<SessionSummary[]> {
+    const qs = surfaces && surfaces.length > 0 ? `?surface=${encodeURIComponent(surfaces.join(","))}` : "";
     return this.get<{ sessions: SessionSummary[] } | SessionSummary[]>(
-      "/api/v1/sessions",
+      `/api/v1/sessions${qs}`,
     ).then((r) =>
       Array.isArray(r)
         ? r
@@ -1671,10 +1677,35 @@ export class PondApiClient {
               thinking: m.thinking as SessionMessage["thinking"],
               transient: m.transient === true ? true : undefined,
               liked: m.liked as boolean | null | undefined,
+              note: m.note as SessionMessage["note"],
             }) satisfies Record<keyof SessionMessage, unknown>,
         );
       },
     );
+  }
+
+  /** 409 means the offer was already answered: reload the conversation. */
+  answerOffer(sessionId: string, messageId: string, take: boolean): Promise<OfferAnswer> {
+    return this.post(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/offer`,
+      { take },
+    );
+  }
+
+  // ── Pairing lock ──────────────────────────────────────────
+
+  /** The writes and the request list answer 403 to a caller that is not a member's paired device. */
+  getPairingLock(): Promise<PairingLock> { return this.get("/api/v1/pairing/lock"); }
+  setPairingLock(locked: boolean): Promise<PairingLock> { return this.put("/api/v1/pairing/lock", { locked }); }
+  setRecoveryPin(pin: string): Promise<void> { return this.put("/api/v1/pairing/recovery-pin", { pin }); }
+  clearRecoveryPin(): Promise<void> { return this.del("/api/v1/pairing/recovery-pin"); }
+  listPairingRequests(): Promise<{ requests: PairingRequest[] }> { return this.get("/api/v1/pairing/requests"); }
+  approvePairingRequest(id: string): Promise<void> { return this.post(`/api/v1/pairing/requests/${encodeURIComponent(id)}/approve`); }
+  declinePairingRequest(id: string): Promise<void> { return this.post(`/api/v1/pairing/requests/${encodeURIComponent(id)}/decline`); }
+
+  /** Needs My Pond unlocked on a member's device: a locked or non-member caller gets 403. */
+  getReliability(days: number): Promise<ReliabilityReport> {
+    return this.get(`/api/v1/admin/reliability?days=${encodeURIComponent(String(days))}`);
   }
 
   renameSession(sessionId: string, title: string): Promise<void> {

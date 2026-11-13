@@ -6263,3 +6263,60 @@
 .sched-or-recipe__tools caption { text-align: left; font-weight: 600; padding-bottom: 6px; }
 .sched-or-recipe__tools th, .sched-or-recipe__tools td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--color-border); }
 .sched-or-recipe__tools th[scope="row"] { font-weight: 400; }
+
+/* Notes under a message. Both chat UIs use them. --color-text-secondary is 5.45:1 or better on either
+   ground; a chip that was not set is an icon, words and the heavier line, never a hue. */
+.msg-note__from {
+  margin: 0 0 4px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-text-secondary);
+}
+.msg-note__chips {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.msg-note__chip {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid var(--color-border-strong, var(--color-border));
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.msg-note__chip > svg { flex: 0 0 auto; margin-top: 2px; }
+.msg-note__chip > span { overflow-wrap: anywhere; }
+.msg-note__chip--problem { border: 2px solid var(--color-text); font-weight: 600; }
+.msg-note__reason { display: block; font-weight: 400; color: var(--color-text-secondary); }
+.msg-note__offer { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.msg-note__noticed { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--color-text-secondary); }
+.msg-note__offerActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.msg-note__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border-strong, var(--color-border));
+  border-radius: 9px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: 700 13px var(--font-body, Quicksand, sans-serif);
+  cursor: pointer;
+}
+.msg-note__btn--primary { background: var(--color-accent); border-color: var(--color-accent); color: #fff; }
+.msg-note__btn:disabled { cursor: not-allowed; opacity: 0.6; }
+.msg-note__closed { font-size: 11.5px; font-weight: 700; color: var(--color-text-secondary); }
+.msg-note__spin { animation: msg-note-spin 0.9s linear infinite; }
+@keyframes msg-note-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .msg-note__spin { animation: none; } }

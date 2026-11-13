@@ -199,6 +199,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
         .route("/notifications/pending", get(notifications_pending))
         .route("/notifications/{id}/ack", post(acknowledge_notification))
+        .route("/notifications/{id}/opened", post(notification_opened))
         // The household's notice history, scoped to the caller's device and with its read state.
         .route("/notifications/history", get(notifications_history))
         .route(
@@ -12613,6 +12614,10 @@ async fn notifications_pending(
                 count = pending.len(),
                 "notifications: pending served"
             );
+            let ids: Vec<String> = pending.iter().map(|n| n.id.clone()).collect();
+            if let Err(e) = queue.note_fetched(&ids).await {
+                tracing::warn!(kind = "notification_fetch_stamp_failed", error = %e, "notifications: could not record a fetch");
+            }
             (StatusCode::OK, Json(json!({ "notifications": pending })))
         }
         Err(e) => {
@@ -12625,24 +12630,42 @@ async fn notifications_pending(
     }
 }
 
+/// What a phone may say with an acknowledgement. An older app sends no body.
+#[derive(Debug, Default, Deserialize)]
+struct AckBody {
+    /// Whether the phone put the notice in front of the person.
+    #[serde(default)]
+    shown: Option<bool>,
+}
+
 /// `POST /api/v1/notifications/{id}/ack` — mark one of the calling device's notifications
 /// delivered. `{"id": id, "acknowledged": true}`, also when it already was; `404` when no such
-/// notification is the caller's, whether or not another device has one by that id.
+/// notification is the caller's, whether or not another device has one by that id. An optional
+/// body `{"shown": true}` records that the phone showed it.
 async fn acknowledge_notification(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
     let (device_id, queue) =
         match caller_queue(&state, principal.as_ref(), "acknowledge_notification") {
             Ok(found) => found,
             Err(refusal) => return refusal,
         };
+    let said: AckBody = serde_json::from_slice(&body).unwrap_or_default();
     match queue.acknowledge(&id, &device_id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(json!({"id": id, "acknowledged": true})),
-        ),
+        Ok(true) => {
+            if said.shown == Some(true) {
+                if let Err(e) = queue.note_shown(&id, &device_id).await {
+                    tracing::warn!(kind = "notification_shown_stamp_failed", error = %e, "notifications: could not record a showing");
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"id": id, "acknowledged": true})),
+            )
+        }
         Ok(false) => {
             tracing::info!(
                 kind = "notification_ack_refused",
@@ -12705,6 +12728,33 @@ fn caller_history(
 #[derive(serde::Deserialize)]
 struct NotificationHistoryParams {
     limit: Option<usize>,
+}
+
+/// `POST /api/v1/notifications/{id}/opened` — record that the person opened one of the calling
+/// device's notifications. `{"id": id, "opened": true}`; `404` as for an acknowledgement.
+async fn notification_opened(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, queue) = match caller_queue(&state, principal.as_ref(), "notification_opened") {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match queue.note_opened(&id, &device_id).await {
+        Ok(true) => (StatusCode::OK, Json(json!({"id": id, "opened": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such notification for this device"})),
+        ),
+        Err(e) => {
+            tracing::warn!(kind = "notification_opened_failed", error = %e, "notifications: could not record an opening");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not record that the notification was opened"})),
+            )
+        }
+    }
 }
 
 /// How many notices `GET /notifications/history` returns when the caller does not say.

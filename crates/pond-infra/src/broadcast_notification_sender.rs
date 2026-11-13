@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use pond_core::mcp::domain::notice_delivery::Wake;
 use pond_core::mcp::domain::notification_history::HistoryAudience;
 use pond_core::mcp::ports::notification::{
     per_device_notification_id, MemberDelivery, MemberNotifier, Notification, NotificationSender,
@@ -286,14 +287,27 @@ impl BroadcastNotificationSender {
             self.queue.enqueue(notification.clone()).await?;
             // Background push is best-effort — never fail the send on it.
             if let Some(relay) = &self.relay {
-                if let Err(e) = relay.relay(&notification).await {
-                    tracing::warn!(
+                match relay.relay(&notification).await {
+                    Ok(Wake::Sent) => {
+                        if let Err(e) = self.queue.note_wake(&notification.id).await {
+                            tracing::warn!(error = %e, "could not record a notice's wake");
+                        }
+                    }
+                    Ok(Wake::NotSent(gap)) => tracing::debug!(
+                        target: "giap::trace",
+                        kind = "push_wake_not_sent",
+                        notification_id = %notification.id,
+                        device = %notification.target,
+                        why = gap.as_str(),
+                        "no push wake was sent for a queued notice"
+                    ),
+                    Err(e) => tracing::warn!(
                         kind = "push_relay_failed",
                         notification_id = %notification.id,
                         device = %notification.target,
                         error = %e,
                         "notification relay failed"
-                    );
+                    ),
                 }
             }
         }
@@ -517,12 +531,12 @@ mod tests {
     }
     #[async_trait]
     impl NotificationRelay for CountingRelay {
-        async fn relay(&self, notification: &Notification) -> Result<()> {
+        async fn relay(&self, notification: &Notification) -> Result<Wake> {
             self.relayed
                 .lock()
                 .unwrap()
                 .push(notification.target.clone());
-            Ok(())
+            Ok(Wake::Sent)
         }
     }
 

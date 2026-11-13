@@ -203,6 +203,16 @@ enum Commands {
     /// Show system status
     Status,
 
+    /// How dependably notices arrived and messages were answered
+    Reliability {
+        /// Days to look back over
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run interactive onboarding wizard
     Onboard {
         /// Reset and restart onboarding from scratch
@@ -681,6 +691,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             .await
         }
         Some(Commands::Status) => run_status().await,
+        Some(Commands::Reliability { days, json }) => run_reliability(days, json).await,
         Some(Commands::Onboard { reset }) => {
             if let Err(err) = run_onboard(reset).await {
                 eprintln!("Error: {:?}", err);
@@ -8898,6 +8909,36 @@ async fn tail_event_log(pool: sqlx::Pool<sqlx::Sqlite>) {
             cursor = id;
         }
     }
+}
+
+/// Prints the reliability report. Reads both databases read-only, so it is safe beside a
+/// serving pond and never migrates anything.
+async fn run_reliability(days: u32, json: bool) -> Result<()> {
+    let data_dir = default_data_dir();
+    let system = pond_infra::reliability::open_read_only(&data_dir.join("pond_system.db")).await?;
+    let logs = pond_infra::reliability::open_read_only(&data_dir.join("pond_logs.db")).await?;
+    let unseen_days = SqliteSettingsRepository::new(system.clone())
+        .get()
+        .await
+        .map(|s| s.unseen_phone_skip_days)
+        .unwrap_or(14);
+    let report = pond_infra::reliability::report(
+        &system,
+        &logs,
+        &data_dir,
+        days.max(1),
+        unseen_days,
+        chrono::Utc::now(),
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in report.lines() {
+            println!("  {line}");
+        }
+    }
+    Ok(())
 }
 
 async fn run_status() -> Result<()> {

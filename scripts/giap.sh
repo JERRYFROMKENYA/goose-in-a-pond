@@ -31,6 +31,7 @@
 #   bash scripts/giap.sh data-encrypt [finish|unlock|undo|status]  # Linux: the pond's private data in a LUKS2 volume opened by the TPM, the admin card its recovery key (sudo)
 #   bash scripts/giap.sh admin-card [show|rotate]  # My Pond's admin card: make it and seal a recovery copy (sudo), print it again, or replace it
 #   bash scripts/giap.sh test-pond [on|off|status]  # mark this pond as a Jarida test Pond, whose debug switch shows household content in the logs, or a home Pond again
+#   bash scripts/giap.sh reliability [DAYS]      # how dependably notices arrived and messages were answered, over the last DAYS (7)
 #   bash scripts/giap.sh service-account [undo|status]  # Linux: run the pond as its own locked account, agamemnon (sudo); undo moves it back
 #   bash scripts/giap.sh provision --host HOST --key FILE  # save a Pond's setup card, give it a device certificate (operator; must come first)
 #   bash scripts/giap.sh check [AREA…] [--all|--e2e|--full|--base REF|--dry-run]  # the checks CI runs, for what this branch changes (must come first)
@@ -2404,6 +2405,24 @@ action_test_pond() { # $1 = "" | on | off | status
   fi
 }
 
+# `giap.sh reliability [DAYS]`: the pond's own record of whether notices arrived and messages
+# were answered. Read-only, so it is safe while the pond serves.
+action_reliability() { # $1 = "" | DAYS
+  head1 "Reliability"
+  local days="${1:-7}" user bin
+  case "$days" in ''|*[!0-9]*) bad "reliability takes a number of days, not: $days"; return 2 ;; esac
+  user="$(connect_pond_user)" || { bad "could not tell which user runs the pond"; return 1; }
+  bin="$(setup_code_bin "$REPO_ROOT")"
+  if [ -z "$bin" ] || [ ! -x "$bin" ]; then
+    bad "no pond-server binary yet; build it first (bash scripts/giap.sh build)"; return 1
+  fi
+  if [ "$user" = "$(id -un)" ]; then
+    POND_DATA_DIR="$D_DATA_DIR" "$bin" reliability --days "$days"
+  else
+    sudo -u "$user" env POND_DATA_DIR="$D_DATA_DIR" "$bin" reliability --days "$days"
+  fi
+}
+
 # `giap.sh service-account [undo|status]`: the pond's own locked account, agamemnon
 # (docs/architecture/pond-administrator.md). A new install offers it; an existing pond moves here.
 action_service_account() { # $1 = "" | undo | status
@@ -2597,7 +2616,8 @@ usage() {
 # ── entry ────────────────────────────────────────────────────────────────────
 # The first word is the command; only `litert` (a subcommand and a platform), `models`,
 # `onnxruntime`, `wifi-grant`, `time-sync`, `data-encrypt`, `admin-card`, `test-pond`,
-# `service-account` (a subcommand) and `console` (a host) take more.
+# `service-account` (a subcommand), `reliability` (a number of days) and `console` (a host) take
+# more.
 CMD=""; CMD_SUB=""; CMD_ARG=""; CONSOLE_ONCE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2622,7 +2642,7 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in
   litert|kv|swap) ;;
-  ctx|context|n_ctx|models|wifi-grant|time-sync|data-encrypt|onnxruntime|console|admin-card|test-pond|service-account) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
+  ctx|context|n_ctx|models|wifi-grant|time-sync|data-encrypt|onnxruntime|console|admin-card|test-pond|service-account|reliability) if [ -n "$CMD_ARG" ]; then bad "unexpected argument: $CMD_ARG"; usage; exit 2; fi ;;
   *)      if [ -n "$CMD_SUB" ]; then bad "'$CMD' takes no arguments (got: $CMD_SUB)"; exit 2; fi ;;
 esac
 
@@ -2660,6 +2680,7 @@ case "$CMD" in
   data-encrypt) action_data_encrypt "$CMD_SUB" ;;
   admin-card) action_admin_card "$CMD_SUB" ;;
   test-pond) action_test_pond "$CMD_SUB" ;;
+  reliability) action_reliability "$CMD_SUB" ;;
   service-account) action_service_account "$CMD_SUB" ;;
   swap)      action_swap "$CMD_SUB" "$CMD_ARG" ;;
   *)         bad "unknown command: $CMD"; usage; exit 1 ;;

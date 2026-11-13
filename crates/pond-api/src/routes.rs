@@ -634,6 +634,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/admin/enroll", post(crate::pond_admin::enroll))
         .route("/admin/key", delete(crate::pond_admin::forget_key))
         .route("/admin/overview", get(crate::pond_admin::overview))
+        .route("/admin/reliability", get(crate::pond_admin::reliability))
         .route(
             "/admin/files",
             get(crate::pond_admin::list_files).delete(crate::pond_admin::delete_file),

@@ -15,6 +15,7 @@ pub mod onboarding;
 pub mod pairing_cpace;
 pub mod pruning;
 pub(crate) mod push_token_log;
+pub mod reliability;
 pub mod rule_redactor;
 pub mod secret_crypto;
 pub mod secret_migration;

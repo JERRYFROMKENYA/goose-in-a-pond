@@ -439,6 +439,53 @@ pub async fn overview(
 }
 
 #[derive(Deserialize)]
+pub struct ReliabilityQuery {
+    days: Option<u32>,
+}
+
+/// `GET /api/v1/admin/reliability?days=`: whether notices arrived and messages were answered.
+pub async fn reliability(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Query(query): Query<ReliabilityQuery>,
+) -> Response {
+    let _ = unlocked_or_refuse!(state, principal);
+    let Some(data_dir) = state.data_dir.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "this Pond has no data directory to report on"})),
+        )
+            .into_response();
+    };
+    let unseen_days = state
+        .settings_repo
+        .get()
+        .await
+        .map(|s| s.unseen_phone_skip_days)
+        .unwrap_or(14);
+    match pond_infra::reliability::report(
+        &state.db.system,
+        &state.db.logs,
+        &data_dir,
+        query.days.unwrap_or(7).clamp(1, 90),
+        unseen_days,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "the reliability report could not be read");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "the reliability report could not be read"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
 pub struct FilesQuery {
     #[serde(default)]
     path: String,

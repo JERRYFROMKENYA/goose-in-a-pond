@@ -5206,6 +5206,7 @@ async fn run_server(
             std::future::pending::<std::convert::Infallible>().await
         }
     };
+    pond_api::pairing_lock::spawn_request_watch(state.clone());
     // A turn a stop cut off is answered again once the pond is up and its listeners serve.
     {
         let state = state.clone();

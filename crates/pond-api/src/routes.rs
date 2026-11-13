@@ -1386,15 +1386,9 @@ async fn handshake_pake_verify(
             return Err(handshake_error("pake_verify", e));
         }
     };
-    // Held by the pairing lock: not a failed attempt, and nobody was paired yet.
-    if let Some(pending) = &resp.pairing_request {
-        crate::pairing_lock::announce_request(
-            &state,
-            device_name.as_deref().unwrap_or("A phone"),
-            pending,
-        )
-        .await;
-    } else {
+    // Held by the pairing lock: not a failed attempt, and nobody was paired yet. The household
+    // hears of the request from `pairing_lock::spawn_request_watch`.
+    if resp.pairing_request.is_none() {
         emit_pairing_outcome(
             &state,
             resp.accepted,

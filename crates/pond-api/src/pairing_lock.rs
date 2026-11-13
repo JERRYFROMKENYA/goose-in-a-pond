@@ -11,11 +11,11 @@ use axum::response::{IntoResponse, Response};
 use axum::{Extension, Json};
 use pond_core::mcp::ports::notification::{Notification, OpenScreen};
 use pond_core::security::domain::pairing_lock::{
-    pin_is_acceptable, PairingClaim, PendingPairing, PinCheck, MIN_PIN_DIGITS,
+    pin_is_acceptable, PairingClaim, PinCheck, MIN_PIN_DIGITS,
 };
 use pond_core::security::ports::policy::Principal;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::AppState;
 
@@ -31,17 +31,35 @@ fn failed(what: &'static str, error: anyhow::Error) -> Response {
     )
 }
 
+/// Tells the household of each phone that starts waiting, however it asked: over the home
+/// network or over Bluetooth, which has no route to announce from.
+pub fn spawn_request_watch(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let mut told: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(3));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let Ok(waiting) = state.handshake.pairing_requests().await else {
+                continue;
+            };
+            for request in &waiting {
+                if told.insert(request.id.clone()) {
+                    announce_request(&state, &request.device_name, &request.id).await;
+                }
+            }
+            told.retain(|id| waiting.iter().any(|request| &request.id == id));
+        }
+    });
+}
+
 /// The household's notice that a phone is waiting. An alert: it must not wait for quiet hours
 /// to end, since the request is gone in ten minutes.
-pub(crate) async fn announce_request(
-    state: &AppState,
-    device_name: &str,
-    pending: &PendingPairing,
-) {
+async fn announce_request(state: &AppState, device_name: &str, request_id: &str) {
     tracing::info!(
         target: "giap::trace",
         kind = "pairing_request_opened",
-        request = %pending.request_id,
+        request = %request_id,
         "a phone asked to be paired"
     );
     let Some(sender) = state.notification_sender.clone() else {
@@ -49,9 +67,9 @@ pub(crate) async fn announce_request(
     };
     let mut data = serde_json::Map::new();
     data.insert("action".into(), json!("pairing_request"));
-    data.insert("request_id".into(), json!(pending.request_id));
+    data.insert("request_id".into(), json!(request_id));
     let notice = Notification {
-        id: format!("pairing-request-{}", pending.request_id),
+        id: format!("pairing-request-{request_id}"),
         target: "broadcast".to_string(),
         category: "alert".to_string(),
         title: "A phone asks to pair".to_string(),
@@ -392,13 +410,4 @@ pub async fn decline(
     Path(id): Path<String>,
 ) -> Response {
     decide(state, principal, id, false, None).await
-}
-
-/// What a route does with a held pairing: the body the phone reads.
-pub(crate) fn held_body(pending: &PendingPairing) -> Value {
-    json!({
-        "request_id": pending.request_id,
-        "claim_secret": pending.claim_secret,
-        "expires_at": pending.expires_at,
-    })
 }

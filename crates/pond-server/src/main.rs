@@ -5456,7 +5456,7 @@ fn push_relay(
             reason = "no_key",
             expected_path = %fcm_key_path.display(),
             "no FCM service-account key; asleep Android phones are not woken for notices \
-             (docs/api.md, \"Setting up push\")"
+             (docs/architecture/notifications.md, \"Setting up push\")"
         );
     } else {
         match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
@@ -5491,7 +5491,7 @@ fn push_relay(
             reason = "no_apple_key",
             expected_path = %apns_key_path.display(),
             "no Apple push key; asleep iPhones are not woken for notices \
-             (docs/api.md, \"Setting up push\")"
+             (docs/architecture/notifications.md, \"Setting up push\")"
         );
     } else {
         match pond_infra::apns_push_relay::ApnsPushRelay::from_key_file(

@@ -310,10 +310,10 @@ mod tests {
 
     /// A pond whose pairing lock holds or not, as the test sets it.
     #[derive(Default)]
-    struct Lock(std::sync::atomic::AtomicBool);
+    struct LockOnlyHandshake(std::sync::atomic::AtomicBool);
 
     #[async_trait::async_trait]
-    impl Handshake for Lock {
+    impl Handshake for LockOnlyHandshake {
         async fn handshake(
             &self,
             _: pond_core::security::ports::handshake::HandshakeRequest,
@@ -346,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn a_set_up_pond_stays_findable_while_its_pairing_lock_holds() {
         let mut rig = rig();
-        let lock = Arc::new(Lock::default());
+        let lock = Arc::new(LockOnlyHandshake::default());
         rig.controller = rig.controller.with_pairing_lock(lock.clone());
         rig.network.0.store(true, Ordering::SeqCst);
         rig.store.set_claimed_at(Some(chrono::Utc::now()));

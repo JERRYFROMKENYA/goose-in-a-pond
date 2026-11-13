@@ -479,7 +479,10 @@ mod tests {
         let report = sender
             .send_to_profile("liz", notif("prop-1", "unused"))
             .await;
-        assert_eq!(report.queued, vec!["phone-liz", "watch-liz"]);
+        // Newest device first, and the two may be registered in the same second.
+        let mut queued = report.queued.clone();
+        queued.sort();
+        assert_eq!(queued, vec!["phone-liz", "watch-liz"]);
 
         // Both devices were offline, so both rows are still waiting.
         assert_eq!(

@@ -559,14 +559,29 @@ pub(crate) async fn add(meta: &Meta, p: AddTodoParams) -> Added {
         Ok(todo) => todo,
         Err(HookError(why)) => return refuse("I could not make a reminder out of that.", &why),
     };
-    if let Err(e) = repo.create(&todo).await {
-        tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
-        return refuse(
-            "The Pond could not save it. Ask again in a moment.",
-            "The Pond could not save it just now; try again shortly.",
-        );
-    }
-    tracing::info!(target: "giap::trace", kind = "todo_added", hooks = todo.hooks.len());
+    // A turn re-run after a stop, or a second call, must not leave two of the same.
+    let already = repo
+        .list(&owner, StateFilter::Open)
+        .await
+        .ok()
+        .and_then(|open| open.into_iter().find(|kept| kept.is_repeated_by(&todo)));
+    let todo = match already {
+        Some(kept) => {
+            tracing::info!(target: "giap::trace", kind = "todo_already_added");
+            kept
+        }
+        None => {
+            if let Err(e) = repo.create(&todo).await {
+                tracing::warn!(target: "giap::trace", kind = "todo_tool_failed", error = %e);
+                return refuse(
+                    "The Pond could not save it. Ask again in a moment.",
+                    "The Pond could not save it just now; try again shortly.",
+                );
+            }
+            tracing::info!(target: "giap::trace", kind = "todo_added", hooks = todo.hooks.len());
+            todo
+        }
+    };
     let fires: Vec<&str> = todo.hooks.iter().map(|h| h.label.as_str()).collect();
     let when = if fires.is_empty() {
         "It has no time or place, so it waits on their list.".to_string()

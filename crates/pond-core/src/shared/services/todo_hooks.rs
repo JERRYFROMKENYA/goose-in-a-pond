@@ -10,6 +10,7 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use serde_json::json;
 
+use crate::mcp::domain::notice_delivery::{marked, QUIET_PASS_KEY, SPEAK_IF_UNFETCHED_KEY};
 use crate::mcp::ports::notification::{MemberDelivery, MemberNotifier, Notification, OpenScreen};
 use crate::shared::domain::todo::{
     question_for, rfc3339, EventKey, PushKind, Todo, MAX_ASKS, STALE_EVENT_MINUTES,
@@ -194,7 +195,13 @@ pub fn notice_for(
                 .or(why)
                 .map(|b| clip(b, BODY_CHARS))
                 .unwrap_or_default(),
-            open.data(),
+            // A reminder comes due when the person set it to, so quiet hours do not hold it, and
+            // it is said in the room if no phone picks it up.
+            marked(
+                marked(Some(open.data()), QUIET_PASS_KEY),
+                SPEAK_IF_UNFETCHED_KEY,
+            )
+            .unwrap_or_else(|| open.data()),
         ),
         PushKind::CheckIn => {
             let last = todo.asked + 1 >= MAX_ASKS;

@@ -184,6 +184,11 @@ export interface Settings {
   // Scheduling tuning
   schedule_result_notify?: boolean;
   system_notices_enabled?: boolean;
+  lone_voice_sets_reminders?: boolean;
+  unseen_phone_remove_days?: number;
+  unseen_phone_skip_days?: number;
+  speak_unfetched_reminders?: boolean;
+  notices_wait_in_quiet_hours?: boolean;
   schedule_max_concurrent?: number;
   schedule_max_runs_per_task?: number;
 

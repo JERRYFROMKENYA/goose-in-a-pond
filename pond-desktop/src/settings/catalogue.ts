@@ -490,6 +490,11 @@ export const CATALOGUE: CatalogueCategory[] = [
           { key: "schedule_max_runs_per_task", label: "History per task", description: "How much history to keep for each scheduled job.", control: { kind: "number", min: 0, max: 10000 }, consumer: "live", validate: all(integer, range(0, 10000)) },
           { key: "schedule_result_notify", label: "Tell me when a task finishes", description: "Tell your phones when a scheduled job or rule finishes.", control: { kind: "toggle" }, consumer: "live" },
           { key: "system_notices_enabled", label: "Tell me when something needs attention", description: "Tell your phones about downloads, parts that did not start, a full disk and remote access. A removed device is always told.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "lone_voice_sets_reminders", label: "A voice the Pond does not know may set reminders", description: "In a household of one, a voice the Pond cannot identify may set reminders and to-dos as that member. Nothing else is opened to it.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "unseen_phone_remove_days", label: "Remove a phone not seen for", description: "A paired phone that has not connected for this many days is removed and listed in what Goose did. 0 never removes.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
+          { key: "unseen_phone_skip_days", label: "Stop notifying a phone not seen for", description: "A paired phone that has not connected for this many days stops getting notices until it connects again. 0 never stops.", control: { kind: "number", min: 0, max: 365, unit: "days" }, consumer: "live", validate: all(integer, range(0, 365)) },
+          { key: "speak_unfetched_reminders", label: "Say a reminder no phone picked up", description: "When no phone fetches a reminder within five minutes, the Pond says it once in the room, outside quiet hours.", control: { kind: "toggle" }, consumer: "live" },
+          { key: "notices_wait_in_quiet_hours", label: "Hold notices in quiet hours", description: "In quiet hours, alerts and reminders set for that time still arrive; everything else waits for one notice when quiet hours end.", control: { kind: "toggle" }, consumer: "live" },
         ],
       },
       {

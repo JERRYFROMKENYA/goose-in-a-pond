@@ -29,6 +29,17 @@ pub trait NotificationQueueRepository: Send + Sync {
     /// belongs to it, which a caller must not distinguish from "no such row" to its client.
     async fn acknowledge(&self, id: &str, device_id: &str) -> Result<bool>;
 
+    /// Persist a targeted notification as held: undelivered, and unseen by its phone, until
+    /// [`take_held`](Self::take_held) hands it back. A queue that cannot hold just queues it.
+    async fn enqueue_held(&self, notification: Notification) -> Result<()> {
+        self.enqueue(notification).await
+    }
+
+    /// Remove and return every held notification, oldest first.
+    async fn take_held(&self) -> Result<Vec<Notification>> {
+        Ok(Vec::new())
+    }
+
     /// Record that a push wake was sent for this copy.
     async fn note_wake(&self, _id: &str) -> Result<()> {
         Ok(())

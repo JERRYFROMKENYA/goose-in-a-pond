@@ -75,11 +75,36 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
         Ok(())
     }
 
+    async fn enqueue_held(&self, notification: Notification) -> Result<()> {
+        let id = notification.id.clone();
+        self.enqueue(notification).await?;
+        sqlx::query("UPDATE notifications SET held = 1 WHERE id = ?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn take_held(&self) -> Result<Vec<Notification>> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT id, device_id, category, title, body, timestamp, data \
+             FROM notifications WHERE held = 1 ORDER BY created_at ASC, rowid ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM notifications WHERE held = 1")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(rows.iter().map(row_to_notification).collect())
+    }
+
     async fn list_undelivered(&self, device_id: &str) -> Result<Vec<Notification>> {
         let rows = sqlx::query(
             "SELECT id, device_id, category, title, body, timestamp, data \
              FROM notifications \
-             WHERE device_id = ? AND delivered_at IS NULL \
+             WHERE device_id = ? AND delivered_at IS NULL AND held = 0 \
              ORDER BY created_at ASC, rowid ASC",
         )
         .bind(device_id)
@@ -182,7 +207,8 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
             "SELECT id, device_id, category, title, body, timestamp, data, \
                     created_at, wakes, woken_at, spoken_at \
              FROM notifications \
-             WHERE fetched_at IS NULL AND delivered_at IS NULL AND created_at >= ? \
+             WHERE fetched_at IS NULL AND delivered_at IS NULL AND held = 0 \
+                   AND created_at >= ? \
              ORDER BY created_at ASC, rowid ASC",
         )
         .bind(since.format(SQLITE_STAMP).to_string())
@@ -217,7 +243,7 @@ impl NotificationQueueRepository for SqliteNotificationQueue {
                     COALESCE(SUM(n.opened_at IS NOT NULL), 0) AS opened, \
                     COALESCE(SUM(n.spoken_at IS NOT NULL), 0) AS spoken \
              FROM notifications n JOIN devices d ON d.id = n.device_id \
-             WHERE n.created_at >= ? AND d.is_test = 0"
+             WHERE n.created_at >= ? AND d.is_test = 0 AND n.held = 0"
         );
         let row = sqlx::query(&sql)
             .bind(since.format(SQLITE_STAMP).to_string())
@@ -287,6 +313,31 @@ mod tests {
 
         // Idempotent / empty input is a no-op.
         q.mark_delivered(&[]).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_held_notice_is_unseen_until_it_is_taken() {
+        let q = fresh().await;
+        let long_ago = Utc::now() - chrono::Duration::days(1);
+        q.enqueue_held(notif("h1", "dev-1")).await.unwrap();
+        q.enqueue(notif("n1", "dev-1")).await.unwrap();
+
+        let seen = q.list_undelivered("dev-1").await.unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].id, "n1");
+        assert_eq!(
+            q.list_unfetched(long_ago).await.unwrap().len(),
+            1,
+            "no wake for a held one"
+        );
+        assert_eq!(q.delivery_totals(long_ago).await.unwrap().queued, 1);
+        assert!(q.is_queued_for("h1", "dev-1").await.unwrap());
+
+        let taken = q.take_held().await.unwrap();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].id, "h1");
+        assert!(q.take_held().await.unwrap().is_empty(), "taken once");
+        assert!(!q.is_queued_for("h1", "dev-1").await.unwrap());
     }
 
     #[tokio::test]

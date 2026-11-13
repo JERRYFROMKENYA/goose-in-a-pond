@@ -10,6 +10,56 @@ use crate::mcp::ports::notification::Notification;
 /// fetches it, such as a reminder that has come due.
 pub const SPEAK_IF_UNFETCHED_KEY: &str = "speak_if_unfetched";
 
+/// The `data` key a producer sets on a notice that must not wait for quiet hours to end: a
+/// reminder set for that time, or an answer to something the person just asked for.
+pub const QUIET_PASS_KEY: &str = "quiet_pass";
+
+/// Whether a notice goes out in quiet hours: an alert, or one its producer marked.
+pub fn passes_quiet_hours(notification: &Notification) -> bool {
+    notification.category == "alert" || flag(notification, QUIET_PASS_KEY)
+}
+
+fn flag(notification: &Notification, key: &str) -> bool {
+    notification
+        .data
+        .as_ref()
+        .and_then(|d| d.get(key))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// `data` with `key` set, for a producer marking a notice. A payload that is not an object is
+/// replaced: there is nowhere in it to put a key.
+pub fn marked(data: Option<serde_json::Value>, key: &str) -> Option<serde_json::Value> {
+    let mut fields = match data {
+        Some(serde_json::Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    fields.insert(key.to_string(), serde_json::Value::Bool(true));
+    Some(serde_json::Value::Object(fields))
+}
+
+/// The one notice a phone gets for what was held in quiet hours.
+pub fn morning_notice(device_id: &str, held: &[Notification], at: DateTime<Utc>) -> Notification {
+    const NAMED: usize = 6;
+    let mut lines: Vec<String> = held.iter().take(NAMED).map(|n| n.title.clone()).collect();
+    if held.len() > NAMED {
+        lines.push(format!("and {} more", held.len() - NAMED));
+    }
+    Notification {
+        id: format!("quiet-{}:{device_id}", at.format("%Y%m%d%H%M")),
+        target: device_id.to_string(),
+        category: "info".to_string(),
+        title: match held.len() {
+            1 => "1 notice from quiet hours".to_string(),
+            n => format!("{n} notices from quiet hours"),
+        },
+        body: lines.join("\n"),
+        timestamp: at.to_rfc3339(),
+        data: held.last().and_then(|n| n.data.clone()),
+    }
+}
+
 /// How asking a phone's push service to wake it went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wake {
@@ -50,12 +100,7 @@ pub struct UnfetchedNotice {
 
 impl UnfetchedNotice {
     pub fn wants_speaking(&self) -> bool {
-        self.notification
-            .data
-            .as_ref()
-            .and_then(|d| d.get(SPEAK_IF_UNFETCHED_KEY))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        flag(&self.notification, SPEAK_IF_UNFETCHED_KEY)
     }
 }
 
@@ -72,6 +117,8 @@ pub struct RewakePolicy {
     pub gives_up_after: Duration,
     /// How long a copy that asks to be spoken sits unfetched before it is said in the room.
     pub speaks_after: Duration,
+    /// A copy older than this is no longer worth saying: the moment has passed.
+    pub speaks_until: Duration,
 }
 
 impl Default for RewakePolicy {
@@ -82,6 +129,7 @@ impl Default for RewakePolicy {
             most_wakes: 6,
             gives_up_after: Duration::hours(24),
             speaks_after: Duration::minutes(5),
+            speaks_until: Duration::minutes(30),
         }
     }
 }
@@ -108,7 +156,7 @@ impl RewakePolicy {
         notice.wants_speaking()
             && !notice.spoken
             && now - notice.queued_at >= self.speaks_after
-            && now - notice.queued_at <= self.gives_up_after
+            && now - notice.queued_at <= self.speaks_until
     }
 }
 
@@ -217,6 +265,11 @@ mod tests {
         );
         assert!(policy.speaking_is_due(&notice(5, 1, Some(5)), now()));
 
+        assert!(
+            !policy.speaking_is_due(&notice(31, 1, Some(9)), now()),
+            "the moment has passed"
+        );
+
         let mut said = notice(9, 1, Some(9));
         said.spoken = true;
         assert!(!policy.speaking_is_due(&said, now()));
@@ -224,6 +277,49 @@ mod tests {
         let mut quiet = notice(9, 1, Some(9));
         quiet.notification.data = Some(json!({"open": "devices"}));
         assert!(!policy.speaking_is_due(&quiet, now()));
+    }
+
+    #[test]
+    fn only_alerts_and_marked_notices_pass_quiet_hours() {
+        let mut n = notice(0, 0, None).notification;
+        n.data = None;
+        assert!(!passes_quiet_hours(&n), "a plain notice waits");
+        n.data = marked(Some(json!({"open": "todos"})), QUIET_PASS_KEY);
+        assert!(passes_quiet_hours(&n));
+        assert_eq!(
+            n.data.as_ref().unwrap()["open"],
+            "todos",
+            "marking keeps the rest"
+        );
+        n.data = None;
+        n.category = "alert".into();
+        assert!(passes_quiet_hours(&n));
+    }
+
+    #[test]
+    fn the_morning_notice_names_what_was_held() {
+        let held: Vec<Notification> = (1..=8)
+            .map(|i| {
+                let mut n = notice(0, 0, None).notification;
+                n.title = format!("Notice {i}");
+                n.data = Some(json!({"open": "chat", "session_id": format!("s{i}")}));
+                n
+            })
+            .collect();
+        let morning = morning_notice("phone", &held, now());
+        assert_eq!(morning.title, "8 notices from quiet hours");
+        assert_eq!(morning.body.lines().count(), 7);
+        assert!(morning.body.ends_with("and 2 more"));
+        assert_eq!(morning.target, "phone");
+        assert_eq!(
+            morning.data.unwrap()["session_id"],
+            "s8",
+            "it opens the newest"
+        );
+        assert_eq!(
+            morning_notice("phone", &held[..1], now()).title,
+            "1 notice from quiet hours"
+        );
     }
 
     #[test]

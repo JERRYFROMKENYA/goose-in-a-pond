@@ -616,6 +616,26 @@ pub struct Settings {
     #[serde(default = "Settings::default_system_notices_enabled")]
     pub system_notices_enabled: bool,
 
+    /// In a household of one, a voice the Pond cannot identify may set reminders and to-dos as that member. Nothing else is opened to it.
+    #[serde(default = "Settings::default_lone_voice_sets_reminders")]
+    pub lone_voice_sets_reminders: bool,
+
+    /// A paired phone that has not connected for this many days is removed and listed in what Goose did. 0 never removes.
+    #[serde(default = "Settings::default_unseen_phone_remove_days")]
+    pub unseen_phone_remove_days: u32,
+
+    /// A paired phone that has not connected for this many days stops getting notices until it connects again. 0 never stops.
+    #[serde(default = "Settings::default_unseen_phone_skip_days")]
+    pub unseen_phone_skip_days: u32,
+
+    /// When no phone fetches a reminder within five minutes, the Pond says it once in the room, outside quiet hours.
+    #[serde(default = "Settings::default_speak_unfetched_reminders")]
+    pub speak_unfetched_reminders: bool,
+
+    /// In quiet hours, alerts and reminders set for that time still arrive; everything else waits for one notice when quiet hours end.
+    #[serde(default = "Settings::default_notices_wait_in_quiet_hours")]
+    pub notices_wait_in_quiet_hours: bool,
+
     // ── Memory tuning ────────────────────────────────────────────────────────
     /// Base decay half-life; each memory's is `base * (1 + importance)`.
     #[serde(default = "Settings::default_memory_decay_base_half_life_days")]
@@ -951,6 +971,11 @@ impl Default for Settings {
             memory_graph_enabled: false,
             schedule_result_notify: Self::default_schedule_result_notify(),
             system_notices_enabled: Self::default_system_notices_enabled(),
+            lone_voice_sets_reminders: Self::default_lone_voice_sets_reminders(),
+            unseen_phone_remove_days: Self::default_unseen_phone_remove_days(),
+            unseen_phone_skip_days: Self::default_unseen_phone_skip_days(),
+            speak_unfetched_reminders: Self::default_speak_unfetched_reminders(),
+            notices_wait_in_quiet_hours: Self::default_notices_wait_in_quiet_hours(),
             memory_decay_base_half_life_days: Self::default_memory_decay_base_half_life_days(),
             memory_decay_beta: Self::default_memory_decay_beta(),
             memory_prune_threshold: Self::default_memory_prune_threshold(),
@@ -1326,6 +1351,21 @@ impl Settings {
     }
     fn default_schedule_result_notify() -> bool {
         factory_defaults::boolean("schedule_result_notify", true)
+    }
+    fn default_notices_wait_in_quiet_hours() -> bool {
+        factory_defaults::boolean("notices_wait_in_quiet_hours", true)
+    }
+    fn default_speak_unfetched_reminders() -> bool {
+        factory_defaults::boolean("speak_unfetched_reminders", true)
+    }
+    fn default_unseen_phone_skip_days() -> u32 {
+        factory_defaults::u32("unseen_phone_skip_days", 14)
+    }
+    fn default_unseen_phone_remove_days() -> u32 {
+        factory_defaults::u32("unseen_phone_remove_days", 30)
+    }
+    fn default_lone_voice_sets_reminders() -> bool {
+        factory_defaults::boolean("lone_voice_sets_reminders", true)
     }
     fn default_system_notices_enabled() -> bool {
         factory_defaults::boolean("system_notices_enabled", true)
@@ -2265,6 +2305,11 @@ mod tests {
             "schedule_max_runs_per_task",
             "schedule_result_notify",
             "system_notices_enabled",
+            "lone_voice_sets_reminders",
+            "unseen_phone_remove_days",
+            "unseen_phone_skip_days",
+            "speak_unfetched_reminders",
+            "notices_wait_in_quiet_hours",
             "session_titling_enabled",
             "reasoning_effort",
             "show_thinking",

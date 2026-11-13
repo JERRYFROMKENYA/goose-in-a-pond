@@ -201,6 +201,19 @@ pub(crate) fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> 
     })
 }
 
+/// Whether the household's quiet hours cover `at`, read in its own time zone. `None` when a
+/// bound is unreadable: speech treats that as quiet, a held notice as not.
+pub fn household_quiet_at(
+    settings: &crate::user_data::domain::settings::Settings,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Option<bool> {
+    quiet_hours_cover(
+        &settings.quiet_hours_start,
+        &settings.quiet_hours_end,
+        LocalTimeOfDay::in_zone(&settings.timezone, at),
+    )
+}
+
 /// Whether `category` is in the comma-separated `enabled` list; any bad entry means less speech.
 fn category_is_speakable(enabled: &str, category: &str) -> bool {
     let wanted = category.trim().to_ascii_lowercase();

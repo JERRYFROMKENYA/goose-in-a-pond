@@ -515,6 +515,38 @@ impl SettingsRepository for SqliteSettingsRepository {
             "memory_extraction_first_pass_at",
             &settings.memory_extraction_first_pass_at
         );
+        upsert!(
+            "notices_wait_in_quiet_hours",
+            if settings.notices_wait_in_quiet_hours {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "speak_unfetched_reminders",
+            if settings.speak_unfetched_reminders {
+                "true"
+            } else {
+                "false"
+            }
+        );
+        upsert!(
+            "unseen_phone_skip_days",
+            settings.unseen_phone_skip_days.to_string()
+        );
+        upsert!(
+            "unseen_phone_remove_days",
+            settings.unseen_phone_remove_days.to_string()
+        );
+        upsert!(
+            "lone_voice_sets_reminders",
+            if settings.lone_voice_sets_reminders {
+                "true"
+            } else {
+                "false"
+            }
+        );
         // Scheduling
         upsert!(
             "schedule_result_notify",
@@ -1199,6 +1231,19 @@ fn apply_key(s: &mut Settings, key: &str, value: &str) {
         // Scheduling
         "schedule_result_notify" => s.schedule_result_notify = value == "true",
         "system_notices_enabled" => s.system_notices_enabled = value == "true",
+        "lone_voice_sets_reminders" => s.lone_voice_sets_reminders = value == "true",
+        "unseen_phone_remove_days" => {
+            if let Ok(v) = value.parse() {
+                s.unseen_phone_remove_days = v;
+            }
+        }
+        "unseen_phone_skip_days" => {
+            if let Ok(v) = value.parse() {
+                s.unseen_phone_skip_days = v;
+            }
+        }
+        "speak_unfetched_reminders" => s.speak_unfetched_reminders = value == "true",
+        "notices_wait_in_quiet_hours" => s.notices_wait_in_quiet_hours = value == "true",
         "schedule_max_concurrent" => {
             if let Ok(v) = value.parse() {
                 s.schedule_max_concurrent = v;

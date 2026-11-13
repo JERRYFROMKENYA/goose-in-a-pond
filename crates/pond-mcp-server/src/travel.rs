@@ -622,6 +622,7 @@ impl TravelMcpServer {
         };
         let data = serde_json::json!({
             "action": "open_url",
+            "quiet_pass": true,
             "kind": link.kind,
             "url": link.url,
             "label": link.label,
@@ -723,6 +724,7 @@ impl TravelMcpServer {
 
         let data = serde_json::json!({
             "action": "ride_offer",
+            "quiet_pass": true,
             "provider": "uber",
             "dropoff": {"name": fix.name, "latitude": fix.latitude, "longitude": fix.longitude},
             "label": "Get a fare",

@@ -3646,7 +3646,7 @@ async fn run_server(
         pond_infra::broadcast_notification_sender::BroadcastNotificationSender::new(
             notification_tx.clone(),
             notification_queue.clone(),
-            Some(push_relay),
+            Some(push_relay.clone()),
         )
         .with_device_attribution(device_attribution.clone())
         .with_household_recipients(Arc::new(
@@ -3654,7 +3654,8 @@ async fn run_server(
                 db.system.clone(),
             ),
         ))
-        .with_history(notification_history.clone()),
+        .with_history(notification_history.clone())
+        .with_quiet_hours(settings_repo.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -3693,6 +3694,25 @@ async fn run_server(
             ),
         )
     });
+    // A notice no phone came for is woken again, a due reminder said aloud, and what quiet hours
+    // held handed over when they end.
+    {
+        let mut follow_up = pond_core::mcp::services::notice_follow_up::NoticeFollowUp::new(
+            notification_queue.clone(),
+            notification_sender.clone(),
+            settings_repo.clone(),
+        )
+        .with_relay(push_relay.clone());
+        if let Some(voice) = tts.clone() {
+            follow_up = follow_up.with_speaker(Arc::new(
+                pond_server::notice_follow_up::AnnouncerSpeaker::new(
+                    pond_audio_out::Announcer::new(voice),
+                    settings_repo.clone(),
+                ),
+            ));
+        }
+        pond_server::notice_follow_up::spawn(follow_up);
+    }
     // Members' web watches: checked in code, their owners told on their own devices.
     let watch_repo: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository> = Arc::new(
         pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(db.system.clone()),

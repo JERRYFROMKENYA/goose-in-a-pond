@@ -5167,6 +5167,16 @@ async fn run_server(
             std::future::pending::<std::convert::Infallible>().await
         }
     };
+    // A turn a stop cut off is answered again once the pond is up and its listeners serve.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let since = chrono::Utc::now() - chrono::Duration::minutes(60);
+            pond_api::routes::answer_cut_turns(state, since).await;
+        });
+    }
+
     let serve_result = tokio::select! {
         never = revocations => match never {},
         result = embedded_server => result,
@@ -5174,10 +5184,19 @@ async fn run_server(
         result = https_server => result.map_err(anyhow::Error::from),
         result = pond_api::insecure_dev::serve(insecure_listener, listeners.insecure) => result,
         result = renewal => result,
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received -- stopping both listeners");
-            Ok(())
-        }
+        // The listeners keep serving inside this arm, so a turn in flight can finish and be
+        // stored before they stop.
+        _ = async {
+            shutdown_signal().await;
+            let waited = wait_for_turns_in_flight(&state, TURN_GRACE).await;
+            tracing::info!(
+                target: "giap::trace",
+                kind = "shutdown",
+                waited_ms = waited.waited.as_millis() as u64,
+                turns_left = waited.left,
+                "shutdown signal received -- stopping both listeners"
+            );
+        } => Ok(()),
     };
     tls_handle.shutdown();
     // Goodbyes now, so phones drop the pond at once rather than when its records expire.
@@ -5203,6 +5222,47 @@ async fn run_server(
 }
 
 /// Resolves on Ctrl-C, or SIGTERM on Unix (what `systemctl stop` and `docker stop` send).
+/// How long a stop waits for turns in flight. Shorter than systemd's default stop timeout, so
+/// the wait ends before the service manager kills the process.
+const TURN_GRACE: std::time::Duration = std::time::Duration::from_secs(45);
+
+struct StopWait {
+    waited: std::time::Duration,
+    /// Turns still running when the wait gave up.
+    left: usize,
+}
+
+/// Tells connected screens the pond is stopping, then waits for the turns in flight, at most
+/// `grace`. A turn that outlasts it is cut, and answered again when the pond is back.
+async fn wait_for_turns_in_flight(
+    state: &Arc<pond_api::AppState>,
+    grace: std::time::Duration,
+) -> StopWait {
+    let started = std::time::Instant::now();
+    if let Some(sender) = state.notification_sender.clone() {
+        let notice = pond_core::mcp::ports::notification::Notification {
+            id: uuid::Uuid::new_v4().to_string(),
+            target: "broadcast".to_string(),
+            category: "info".to_string(),
+            title: "The Pond is restarting".to_string(),
+            body: "It will be back in a few minutes.".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            data: Some(serde_json::json!({"kind": "pond_restarting"})),
+        };
+        let _ = sender.publish_live(notice).await;
+    }
+    loop {
+        let left = state.runs.registry.in_flight();
+        if left == 0 || started.elapsed() >= grace {
+            return StopWait {
+                waited: started.elapsed(),
+                left,
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;

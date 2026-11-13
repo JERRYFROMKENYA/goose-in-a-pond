@@ -6,7 +6,7 @@ use pond_core::models::domain::image_limits::extension_for_mime;
 use pond_core::models::domain::message::{ChatMessage, ImageAttachment, Role, ToolCallRecord};
 use pond_core::user_data::domain::message_note::MessageNote;
 use pond_core::user_data::domain::session::{
-    ExtractionCursor, IdentificationSource, MessageAttachment, Session, SessionIdentity,
+    CutTurn, ExtractionCursor, IdentificationSource, MessageAttachment, Session, SessionIdentity,
     SessionMessage, SessionSurface,
 };
 use pond_core::user_data::ports::session_storage::{SessionStorage, SessionStorageError};
@@ -728,6 +728,32 @@ impl SessionStorage for SqliteSessionStorage {
         self.persist_attachments(&message).await;
 
         Ok(message)
+    }
+
+    async fn cut_turns(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<CutTurn>, SessionStorageError> {
+        let rows = sqlx::query(
+            "SELECT m.session_id, m.id, m.content FROM session_messages m \
+             WHERE m.role = 'user' AND m.created_at >= ? \
+               AND m.rowid = (SELECT MAX(x.rowid) FROM session_messages x \
+                              WHERE x.session_id = m.session_id) \
+               AND NOT EXISTS (SELECT 1 FROM message_attachments a WHERE a.message_id = m.id) \
+             ORDER BY m.rowid",
+        )
+        .bind(since.format("%Y-%m-%d %H:%M:%S").to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        Ok(rows
+            .iter()
+            .map(|row| CutTurn {
+                session_id: row.get("session_id"),
+                message_id: row.get("id"),
+                text: row.get("content"),
+            })
+            .collect())
     }
 
     async fn set_message_note(
@@ -1679,6 +1705,51 @@ mod tests {
             result,
             Err(SessionStorageError::SessionNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_cut_turn_is_a_persons_newest_message_with_no_reply() {
+        let (s, _tmp) = make_storage().await;
+        for id in ["answered", "cut", "empty"] {
+            s.create_session(id.to_string()).await.unwrap();
+        }
+        let say = |id: &str, session: &str, message: ChatMessage| {
+            SessionMessage::new(id.to_string(), session.to_string(), message)
+        };
+        s.add_message(
+            "answered".into(),
+            say("a1", "answered", ChatMessage::user("Hi")),
+        )
+        .await
+        .unwrap();
+        s.add_message(
+            "answered".into(),
+            say("a2", "answered", ChatMessage::assistant("Hello")),
+        )
+        .await
+        .unwrap();
+        s.add_message(
+            "cut".into(),
+            say("c1", "cut", ChatMessage::user("What is on today?")),
+        )
+        .await
+        .unwrap();
+
+        let recent = s
+            .cut_turns(chrono::Utc::now() - chrono::Duration::minutes(30))
+            .await
+            .unwrap();
+        assert_eq!(recent.len(), 1, "{recent:?}");
+        assert_eq!(recent[0].session_id, "cut");
+        assert_eq!(recent[0].message_id, "c1");
+        assert_eq!(recent[0].text, "What is on today?");
+        assert!(
+            s.cut_turns(chrono::Utc::now() + chrono::Duration::minutes(1))
+                .await
+                .unwrap()
+                .is_empty(),
+            "an old one is left alone"
+        );
     }
 
     #[tokio::test]

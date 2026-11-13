@@ -1,8 +1,10 @@
 use crate::models::domain::message::ImageAttachment;
 use crate::user_data::domain::message_note::MessageNote;
 use crate::user_data::domain::session::{
-    ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage, SessionSurface,
+    CutTurn, ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage,
+    SessionSurface,
 };
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -48,6 +50,12 @@ pub trait SessionStorage: Send + Sync {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, SessionStorageError>;
+
+    /// Conversations whose newest message is a person's, sent since `since`, with nothing
+    /// attached: the turns a stop cut off that can be answered again from their words alone.
+    async fn cut_turns(&self, _since: DateTime<Utc>) -> Result<Vec<CutTurn>, SessionStorageError> {
+        Ok(Vec::new())
+    }
 
     /// Replaces the note under one stored message; an empty note clears it.
     async fn set_message_note(

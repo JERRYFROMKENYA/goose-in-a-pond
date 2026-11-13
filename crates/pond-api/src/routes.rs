@@ -3397,6 +3397,83 @@ fn spawn_run(
     attach_sse(state, permit, run, 0, AttachKind::Original)
 }
 
+/// Answers again the turns a stop cut off: a person's message stored with no reply after it.
+/// One at a time, each as an ordinary turn nobody is reading, so its reply is stored where the
+/// person finds it. Returns how many were answered.
+pub async fn answer_cut_turns(state: Arc<AppState>, since: chrono::DateTime<chrono::Utc>) -> usize {
+    let cut = match state.session_storage.cut_turns(since).await {
+        Ok(cut) => cut,
+        Err(error) => {
+            tracing::warn!(%error, "could not look for turns a stop cut off");
+            return 0;
+        }
+    };
+    let mut answered = 0;
+    for turn in cut {
+        // A schedule's own session is the scheduler's to run again, not a person's.
+        let pond_made =
+            !pond_core::shared::domain::session_activity::SessionOrigin::of(&turn.session_id)
+                .is_human()
+                && !pond_core::shared::services::goose_thread::is_thread(&turn.session_id);
+        if pond_made || turn.text.trim().is_empty() {
+            continue;
+        }
+        let Ok(req) = serde_json::from_value::<ChatRequest>(json!({
+            "session_id": turn.session_id,
+            "message": turn.text,
+            "resumable": true,
+        })) else {
+            continue;
+        };
+        let Ok(run_permit) = state.runs.permits.clone().try_acquire_owned() else {
+            break;
+        };
+        // The turn saves the message again; the cut copy would make two.
+        if let Err(error) = state
+            .session_storage
+            .delete_messages_from(&turn.session_id, &turn.message_id)
+            .await
+        {
+            tracing::warn!(%error, session_id = %turn.session_id, "a cut turn could not be cleared to answer again");
+            continue;
+        }
+        let device = ProvenDevice::none();
+        let run = new_run(&req, &device, crate::runs::RunPolicy::Detached);
+        if state.runs.registry.insert(run.clone()).is_err() {
+            break;
+        }
+        tracing::info!(
+            target: "giap::trace",
+            kind = "cut_turn_answered_again",
+            session_id = %turn.session_id,
+            "a turn a stop cut off is being answered again"
+        );
+        run_turn(state.clone(), run, Some(run_permit), req, device).await;
+        answered += 1;
+        if let Some(sender) = state.notification_sender.clone() {
+            use pond_core::mcp::domain::notice_delivery::{marked, QUIET_PASS_KEY};
+            use pond_core::mcp::ports::notification::{Notification, OpenScreen};
+            let notice = Notification {
+                id: format!("cut-turn-{}", turn.message_id),
+                target: "broadcast".to_string(),
+                category: "info".to_string(),
+                title: "Goose answered after restarting".to_string(),
+                body: "It was restarted in the middle of a reply, and has now finished it."
+                    .to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: marked(
+                    Some(OpenScreen::chat(Some(&turn.session_id)).data()),
+                    QUIET_PASS_KEY,
+                ),
+            };
+            if let Err(error) = sender.broadcast(notice).await {
+                tracing::warn!(%error, "could not tell the household a cut turn was answered");
+            }
+        }
+    }
+    answered
+}
+
 /// One agent turn, start to finish, whether or not anybody is listening.
 /// `stream_handler_parity.rs` pins the order: scope before `ChatService`, persist before `done`.
 async fn run_turn(

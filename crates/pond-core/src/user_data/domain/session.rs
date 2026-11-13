@@ -196,6 +196,14 @@ impl ExtractionCursor {
     }
 }
 
+/// A person's message with no reply stored after it: what a stop in the middle of a turn leaves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CutTurn {
+    pub session_id: String,
+    pub message_id: String,
+    pub text: String,
+}
+
 /// Where a conversation was started, so each screen can list its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

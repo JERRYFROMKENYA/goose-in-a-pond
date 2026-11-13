@@ -1,4 +1,5 @@
 use crate::models::domain::message::ImageAttachment;
+use crate::user_data::domain::message_note::MessageNote;
 use crate::user_data::domain::session::{
     ExtractionCursor, MessageAttachment, Session, SessionIdentity, SessionMessage, SessionSurface,
 };
@@ -47,6 +48,16 @@ pub trait SessionStorage: Send + Sync {
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionMessage>, SessionStorageError>;
+
+    /// Replaces the note under one stored message; an empty note clears it.
+    async fn set_message_note(
+        &self,
+        _session_id: &str,
+        _message_id: &str,
+        _note: &MessageNote,
+    ) -> Result<(), SessionStorageError> {
+        Ok(())
+    }
 
     async fn update_title(
         &self,

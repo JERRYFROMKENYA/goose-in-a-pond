@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use pond_core::models::domain::image_limits::extension_for_mime;
 use pond_core::models::domain::message::{ChatMessage, ImageAttachment, Role, ToolCallRecord};
+use pond_core::user_data::domain::message_note::MessageNote;
 use pond_core::user_data::domain::session::{
     ExtractionCursor, IdentificationSource, MessageAttachment, Session, SessionIdentity,
     SessionMessage, SessionSurface,
@@ -41,6 +42,7 @@ struct MessageRow {
     completion_tokens: Option<i64>,
     reasoning_tokens: Option<i64>,
     liked: Option<i64>,
+    note_json: Option<String>,
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -125,6 +127,7 @@ impl TryFrom<MessageRow> for SessionMessage {
             completion_tokens: r.completion_tokens.map(|v| v as u32),
             reasoning_tokens: r.reasoning_tokens.map(|v| v as u32),
             liked: r.liked.map(|v| v != 0),
+            note: MessageNote::from_stored(r.note_json.as_deref()),
         })
     }
 }
@@ -698,8 +701,8 @@ impl SessionStorage for SqliteSessionStorage {
         sqlx::query(
             "INSERT INTO session_messages \
                  (id, session_id, role, content, tool_call_id, tool_calls_json, created_at, \
-                  prompt_tokens, completion_tokens, reasoning_tokens) \
-             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)",
+                  prompt_tokens, completion_tokens, reasoning_tokens, note_json) \
+             VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)",
         )
         .bind(&message.id)
         .bind(&session_id)
@@ -710,6 +713,7 @@ impl SessionStorage for SqliteSessionStorage {
         .bind(message.prompt_tokens.map(|v| v as i64))
         .bind(message.completion_tokens.map(|v| v as i64))
         .bind(message.reasoning_tokens.map(|v| v as i64))
+        .bind(message.note.as_ref().and_then(MessageNote::to_stored))
         .execute(&self.pool)
         .await
         .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
@@ -726,6 +730,27 @@ impl SessionStorage for SqliteSessionStorage {
         Ok(message)
     }
 
+    async fn set_message_note(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        note: &MessageNote,
+    ) -> Result<(), SessionStorageError> {
+        let changed = sqlx::query(
+            "UPDATE session_messages SET note_json = ? WHERE id = ? AND session_id = ?",
+        )
+        .bind(note.to_stored())
+        .bind(message_id)
+        .bind(session_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| SessionStorageError::StorageError(e.to_string()))?;
+        if changed.rows_affected() == 0 {
+            return Err(SessionStorageError::MessageNotFound(message_id.to_string()));
+        }
+        Ok(())
+    }
+
     async fn get_messages(
         &self,
         session_id: &str,
@@ -734,7 +759,7 @@ impl SessionStorage for SqliteSessionStorage {
 
         let rows = sqlx::query_as::<_, MessageRow>(
             "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, created_at, \
-             prompt_tokens, completion_tokens, reasoning_tokens, liked \
+             prompt_tokens, completion_tokens, reasoning_tokens, liked, note_json \
              FROM session_messages \
              WHERE session_id = ? \
              ORDER BY created_at ASC, rowid ASC",
@@ -960,7 +985,7 @@ impl SessionStorage for SqliteSessionStorage {
 
         let rows = sqlx::query_as::<_, MessageRow>(
             "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, created_at, \
-             prompt_tokens, completion_tokens, reasoning_tokens, liked \
+             prompt_tokens, completion_tokens, reasoning_tokens, liked, note_json \
              FROM session_messages \
              WHERE session_id = ? \
              ORDER BY created_at ASC, rowid ASC \
@@ -986,7 +1011,7 @@ impl SessionStorage for SqliteSessionStorage {
         // Fetch newest-first, then reverse to return chronological order.
         let rows = sqlx::query_as::<_, MessageRow>(
             "SELECT id, session_id, role, content, tool_call_id, tool_calls_json, created_at, \
-             prompt_tokens, completion_tokens, reasoning_tokens, liked \
+             prompt_tokens, completion_tokens, reasoning_tokens, liked, note_json \
              FROM session_messages \
              WHERE session_id = ? \
              ORDER BY created_at DESC, rowid DESC \
@@ -1654,6 +1679,45 @@ mod tests {
             result,
             Err(SessionStorageError::SessionNotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn a_message_keeps_its_note_and_the_note_can_be_replaced() {
+        use pond_core::user_data::domain::message_note::{Receipt, SourceKind};
+        let (s, _tmp) = make_storage().await;
+        s.create_session("sess-1".to_string()).await.unwrap();
+        let note = MessageNote::from_source(SourceKind::Schedule, "Daily Briefing", None);
+        s.add_message(
+            "sess-1".to_string(),
+            SessionMessage::new(
+                "m1".to_string(),
+                "sess-1".to_string(),
+                ChatMessage::assistant("Here is your brief."),
+            )
+            .with_note(note.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            s.get_messages("sess-1").await.unwrap()[0].note,
+            Some(note.clone())
+        );
+
+        let mut replaced = note;
+        replaced.receipts.push(Receipt::not_set(
+            "timer",
+            "41 days",
+            "A timer needs a length of time.",
+        ));
+        s.set_message_note("sess-1", "m1", &replaced).await.unwrap();
+        assert_eq!(
+            s.get_recent_messages("sess-1", 5).await.unwrap()[0].note,
+            Some(replaced)
+        );
+        assert!(s
+            .set_message_note("sess-1", "missing", &MessageNote::default())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

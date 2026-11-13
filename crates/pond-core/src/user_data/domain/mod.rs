@@ -7,6 +7,7 @@ pub mod interest;
 pub mod interest_interview;
 pub mod member_profile;
 pub mod memory;
+pub mod message_note;
 pub mod onboarding;
 pub mod profile;
 pub mod profile_interview;

@@ -4971,6 +4971,9 @@ async fn get_session_messages(
             if let Some(tc_id) = &m.message.tool_call_id {
                 obj["tool_call_id"] = json!(tc_id);
             }
+            if let Some(note) = &m.note {
+                obj["note"] = json!(note);
+            }
             if !m.message.tool_calls.is_empty() {
                 obj["tool_calls"] = json!(m
                     .message

@@ -1,4 +1,5 @@
 use crate::models::domain::message::ChatMessage;
+use crate::user_data::domain::message_note::MessageNote;
 use crate::user_data::domain::profile::ProfileScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,9 @@ pub struct SessionMessage {
     /// Training feedback from the like/dislike UI; `Some(false)` excludes the row from training.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub liked: Option<bool>,
+    /// Where the pond's own message came from, what the turn set, a suggestion's offer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<MessageNote>,
 }
 
 impl SessionMessage {
@@ -34,7 +38,14 @@ impl SessionMessage {
             completion_tokens: None,
             reasoning_tokens: None,
             liked: None,
+            note: None,
         }
+    }
+
+    /// Attach a note; an empty one is dropped.
+    pub fn with_note(mut self, note: MessageNote) -> Self {
+        self.note = (!note.is_empty()).then_some(note);
+        self
     }
 
     /// Attach the turn's real token counts (assistant rows).

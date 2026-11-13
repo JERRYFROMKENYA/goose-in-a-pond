@@ -224,6 +224,16 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /handshake/pairing-code | open | loopback, cred | The current pairing code and pairing material |
 | POST | /handshake/pairing-code | open | loopback, cred | Issue a fresh pairing code |
 | POST | /handshake/spoken-code | open | LAN | Read a fresh pairing code aloud; never returns it |
+| POST | /handshake/pairing-request/claim | open | LAN | A phone the pairing lock held asks whether it was let in |
+| POST | /handshake/pairing-request/recover | open | LAN | The main member's new phone lets itself in with the recovery PIN |
+| GET | /pairing/lock | token +onb | | Whether pairing is locked, who the main member is, and whether the caller may change it |
+| PUT | /pairing/lock | token +onb | main member | Lock or unlock pairing |
+| PUT | /pairing/recovery-pin | token +onb | main member | Set the recovery PIN |
+| DELETE | /pairing/recovery-pin | token +onb | main member | Remove it |
+| PUT | /pairing/owner | token +onb | main member | Hand the main member's seat to another member |
+| GET | /pairing/requests | token +onb | main member | The phones waiting to be let in |
+| POST | /pairing/requests/{id}/approve | token +onb | main member | Let a waiting phone in |
+| POST | /pairing/requests/{id}/decline | token +onb | main member | Turn it away |
 
 ### Onboarding
 
@@ -269,12 +279,13 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 
 | Method | Path | Auth | Also | Summary |
 |---|---|---|---|---|
-| GET | /sessions | token +onb | | All sessions, most recently updated first |
+| GET | /sessions | token +onb | | All sessions, most recently updated first; `?surface=` keeps those begun on the named surfaces |
 | PATCH | /sessions/{session_id} | token +onb | | Rename |
 | DELETE | /sessions/{session_id} | token +onb | | Delete with its messages |
 | GET | /sessions/{session_id}/messages | token +onb | | Messages, paged |
 | DELETE | /sessions/{session_id}/messages/{message_id} | token +onb | | Delete a message and every later one |
 | PUT | /sessions/{session_id}/messages/{message_id}/feedback | token +onb | | Like, dislike or clear |
+| POST | /sessions/{session_id}/messages/{message_id}/offer | token +onb | | Take or pass over the suggestion a message offers |
 | GET | /sessions/{session_id}/attachments/{attachment_id} | token +onb | | Raw bytes of one chat image |
 | POST | /sessions/{session_id}/compact | token +onb | | Compact this session now |
 | POST | /sessions/retitle | token +onb | | Run the titling job's next pass now |
@@ -359,6 +370,7 @@ coordinates (`kind=location_from_phone`, `kind=weather_place`).
 | GET | /notifications/stream | token | own device | Notifications for one device (SSE) |
 | GET | /notifications/pending | token | paired device | The caller's unacknowledged notifications |
 | POST | /notifications/{id}/ack | token | paired device | Mark one of the caller's notifications delivered |
+| POST | /notifications/{id}/opened | token | paired device | Record that the person opened one of the caller's notifications |
 | GET | /notifications/history | token | paired device | The household notices the caller may read, with its read state |
 | POST | /notifications/history/read | token | paired device | Mark history notices read for the caller |
 | GET | /devices | token +onb | | All registered devices |
@@ -561,6 +573,7 @@ Contract and refusals: [pond administrator](architecture/pond-administrator.md#w
 | POST | /admin/enroll | token +onb | unlocked | This device's own key, shown once, replacing any older one |
 | DELETE | /admin/key | token +onb | member | Revoke this device's key and lock it |
 | GET | /admin/overview | token +onb | unlocked | Disk, storage per area, databases and record counts |
+| GET | /admin/reliability | token +onb | unlocked | What became of notices and turns over the last days |
 | GET | /admin/files | token +onb | unlocked | One data-directory folder, largest first; credentials never listed |
 | DELETE | /admin/files | token +onb | unlocked | Delete a file or folder the pond does not need |
 | GET | /admin/caches | token +onb | unlocked | KV snapshots, download leftovers and accelerator caches |
@@ -705,7 +718,8 @@ only and is refused here. `init` answers `PakeChallenge {challenge_id, challenge
 `server_version`, `capabilities` (`chat`, `devices`, `settings`, and `routines` for device-action
 routines and asking before a missed run), `rejection_reason`, and `server_proof` (T_server in hex),
 which the phone must verify before keeping the tokens. A refusal is a `200` with `accepted: false` and the
-same code in both `rejection_reason` and `error`.
+same code in both `rejection_reason` and `error`. Two refusals carry more: see
+[the pairing lock](#the-pairing-lock).
 
 | Route | Status | `error` | Meaning |
 |-------|--------|---------|---------|
@@ -724,6 +738,8 @@ same code in both `rejection_reason` and `error`.
 | verify | 200 | `unknown_challenge` | No such run, or it was already used |
 | verify | 200 | `challenge_expired` | The run is older than 60 s |
 | verify | 200 | `setup_code_unavailable` | Another device claimed the pond first; nothing was minted |
+| verify | 200 | `approval_required` | The pairing lock holds: no tokens; `pairing_request` says how to come back |
+| verify | 200 | `pairing_requests_full` | Five phones are already waiting |
 
 Each pairing code allows 10 confirmation attempts in all, and issuing a new code retires every
 older one. The setup code is never retired: five attempts are free, then one per 30 s, doubling to
@@ -758,8 +774,10 @@ but loopback: `403 pairing_requires_lan` for a tailnet or unclassifiable peer, e
 
 `GET /handshake/pairing-code` answers `{code, expires_at, profile_id, pairing}` (`code: null` when
 none is live). `POST /handshake/pairing-code` issues a fresh single-use code; its optional body
-`{profile_id?, unattributed?}` (unknown fields refused) binds the device that pairs with it to a
-member. With no body, a household with exactly one member binds to that member, and any other
+`{profile_id?, unattributed?, approved?, test?}` (unknown fields refused) binds the device that pairs
+with it to a member. `approved` lets its phone in while [the pairing lock](#the-pairing-lock) holds:
+whoever holds the host credential has already said yes. `test` marks the device a harness's: its
+pairing is not announced, it gets no household notices and the reliability report leaves it out. With no body, a household with exactly one member binds to that member, and any other
 household binds to nobody. `pairing` is the pairing material: `hostname`, `lan_address`,
 `tailnet_address`, `https_port`, `tls_spki_sha256`.
 
@@ -769,6 +787,38 @@ to nobody is linked by pairing it again with a code issued for its member; the a
 id as `client_id`, so the same `devices` row takes the new owner. The dashboard's Pairing page asks
 whose the device will be and issues the code for that choice, and `pond-server pairing --member
 <PROFILE_ID>` does the same from a shell on the pond.
+
+### The pairing lock
+
+A pond's pairing is locked from the start. The lock holds once the pond has a main member (the
+member who set it up, or whoever they handed the seat to with `PUT /pairing/owner {profile_id}`)
+and that member has a paired phone or a recovery PIN; until then a code alone pairs, so a new pond
+can be set up. It holds phones pairing with a six-digit code over CPace. The setup card, the
+dashboard's loopback exchange, a code issued with `approved`, a `pond-server pairing` code and a
+paired phone resuming are not held.
+
+A held `verify` answers `200 {accepted: false, error: "approval_required", server_proof,
+pairing_request: {request_id, claim_secret, expires_at}}` with no tokens. The phone verifies
+`server_proof` as for an accepted pairing, keeps `claim_secret` in memory, and asks again:
+
+| Route | Request | Response |
+|---|---|---|
+| `POST /handshake/pairing-request/claim` | `{request_id, claim_secret}` | `202 {status: "waiting"}`; `200 {status: "paired", accepted: true, session_token, refresh_token, expires_at}`, once; `403 {status: "declined"}`; `410 {status: "gone"}` for an unknown, expired or already collected request, or a wrong secret |
+| `POST /handshake/pairing-request/recover` | `{request_id, claim_secret, pin}` | The `paired` body; `403 {error: "wrong_pin", tries_left}`; `429 {error: "pin_cooling", retry_after_secs}` with `Retry-After`; `409 {error: "no_recovery_pin"}` |
+| `GET /pairing/lock` | | `{locked, enforced, owner_profile_id, has_recovery_pin, owner_has_a_phone, min_pin_digits, can_change}` |
+| `PUT /pairing/lock` | `{locked}` | The lock's state |
+| `PUT /pairing/recovery-pin` | `{pin}`, 6 to 12 digits | `400 pin_not_six_to_twelve_digits` otherwise |
+| `GET /pairing/requests` | | `{requests: [{id, client_id, client_type, device_name, profile_id, created_at, expires_at}]}` |
+| `POST /pairing/requests/{id}/approve` | `{profile_id?}` | The device becomes that member's, else the code's |
+| `POST /pairing/requests/{id}/decline` | | |
+
+A request lasts ten minutes and at most five wait at once. Each one raises the household alert "A
+phone asks to pair", whose `data` is `{open: "devices", action: "pairing_request", request_id}`.
+The routes that change the lock or answer a request take the main member's own device, or any
+member's device whose My Pond unlock is live; others get `403 pairing_main_member_only`. The PIN is
+kept as a PBKDF2 verifier; five wrong tries are free, then one per 30 s, doubling to one per hour.
+A set-up pond advertises its Bluetooth setup service while the lock holds, so a phone nearby can
+find it and ask.
 
 ### `POST /handshake/spoken-code`
 
@@ -955,12 +1005,13 @@ All chat history lives in `pond_system.db`.
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /sessions` | | `{sessions: [{id, title, preview, message_count, total_prompt_tokens, total_completion_tokens, model_name, created_at, updated_at}]}` |
+| `GET /sessions` | `?surface=phone,goose` (optional) | `{sessions: [{id, title, preview, message_count, total_prompt_tokens, total_completion_tokens, model_name, surface, created_at, updated_at}]}` |
 | `PATCH /sessions/{session_id}` | `{title}` | `{session_id, title}` |
 | `DELETE /sessions/{session_id}` | | `204`, also for a missing session |
 | `GET /sessions/{session_id}/messages` | `?limit=` (default 100, max 500), `?offset=` | `{messages: [...]}`. Without `offset`, the newest `limit`; with it, oldest-first from `offset` |
 | `DELETE /sessions/{session_id}/messages/{message_id}` | | `204`; the client then resubmits |
 | `PUT .../messages/{message_id}/feedback` | `{liked: true \| false \| null}` | `204` |
+| `POST .../messages/{message_id}/offer` | `{take: bool}` | `{state: "done" \| "dismissed", prompt}`; `prompt` is what to send as the member's own turn, `null` when passed over. `409` with `state` once answered, `404` for a message with no offer |
 | `GET /sessions/{session_id}/attachments/{attachment_id}` | | Raw bytes, `Content-Type`, `Cache-Control: private, max-age=31536000, immutable`; `404` if the attachment is not this session's |
 | `POST /sessions/{session_id}/compact` | | `200` with `status` and `reason`; `404` only for an unknown session |
 | `POST /sessions/retitle` | | `{started, reason}`; `503` without a language model |
@@ -970,6 +1021,24 @@ A message has `id, session_id, role, content, created_at`, and when they apply: 
 (`name`, `arguments`), `images: [{id, mime_type, byte_size, url}]` (the `url` is the protected
 attachment route, so fetch it with the bearer token rather than a bare `<img src>`), and `thinking`
 (reasoning passages, kept while `persist_thinking` is on).
+
+`surface` is where a conversation began: `phone`, `desktop`, `cli`, `pond` (the pond's own screen),
+`room` (room voice), `schedule` or `goose`; absent for one begun before it was recorded, which
+`?surface=unknown` selects. The first writer wins and nothing changes it later. `goose` is the
+Goose thread, `goose-<profile id>` or `goose-household`: the one conversation the pond writes into
+by itself, holding schedule answers, finished tasks, due reminders, look-ups, watch hits and
+suggestions.
+
+A message may carry `note`, which is stored with it and never derived from its words:
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `from` | `{kind, label, ref_id?}`; `kind` is `schedule`, `reminder`, `task`, `lookup`, `watch`, `heartbeat` or `suggestion` | What produced a message the pond wrote by itself |
+| `receipts` | `[{kind, outcome: "set" \| "not_set", what, id?, reason?}]`; `kind` is `reminder`, `todo`, `timer`, `schedule`, `watch`, `task` or `standing` | What the turn's tools set, and what they did not, as the tools reported it |
+| `suggestion` | `{noticed, action, prompt, state: "open" \| "done" \| "dismissed", suggestion_id?}` | An offer: what Goose noticed, the button's words, and what taking it asks |
+
+A live turn's `tool_result` frame carries the same entry as `receipt`. A reply that says something
+was set when its tool said otherwise ends with a fixed `Not set: ...` line per failure.
 
 ## Voice and audio
 
@@ -1188,7 +1257,12 @@ read, `503` when no queue is wired.
 `{id, acknowledged: true}`; acknowledging twice is not an error. Percent-encode `{id}`: a phone's
 copy of a household notice is `"{notification_id}:{device_id}"`. `404` when no notification by that
 id is the caller's (another device's answers the same, so the route cannot probe someone else's
-queue), `500 notification_ack_failed`, `503` when no queue is wired.
+queue), `500 notification_ack_failed`, `503` when no queue is wired. An optional body
+`{shown: true}` also records that the phone showed it to its person.
+
+**`POST /notifications/{id}/opened`** records that the person opened one of the caller's
+notifications and answers `{id, opened: true}`; `404` as for `ack`. With the wake, the fetch
+(`pending` or the stream) and `shown`, it is the record `GET /admin/reliability` counts.
 
 **`GET /notifications/history?limit=N`** (2026-10-28) is the household's record of durable notices,
 which the dashboard's notification centre reads on start and on every reconnect of its stream. It

@@ -83,8 +83,10 @@ implements the ports and runs the transport. `pond-server` wires it.
 - **When.** While the pond is unclaimed, or while it has no usable network (no IPv4 address on any
   interface that is not loopback, link-local, a tunnel or a container bridge), checked every 10 s
   (`pond_core::network::services::advertising::should_advertise`, applied by
-  `pond_connect::advertising`), and only while `ble_setup_enabled` is on. Otherwise it does not
-  advertise. Stopping advertising never ends an open session. The setup window after a lost
+  `pond_connect::advertising`), and only while `ble_setup_enabled` is on. A claimed pond on a
+  network also advertises while its [pairing lock](../api.md#the-pairing-lock) holds, so a phone
+  nearby can find it and ask to be let in; `hello.claimed` tells that phone it is asking, not
+  setting a pond up. Otherwise it does not advertise. Stopping advertising never ends an open session. The setup window after a lost
   network is P6.
 - **A phone holding a card** scans for exactly `…4e2379dd<id>`: CoreBluetooth filters on it in the
   background too, and Android's `ScanFilter.setServiceUuid` takes it as is. **A phone browsing**

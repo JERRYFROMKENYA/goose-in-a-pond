@@ -121,7 +121,8 @@ system, device and sensors are on by default; travel, context and orchestrator a
 
 Phones (the Goose On The Go app) pair with CPace (`/handshake/pake/*`) using a pairing code, a
 spoken code or the printed setup card, then talk HTTPS on `:4443` against a pinned self-signed
-certificate. `auth_middleware` (`crates/pond-api/src/middleware/mod.rs`) guards every non-public
+certificate. While the pairing lock holds (`crates/pond-api/src/pairing_lock.rs`), a phone with a
+code only asks: the main member accepts it, or it lets itself in with the recovery PIN. `auth_middleware` (`crates/pond-api/src/middleware/mod.rs`) guards every non-public
 route. `POND_DEV_ALLOW_LOOPBACK=1` lets loopback callers through for development;
 `live-test.sh` re-runs its auth checks with it off. `pond-net` owns every outbound HTTP client,
 `pond-connect` the BLE setup channel, Wi-Fi and mDNS, `native/pondnet` (Go) the embedded tailnet

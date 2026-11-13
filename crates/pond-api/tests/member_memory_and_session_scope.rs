@@ -359,3 +359,60 @@ async fn the_list_keeps_the_surfaces_asked_for_and_shows_a_member_her_goose_thre
     assert_eq!(rows[0]["note"]["from"]["kind"], "schedule", "{messages}");
     assert_eq!(rows[0]["note"]["from"]["label"], "Daily Briefing");
 }
+
+/// A suggestion sits in the thread with what Goose noticed and an offer. Taking it hands back
+/// the words to send as the member's own turn, and the offer is answered once.
+#[tokio::test]
+async fn an_offer_in_the_thread_is_taken_once_and_hands_back_its_words() {
+    use pond_core::shared::services::goose_thread::GooseThread;
+    use pond_core::user_data::domain::message_note::{
+        MessageNote, OfferState, SourceKind, SuggestionOffer,
+    };
+
+    let pond = pond(true).await;
+    let amina = pond.amina.clone();
+    let mut note = MessageNote::from_source(SourceKind::Suggestion, "Suggestion", None);
+    note.suggestion = Some(SuggestionOffer {
+        noticed: "You asked about Naivasha tickets twice this week.".into(),
+        action: "Do it".into(),
+        prompt: "Check whether Safari Rally tickets are on sale.".into(),
+        state: OfferState::Open,
+        suggestion_id: None,
+    });
+    let posted = GooseThread::new(pond.sessions.clone())
+        .post(
+            Some(&amina),
+            "Shall I check whether the tickets are on sale?",
+            note,
+        )
+        .await
+        .unwrap();
+    let offer = format!(
+        "/api/v1/sessions/{}/messages/{}/offer",
+        posted.session_id, posted.message_id
+    );
+
+    let take = Some(serde_json::json!({"take": true}));
+    let (status, taken) = send(&pond, call(Method::POST, &offer, take.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{taken}");
+    assert_eq!(taken["state"], "done");
+    assert_eq!(
+        taken["prompt"],
+        "Check whether Safari Rally tickets are on sale."
+    );
+
+    let (status, again) = send(&pond, call(Method::POST, &offer, take)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{again}");
+
+    let kept = pond
+        .sessions
+        .get_messages(&posted.session_id)
+        .await
+        .unwrap();
+    let offer = kept[0].note.as_ref().unwrap().suggestion.as_ref().unwrap();
+    assert_eq!(offer.state, OfferState::Done);
+    assert_eq!(
+        offer.noticed,
+        "You asked about Naivasha tickets twice this week."
+    );
+}

@@ -264,6 +264,10 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             patch(rename_session).delete(delete_session),
         )
         .route("/sessions/{session_id}/messages", get(get_session_messages))
+        .route(
+            "/sessions/{session_id}/messages/{message_id}/offer",
+            post(answer_offer),
+        )
         .route("/sessions/{session_id}/compact", post(compact_session))
         .route("/sessions/retitle", post(retitle_sessions))
         .route("/sessions/{session_id}/retitle", post(retitle_session))
@@ -20632,6 +20636,96 @@ enum ProposalDecision {
 struct DecideProposalRequest {
     session_id: String,
     decision: ProposalDecision,
+}
+
+#[derive(Deserialize)]
+struct OfferAnswer {
+    take: bool,
+}
+
+/// `POST /api/v1/sessions/{session_id}/messages/{message_id}/offer` `{"take": bool}` — a member
+/// takes or passes over a suggestion in their thread. The answer is kept on the message, so the
+/// offer is answered once, and the suggestion is settled so the next review learns from it.
+/// Taking returns the words to send as their own turn; nothing is done here.
+async fn answer_offer(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Path((session_id, message_id)): Path<(String, String)>,
+    Json(answer): Json<OfferAnswer>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::domain::message_note::OfferState;
+    refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
+    let no_offer = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no offer on that message"})),
+        )
+    };
+    let message = state
+        .session_storage
+        .get_messages(&session_id)
+        .await
+        .map_err(|_| no_offer())?
+        .into_iter()
+        .find(|m| m.id == message_id)
+        .ok_or_else(no_offer)?;
+    let mut note = message.note.ok_or_else(no_offer)?;
+    let offer = note.suggestion.as_mut().ok_or_else(no_offer)?;
+    if offer.state != OfferState::Open {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "the offer was already answered", "state": offer.state})),
+        ));
+    }
+    offer.state = if answer.take {
+        OfferState::Done
+    } else {
+        OfferState::Dismissed
+    };
+    let (state_now, prompt, suggestion_id) = (
+        offer.state,
+        offer.prompt.clone(),
+        offer.suggestion_id.clone(),
+    );
+    state
+        .session_storage
+        .set_message_note(&session_id, &message_id, &note)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "an offer's answer could not be kept");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "the answer could not be kept"})),
+            )
+        })?;
+    // Best-effort: a suggestion past its time is no longer there to settle.
+    if let Some(id) = suggestion_id {
+        let decision = if answer.take {
+            ProposalDecision::Approve
+        } else {
+            ProposalDecision::Reject
+        };
+        let _ = decide_proposal(
+            State(state.clone()),
+            Path(id),
+            principal,
+            Ok(Json(DecideProposalRequest {
+                session_id: session_id.clone(),
+                decision,
+            })),
+        )
+        .await;
+    }
+    tracing::info!(
+        target: "giap::trace",
+        kind = "offer_answered",
+        taken = answer.take,
+        "a suggestion in the thread was answered"
+    );
+    Ok(Json(json!({
+        "state": state_now,
+        "prompt": answer.take.then_some(prompt),
+    })))
 }
 
 /// `POST /api/v1/proposals/{id}/decide` — approve or reject; approving executes nothing.

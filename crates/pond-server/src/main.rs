@@ -7807,18 +7807,37 @@ async fn run_proactive_reviewer(
                 tracing::warn!(error = %e, "proactive reviewer: could not persist a proposal");
                 continue;
             }
-            // Only the member's paired devices, never a broadcast.
-            let report = sender
-                .send_to_profile(
-                    audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(proposal),
-                )
-                .await;
+            // Every suggestion goes to the member's thread, with what Goose noticed and the
+            // offer to do it.
+            let posted = pond_core::shared::services::goose_thread::post(
+                Some(audience.profile_id()),
+                &proposal.summary(),
+                review::thread_offer(proposal),
+            )
+            .await;
+            // Goose decides which ones are worth a notice: the sure ones. The rest wait there.
+            let tells = proposal.confidence() >= review::NOTICE_CONFIDENCE;
+            let mut queued = 0;
+            let mut failed = 0;
+            if tells {
+                let mut notice = pond_server::system_notices::proposal_notification(proposal);
+                if let (Some(posted), Some(serde_json::Value::Object(fields))) =
+                    (&posted, &mut notice.data)
+                {
+                    fields.insert("session_id".into(), serde_json::json!(posted.session_id));
+                }
+                // Only the member's paired devices, never a broadcast.
+                let report = sender.send_to_profile(audience.profile_id(), notice).await;
+                queued = report.queued.len();
+                failed = report.failed.len();
+            }
             tracing::info!(
                 proposal = %proposal.id(),
                 member = %audience.profile_id(),
-                queued = report.queued.len(),
-                failed = report.failed.len(),
+                in_thread = posted.is_some(),
+                tells,
+                queued,
+                failed,
                 "proposal made"
             );
             did.push(

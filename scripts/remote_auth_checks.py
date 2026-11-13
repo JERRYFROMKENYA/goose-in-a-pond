@@ -98,6 +98,12 @@ def run():
     assert call("POST", own, token=a["session_token"]) == {"id": pending[0]["id"], "acknowledged": True}
     left = call("GET", "/notifications/pending", token=a["session_token"])["notifications"]
     assert [n["id"] for n in left] == [n["id"] for n in pending[1:]], left
+    # What became of it: the phone says it showed the notice, then that its person opened it.
+    assert call("POST", own, {"shown": True}, token=a["session_token"])["acknowledged"] is True
+    opened = "/notifications/%s/opened" % urllib.parse.quote(pending[0]["id"], safe="")
+    call("POST", opened, token=b["session_token"], expected=404)
+    call("POST", opened, expected=401)
+    assert call("POST", opened, token=a["session_token"]) == {"id": pending[0]["id"], "opened": True}
     # `call` asserts the status before it reads any body.
     for method, path in [("GET", "/notifications/pending"), ("POST", own)]:
         assert call(method, path, expected=401).get("notifications") is None

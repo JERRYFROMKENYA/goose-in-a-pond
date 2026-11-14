@@ -80,10 +80,9 @@ async fn a_locked_pond_holds_a_phone_until_its_main_member_lets_it_in() {
     let state: Arc<AppState> = Arc::new(state);
     let router = build_router(state, std::path::PathBuf::from("pond-desktop/dist"))
         .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40_000))));
-    assert!(handshake.set_pairing_owner(&jerry, false).await.unwrap());
 
-    // The main member has no phone yet and no PIN, so nobody could answer: his own phone
-    // pairs as before.
+    // Nobody holds the main member's seat and no phone is paired, so nobody could answer: his
+    // own phone pairs as before, and makes him the main member.
     let code = handshake
         .issue_pairing_code_for(Some(&jerry))
         .await
@@ -101,6 +100,7 @@ async fn a_locked_pond_holds_a_phone_until_its_main_member_lets_it_in() {
         None,
     )
     .await;
+    assert_eq!(lock["owner_profile_id"], jerry.as_str(), "{lock}");
     assert_eq!(lock["enforced"], true, "{lock}");
     assert_eq!(lock["can_change"], true, "{lock}");
 

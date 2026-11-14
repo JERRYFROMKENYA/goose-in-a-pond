@@ -1405,6 +1405,11 @@ async fn handshake_pake_verify(
         )
         .await;
     }
+    if resp.accepted && !resp.test_device && method == "cpace" {
+        if let Some(token) = resp.session_token.as_deref() {
+            name_main_member_from_phone(&state, token).await;
+        }
+    }
     let mut body = serde_json::to_value(&resp).map_err(|e| handshake_error("pake_verify", e))?;
     if let Some(reason) = resp.rejection_reason.as_deref().filter(|_| !resp.accepted) {
         body["error"] = json!(reason);
@@ -1827,6 +1832,20 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
         Err(e) => failed(Some(&claimant), format!("{e:#}")),
     }
     name_main_member(state, &owner).await;
+}
+
+/// A pond set up without the printed card has nobody in the seat until a member pairs a phone:
+/// the first member's phone names them, so the lock holds from then on.
+async fn name_main_member_from_phone(state: &Arc<AppState>, session_token: &str) {
+    let Ok(Some(caller)) = state.handshake.caller_for_token(session_token).await else {
+        return;
+    };
+    if let Ok(Some(member)) = device_attribution(state)
+        .device_profile(&caller.device_id)
+        .await
+    {
+        name_main_member(state, &member).await;
+    }
 }
 
 /// Fills the main member's seat if it is empty; never takes it from somebody.

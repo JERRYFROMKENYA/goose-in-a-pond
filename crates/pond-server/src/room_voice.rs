@@ -879,6 +879,7 @@ async fn run_once(
     .with_stdout_diagnostics(false)
     .with_event_sink(sink)
     .with_session_on_first_turn()
+    .with_surface(pond_core::user_data::domain::session::SessionSurface::Room)
     .with_voice_identity(speaker_context(&inner.deps))
     .with_unrecognised_scope(unrecognised_voice_scope(inner.deps.profiles.clone()))
     .with_model_hearing(hearing);

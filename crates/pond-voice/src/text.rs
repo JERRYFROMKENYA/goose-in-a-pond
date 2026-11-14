@@ -2659,12 +2659,91 @@ pub fn strip_whisper_artifacts(text: &str) -> String {
         return String::new();
     }
 
-    result.to_string()
+    collapse_repeats(result)
+}
+
+/// A phrase this many words long or longer, said this many times in a row, is said once.
+const REPEATED_PHRASE_RUN: usize = 3;
+/// A single word needs a longer run: people do say "no no no".
+const REPEATED_WORD_RUN: usize = 4;
+/// The longest phrase looked for; Whisper loops on a clause, not a paragraph.
+const LONGEST_REPEATED_PHRASE: usize = 12;
+
+/// Keeps one copy of a phrase Whisper wrote several times in a row, which it does on noise and
+/// on a decode that lost its place.
+pub fn collapse_repeats(text: &str) -> String {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let keys: Vec<String> = words
+        .iter()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .collect();
+    let mut kept: Vec<&str> = Vec::with_capacity(words.len());
+    let mut at = 0;
+    while at < words.len() {
+        let longest = LONGEST_REPEATED_PHRASE.min((words.len() - at) / 2);
+        let mut collapsed = false;
+        for len in (1..=longest).rev() {
+            let phrase = &keys[at..at + len];
+            if phrase.iter().all(String::is_empty) {
+                continue;
+            }
+            let mut runs = 1;
+            while at + (runs + 1) * len <= words.len()
+                && keys[at + runs * len..at + (runs + 1) * len] == *phrase
+            {
+                runs += 1;
+            }
+            let needed = if len == 1 {
+                REPEATED_WORD_RUN
+            } else {
+                REPEATED_PHRASE_RUN
+            };
+            if runs >= needed {
+                kept.extend_from_slice(&words[at + (runs - 1) * len..at + runs * len]);
+                at += runs * len;
+                collapsed = true;
+                break;
+            }
+        }
+        if !collapsed {
+            kept.push(words[at]);
+            at += 1;
+        }
+    }
+    kept.join(" ")
 }
 
 #[cfg(test)]
 mod artifact_tests {
     use super::*;
+
+    #[test]
+    fn a_phrase_whisper_looped_on_is_kept_once() {
+        assert_eq!(
+            collapse_repeats("What's the weather? What's the weather? What's the weather?"),
+            "What's the weather?"
+        );
+        assert_eq!(
+            collapse_repeats("turn off the light the light the light the light please"),
+            "turn off the light please"
+        );
+        assert_eq!(collapse_repeats("go go go go go now"), "go now");
+    }
+
+    #[test]
+    fn what_people_really_repeat_is_left_alone() {
+        for said in [
+            "no no no, the other one",
+            "thank you, thank you",
+            "it is very very far",
+            "remind me at five to call the bank, and at six to call the bank again",
+        ] {
+            assert_eq!(collapse_repeats(said), said);
+        }
+    }
 
     #[test]
     fn whisper_artifacts_strip_hallucinations_and_tails() {

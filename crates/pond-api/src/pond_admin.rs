@@ -93,6 +93,30 @@ async fn member_device(
     }
 }
 
+/// Who may change the pairing lock and answer a waiting phone: the main member, from any of
+/// their own devices, or a member whose My Pond unlock is live. The device that asked.
+pub(crate) async fn may_answer_pairing(
+    state: &AppState,
+    principal: Option<&Extension<Principal>>,
+    owner: Option<&str>,
+) -> Result<String, Response> {
+    let caller = member_device(state, principal).await?;
+    if owner == Some(caller.member.as_str()) {
+        return Ok(caller.device);
+    }
+    if let Some(admin) = &state.pond_admin {
+        let unlocked = admin
+            .elevation
+            .status(&caller.device, Instant::now())
+            .await
+            .is_ok_and(|status| status.unlocked_for.is_some());
+        if unlocked {
+            return Ok(caller.device);
+        }
+    }
+    Err(refuse(StatusCode::FORBIDDEN, "pairing_main_member_only"))
+}
+
 /// A member's device whose unlock is live; each admitted request renews it.
 async fn unlocked(
     state: &AppState,
@@ -435,6 +459,53 @@ pub async fn overview(
     match admin.service.overview().await {
         Ok(overview) => Json(overview).into_response(),
         Err(e) => admin_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ReliabilityQuery {
+    days: Option<u32>,
+}
+
+/// `GET /api/v1/admin/reliability?days=`: whether notices arrived and messages were answered.
+pub async fn reliability(
+    State(state): State<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    Query(query): Query<ReliabilityQuery>,
+) -> Response {
+    let _ = unlocked_or_refuse!(state, principal);
+    let Some(data_dir) = state.data_dir.clone() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "this Pond has no data directory to report on"})),
+        )
+            .into_response();
+    };
+    let unseen_days = state
+        .settings_repo
+        .get()
+        .await
+        .map(|s| s.unseen_phone_skip_days)
+        .unwrap_or(14);
+    match pond_infra::reliability::report(
+        &state.db.system,
+        &state.db.logs,
+        &data_dir,
+        query.days.unwrap_or(7).clamp(1, 90),
+        unseen_days,
+        Utc::now(),
+    )
+    .await
+    {
+        Ok(report) => Json(report).into_response(),
+        Err(error) => {
+            tracing::warn!(%error, "the reliability report could not be read");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "the reliability report could not be read"})),
+            )
+                .into_response()
+        }
     }
 }
 

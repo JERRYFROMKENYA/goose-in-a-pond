@@ -407,3 +407,28 @@ async fn offers_share_the_daily_cap_with_proposals_and_are_settled_once() {
         MAX_PROPOSALS_PER_DAY - 1
     );
 }
+
+/// In a household of one, a mention the pond could not put a name to is that member's.
+#[tokio::test]
+async fn a_mention_nobody_was_named_for_goes_to_the_only_member() {
+    use pond_core::shared::services::todo_offers::offer_pending_reminders_for;
+    let (_, pool, _tmp) = pond().await;
+    let reminders = SqliteReminderRepository::new(pool.clone());
+    let proposals = SqliteProposalRepository::new(pool.clone());
+    let mut unnamed = mention("u1", "jerry");
+    unnamed.profile_id = None;
+    reminders.capture(&unnamed).await.unwrap();
+    let now = utc("2026-11-09T08:00:00Z");
+
+    let several = offer_pending_reminders_for(&reminders, &proposals, 50, now, None)
+        .await
+        .unwrap();
+    assert_eq!((several.offered.len(), several.unaddressable), (0, 1));
+
+    let lone = offer_pending_reminders_for(&reminders, &proposals, 50, now, Some("jerry"))
+        .await
+        .unwrap();
+    assert_eq!((lone.offered.len(), lone.unaddressable), (1, 0));
+    assert_eq!(lone.offered[0].profile_id.as_deref(), Some("jerry"));
+    assert_eq!(reminders.offered_to("jerry").await.unwrap().len(), 1);
+}

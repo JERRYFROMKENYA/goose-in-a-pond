@@ -11,6 +11,7 @@ pub mod news;
 pub mod orchestration;
 pub mod page_render;
 pub mod pond_admin;
+pub mod reliability;
 pub mod role_block;
 pub mod saved_item;
 pub mod session_activity;

@@ -201,6 +201,18 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (Method::POST, "/handshake/pairing-code", Exposure::Always),
     // A headless pond's way to pair a phone: LAN-gated in the handler, never returns the code.
     (Method::POST, "/handshake/spoken-code", Exposure::Always),
+    // A phone the pairing lock held comes back for its request: LAN-gated in the handler, and
+    // answered only to the secret that phone was handed.
+    (
+        Method::POST,
+        "/handshake/pairing-request/claim",
+        Exposure::Always,
+    ),
+    (
+        Method::POST,
+        "/handshake/pairing-request/recover",
+        Exposure::Always,
+    ),
     // Onboarding: tokenless from an unclaimed pond's host, else the claimant's token, never after.
     (Method::POST, "/onboard", Exposure::UntilOnboarded),
     (Method::POST, "/onboard/complete", Exposure::UntilOnboarded),
@@ -316,6 +328,11 @@ const PUBLIC_ROUTES: &[(Method, &str, Exposure)] = &[
     (
         Method::POST,
         "/notifications/{id}/ack",
+        Exposure::Authenticated,
+    ),
+    (
+        Method::POST,
+        "/notifications/{id}/opened",
         Exposure::Authenticated,
     ),
     // The household's notice history, read and marked by the caller's own device, from its token.
@@ -1314,6 +1331,7 @@ mod tests {
             "POST /notifications/history/read = Authenticated".to_string(),
             // A woken phone fetches and acknowledges its own queued notices, as the stream would.
             "POST /notifications/{id}/ack = Authenticated".to_string(),
+            "POST /notifications/{id}/opened = Authenticated".to_string(),
             "POST /onboard = UntilOnboarded".to_string(),
             "POST /onboard/complete = UntilOnboarded".to_string(),
             // Once set up, the handler asks a caller with no token for the host credential.

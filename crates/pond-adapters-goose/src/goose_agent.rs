@@ -6,6 +6,7 @@ use goose::config::GooseMode;
 use goose::conversation::message::Message;
 use goose::providers::base::Provider;
 use goose::session::SessionManager;
+use pond_core::mcp::domain::tool_outcome::receipt_from_meta;
 use pond_core::mcp::ports::tools::tool_registry::ToolRegistryPort;
 use pond_core::models::domain::model_record::{ModelCategory, ModelRecord};
 use pond_core::models::ports::agent::{
@@ -3925,6 +3926,8 @@ impl GooseAdapter {
             let mut held_turn_limit_notice: Option<String> = None;
             // Tool results streamed this turn: what a stopped turn's final reply answers from.
             let mut tool_results_gathered: usize = 0;
+            // Said at the end of the reply whatever the model wrote: what was asked for and not set.
+            let mut not_set_lines: Vec<String> = Vec::new();
             // Output written up to the latest tool call: text before a call is working notes,
             // which the answer leaves out, so it never counts as having replied.
             let mut chars_at_last_call: usize = 0;
@@ -4264,6 +4267,20 @@ impl GooseAdapter {
                                                 }
                                                 Err(e) => (format!("Error: {e}"), None, true, None),
                                             };
+                                            // What a set-for-later tool really did, apart from its words.
+                                            let outcome = tr
+                                                .tool_result
+                                                .as_ref()
+                                                .ok()
+                                                .and_then(|result| result.meta.as_ref())
+                                                .and_then(|meta| receipt_from_meta(&meta.0));
+                                            if let Some(line) =
+                                                outcome.as_ref().and_then(|receipt| receipt.not_set_line())
+                                            {
+                                                if !not_set_lines.contains(&line) {
+                                                    not_set_lines.push(line);
+                                                }
+                                            }
 
                                             let tool_name = tool_id_to_name
                                                 .get(&tr.id)
@@ -4300,6 +4317,7 @@ impl GooseAdapter {
                                                 content: content_text,
                                                 card,
                                                 keep,
+                                                outcome,
                                             });
                                         }
                                         _ => {}
@@ -4731,6 +4749,13 @@ impl GooseAdapter {
                 total_output_chars += notice.len();
                 yield Ok(AgentStreamEvent::Text { content: notice });
                 yield Ok(AgentStreamEvent::TurnLimitReached { max_turns });
+            }
+            // From the tools' own outcomes, never from the reply's words: a set that failed is
+            // said here even when the model wrote that it worked.
+            for line in not_set_lines.drain(..) {
+                let said = format!("\n\n{line}");
+                total_output_chars += said.len();
+                yield Ok(AgentStreamEvent::Text { content: said });
             }
             // `attempt` already counts attempts beyond the first (0 on an ordinary turn).
             turn_stats.reengagements = attempt as u32;

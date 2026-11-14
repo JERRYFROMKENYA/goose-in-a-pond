@@ -25,6 +25,8 @@ vi.mock("../../api/PondApiClient", () => ({
   api: { markNotificationsRead: (ids: string[]) => markNotificationsRead(ids) },
 }));
 
+vi.mock("../../components/ReliabilityCard", () => ({ ReliabilityCard: () => null }));
+
 import { NotificationsView } from "./Notifications";
 
 function notice(over: Partial<HouseholdNotice> = {}): HouseholdNotice {

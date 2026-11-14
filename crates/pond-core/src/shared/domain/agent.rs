@@ -1,3 +1,4 @@
+use crate::user_data::domain::message_note::Receipt;
 use crate::user_data::domain::profile::ProfileScope;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -127,6 +128,9 @@ pub enum AgentStreamEvent {
         /// keeps the result whole. Set from the tool's transient marker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         keep: Option<String>,
+        /// What a tool asked to set something for later really did, from its outcome marker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<Receipt>,
     },
     Text {
         content: String,

@@ -1,5 +1,6 @@
 pub mod extension_env;
 pub mod marketplace;
+pub mod notice_follow_up;
 pub mod page_addresses;
 pub mod source_ledger;
 pub mod system_notices;

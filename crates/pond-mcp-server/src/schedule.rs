@@ -1,9 +1,11 @@
 //! Schedule MCP server: repeating tasks, one-shot timers and world clock. Sensor rules live in
 //! `giap-sensors`; `sensor_rule_summary` stays here because `list_schedules` renders them too.
 
+use crate::format::with_receipt;
 use pond_core::shared::domain::when_repeats::{
     cron_in_words, looks_like_cron, repeat_from_words, six_field_cron, RepeatUnclear,
 };
+use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::schedule::{
     routine_summary, Schedule, SensorTriggerSpec, TaskKind, TriggerSourceKind, CRON_ONCE,
 };
@@ -201,6 +203,10 @@ fn status_label(schedule: &Schedule) -> &'static str {
         "active"
     }
 }
+
+/// Said to the person when a save failed for a reason that is the pond's, not theirs.
+const COULD_NOT_SAVE: &str = "The Pond could not save it. Ask again in a moment.";
+const HOW_OFTEN_UNCLEAR: &str = "I could not tell how often it should run.";
 
 fn said(text: impl Into<String>) -> Result<CallToolResult, ErrorData> {
     Ok(CallToolResult::success(vec![ContentBlock::text(
@@ -472,13 +478,20 @@ a time of day, a date, or to remind the person of a task, use add_reminder.")]
                     when: Some(raw.trim().to_string()),
                     ..Default::default()
                 };
-                return said(crate::todo_tools::add(&ctx.meta, reminder).await);
+                return Ok(crate::todo_tools::add(&ctx.meta, reminder)
+                    .await
+                    .into_result());
             }
-            return said(
+            return Ok(with_receipt(
                 "No timer was set. A timer needs a length of time as `duration`: \"10 \
                  minutes\", \"1h30m\", \"90 seconds\". For a time of day or a date, call \
                  add_reminder with `when` instead.",
-            );
+                Receipt::not_set(
+                    "timer",
+                    about.unwrap_or(raw.trim()),
+                    "I could not tell how long the timer should run.",
+                ),
+            ));
         };
 
         let fire_at = chrono::Utc::now() + delta;
@@ -514,13 +527,17 @@ a time of day, a date, or to remind the person of a task, use add_reminder.")]
         };
 
         match self.scheduler.create_task(req).await {
-            Ok(_) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "Timer set: \"{label}\" [{id}] — fires once at {}.",
-                fire_at.format("%H:%M:%S UTC")
-            ))])),
-            Err(e) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "Could not set the timer: {e}."
-            ))])),
+            Ok(_) => Ok(with_receipt(
+                format!(
+                    "Timer set: \"{label}\" [{id}] — fires once at {}.",
+                    fire_at.format("%H:%M:%S UTC")
+                ),
+                Receipt::set("timer", label.clone(), Some(id.clone())),
+            )),
+            Err(e) => Ok(with_receipt(
+                format!("Could not set the timer: {e}."),
+                Receipt::not_set("timer", label.clone(), COULD_NOT_SAVE),
+            )),
         }
     }
 
@@ -548,13 +565,24 @@ schedule, pass its name as `id` with only the fields that change.")]
                 .map(|c| c.trim().to_string())
                 .filter(|c| !c.is_empty())
         });
+        // What was asked for, for the receipt of a schedule that could not be set.
+        let asked = given(&p.name)
+            .or_else(|| given(&p.prompt))
+            .unwrap_or_else(|| p.id.trim().to_string());
         let zone = match given(&p.timezone) {
             Some(place) => match zone_from_place(&place) {
                 Some(tz) => Some(tz.name().to_string()),
                 None => {
-                    return said(format!(
-                        "Nothing was changed: \"{place}\" is not a place or time zone the Pond \
-                         knows. Name a city, or leave `timezone` out for their own time."
+                    return Ok(with_receipt(
+                        format!(
+                            "Nothing was changed: \"{place}\" is not a place or time zone the \
+                             Pond knows. Name a city, or leave `timezone` out for their own time."
+                        ),
+                        Receipt::not_set(
+                            "schedule",
+                            asked,
+                            format!("\"{place}\" is not a place or time zone I know."),
+                        ),
                     ))
                 }
             },
@@ -582,7 +610,10 @@ schedule, pass its name as `id` with only the fields that change.")]
             let (cron, words) = match repeat {
                 Ok(found) => found,
                 Err(unclear) => {
-                    return said(format!("Nothing was scheduled. {}", unclear.advice()));
+                    return Ok(with_receipt(
+                        format!("Nothing was scheduled. {}", unclear.advice()),
+                        Receipt::not_set("schedule", asked, HOW_OFTEN_UNCLEAR),
+                    ));
                 }
             };
 
@@ -590,9 +621,14 @@ schedule, pass its name as `id` with only the fields that change.")]
                 extract_prompt_from_message(&user_msg.to_lowercase(), &user_msg)
             });
             if prompt.trim().is_empty() {
-                return said(
+                return Ok(with_receipt(
                     "Nothing was scheduled. Send `prompt`: what Goose should do each time.",
-                );
+                    Receipt::not_set(
+                        "schedule",
+                        asked,
+                        "I could not tell what it should do each time.",
+                    ),
+                ));
             }
             let label = given(&p.name).unwrap_or_else(|| clipped(&prompt, 40));
 
@@ -609,18 +645,33 @@ schedule, pass its name as `id` with only the fields that change.")]
                 },
             };
             return match self.scheduler.create_task(req).await {
-                Ok(schedule) => said(format!(
-                    "Scheduled \"{}\": {words}, {} time. Each time Goose is asked: \"{prompt}\" \
-                     [id {}]",
-                    schedule.label, schedule.timezone, schedule.id,
+                Ok(schedule) => Ok(with_receipt(
+                    format!(
+                        "Scheduled \"{}\": {words}, {} time. Each time Goose is asked: \
+                         \"{prompt}\" [id {}]",
+                        schedule.label, schedule.timezone, schedule.id,
+                    ),
+                    Receipt::set(
+                        "schedule",
+                        format!("{}: {words}", schedule.label),
+                        Some(schedule.id.clone()),
+                    ),
                 )),
-                Err(e) => said(format!("Nothing was scheduled: {e}")),
+                Err(e) => Ok(with_receipt(
+                    format!("Nothing was scheduled: {e}"),
+                    Receipt::not_set("schedule", asked, COULD_NOT_SAVE),
+                )),
             };
         }
 
         let existing = match self.find(&p.id).await {
             Ok(schedule) => schedule,
-            Err(why) => return said(format!("Nothing was changed. {why}")),
+            Err(why) => {
+                return Ok(with_receipt(
+                    format!("Nothing was changed. {why}"),
+                    Receipt::not_set("schedule", asked, "I could not find that schedule."),
+                ))
+            }
         };
         let cron = match when.as_deref() {
             Some(w) => {
@@ -631,7 +682,10 @@ schedule, pass its name as `id` with only the fields that change.")]
                 match repeat_said(w, today) {
                     Ok((cron, _)) => Some(cron),
                     Err(unclear) => {
-                        return said(format!("Nothing was changed. {}", unclear.advice()));
+                        return Ok(with_receipt(
+                            format!("Nothing was changed. {}", unclear.advice()),
+                            Receipt::not_set("schedule", asked, HOW_OFTEN_UNCLEAR),
+                        ));
                     }
                 }
             }
@@ -654,17 +708,27 @@ schedule, pass its name as `id` with only the fields that change.")]
                     TaskKind::SensorTrigger(spec) => sensor_rule_summary(spec),
                     TaskKind::Routine { actions } => routine_summary(actions),
                 };
-                said(format!(
-                    "Changed \"{}\": {}, {} time ({does}) [id {}]",
-                    schedule.label,
-                    when_in_words(&schedule.cron),
-                    schedule.timezone,
-                    schedule.id,
+                Ok(with_receipt(
+                    format!(
+                        "Changed \"{}\": {}, {} time ({does}) [id {}]",
+                        schedule.label,
+                        when_in_words(&schedule.cron),
+                        schedule.timezone,
+                        schedule.id,
+                    ),
+                    Receipt::set(
+                        "schedule",
+                        format!("{}: {}", schedule.label, when_in_words(&schedule.cron)),
+                        Some(schedule.id.clone()),
+                    ),
                 ))
             }
-            Err(e) => said(format!(
-                "Nothing was changed: \"{}\" could not be updated: {e}",
-                existing.label
+            Err(e) => Ok(with_receipt(
+                format!(
+                    "Nothing was changed: \"{}\" could not be updated: {e}",
+                    existing.label
+                ),
+                Receipt::not_set("schedule", existing.label.clone(), COULD_NOT_SAVE),
             )),
         }
     }

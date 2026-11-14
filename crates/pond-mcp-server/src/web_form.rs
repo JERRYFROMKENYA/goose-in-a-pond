@@ -214,6 +214,7 @@ fn confirm_notice(submission: &FormSubmission) -> Notification {
         timestamp: Utc::now().to_rfc3339(),
         data: Some(serde_json::json!({
             "action": "form_confirm",
+            "quiet_pass": true,
             "id": submission.id,
             "site": site,
             "label": "Review",

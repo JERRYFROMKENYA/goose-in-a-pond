@@ -186,6 +186,11 @@ export interface Settings {
   // Scheduling tuning
   schedule_result_notify?: boolean;
   system_notices_enabled?: boolean;
+  lone_voice_sets_reminders?: boolean;
+  unseen_phone_remove_days?: number;
+  unseen_phone_skip_days?: number;
+  speak_unfetched_reminders?: boolean;
+  notices_wait_in_quiet_hours?: boolean;
   schedule_max_concurrent?: number;
   schedule_max_runs_per_task?: number;
 
@@ -1459,6 +1464,8 @@ export interface ChatEvent {
   };
   /** On "tool_result": shown for this turn only; history keeps a stub, so the card is never stored. */
   transient?: boolean;
+  /** On "tool_result": what this tool call set up, or failed to. The only live source of receipts. */
+  receipt?: NoteReceipt;
   /** Turn budget that was exhausted — present on "turn_limit_reached" events. */
   max_turns?: number;
   /** On "subagent_progress": the run; group tree nodes by it, not `role` (a role can repeat). */
@@ -1599,6 +1606,87 @@ export interface SessionSummary {
   total_prompt_tokens?: number;
   total_completion_tokens?: number;
   model_name?: string;
+  /** Where the conversation started. Absent on rows older than the field. */
+  surface?: SessionSurface;
+}
+
+export type SessionSurface = "phone" | "desktop" | "cli" | "pond" | "room" | "schedule" | "goose";
+
+export type NoteFromKind = "schedule" | "reminder" | "task" | "lookup" | "watch" | "heartbeat" | "suggestion";
+
+export type ReceiptKind = "reminder" | "todo" | "timer" | "schedule" | "watch" | "task" | "standing";
+
+/** What a tool call set up. Stored with the reply, never inferred from its words. */
+export interface NoteReceipt {
+  kind: ReceiptKind;
+  outcome: "set" | "not_set";
+  what: string;
+  id?: string;
+  /** Why it was not set; present on `not_set`. */
+  reason?: string;
+}
+
+export type SuggestionState = "open" | "done" | "dismissed";
+
+export interface NoteSuggestion {
+  noticed: string;
+  action: string;
+  prompt: string;
+  state: SuggestionState;
+  suggestion_id?: string;
+}
+
+/** A quiet annotation the pond stored with a message. */
+export interface MessageNote {
+  from?: { kind: NoteFromKind; label: string; ref_id?: string };
+  receipts?: NoteReceipt[];
+  suggestion?: NoteSuggestion;
+}
+
+export interface OfferAnswer {
+  state: SuggestionState;
+  prompt?: string;
+}
+
+// ── Pairing lock ──────────────────────────────────────────────
+export interface PairingLock {
+  locked: boolean;
+  /** False when `locked` is on but nothing holds a phone: the main member has no phone and no PIN. */
+  enforced: boolean;
+  owner_profile_id: string | null;
+  has_recovery_pin: boolean;
+  owner_has_a_phone: boolean;
+  min_pin_digits: number;
+  /** True only for a caller who may change the lock and answer requests. */
+  can_change: boolean;
+}
+
+export interface PairingRequest {
+  id: string;
+  device_name: string;
+  client_type: string;
+  created_at: string;
+  expires_at: string;
+}
+
+// ── Reliability (My Pond) ─────────────────────────────────────
+export interface ReliabilityReport {
+  days: number;
+  notices: {
+    queued: number;
+    woken: number;
+    fetched: number;
+    fetched_within_a_minute: number;
+    fetched_after_an_hour: number;
+    shown: number;
+    opened: number;
+    spoken: number;
+  };
+  turns: { asked: number; answered: number };
+  phones: { paired: number; test: number; unseen: number; with_push_token: number };
+  stops: number;
+  android_push_key: boolean;
+  apple_push_key: boolean;
 }
 
 export interface UsageSummary {
@@ -1642,6 +1730,8 @@ export interface SessionMessage {
   transient?: boolean;
   /** Training-feedback vote: true keeps it as training data, false excludes it, null = no vote. */
   liked?: boolean | null;
+  /** Where the message came from, what it set up, or an offer it makes. */
+  note?: MessageNote;
 }
 
 // ── HuggingFace / Model Download ──────────────────────────────

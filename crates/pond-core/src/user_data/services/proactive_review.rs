@@ -217,6 +217,39 @@ pub const PROPOSAL_TTL: Duration = Duration::hours(12);
 /// Minimum impulse confidence; the wire field defaults to `0.0`, so omitting it is refused.
 pub const MIN_PROPOSAL_CONFIDENCE: f32 = 0.5;
 
+/// How sure Goose must say it is before a suggestion also sends a notice. Below this it waits
+/// in the thread to be read: Goose decides which of its suggestions are worth a buzz.
+pub const NOTICE_CONFIDENCE: f32 = 0.8;
+
+/// A suggestion as it sits in the member's thread: what Goose noticed, the offer as a button,
+/// and what is sent as their turn when they take it.
+pub fn thread_offer(proposal: &Proposal) -> crate::user_data::domain::message_note::MessageNote {
+    use crate::user_data::domain::message_note::{
+        MessageNote, OfferState, SourceKind, SuggestionOffer,
+    };
+    let asked = proposal.summary();
+    let prompt = match proposal.proposed_action() {
+        TaskKind::AgentPrompt { prompt } if !prompt.trim().is_empty() => prompt.clone(),
+        _ => asked.clone(),
+    };
+    let mut note = MessageNote::from_source(
+        SourceKind::Suggestion,
+        "Suggestion",
+        Some(proposal.id().to_string()),
+    );
+    note.suggestion = Some(SuggestionOffer {
+        noticed: proposal.rationale().trim().to_string(),
+        action: OFFER_BUTTON.to_string(),
+        prompt,
+        state: OfferState::Open,
+        suggestion_id: Some(proposal.id().to_string()),
+    });
+    note
+}
+
+/// The offer's button. The message above it says what would be done.
+const OFFER_BUTTON: &str = "Do it";
+
 /// Everything [`should_review`] needs; private fields so no caller builds a partial one.
 #[derive(Debug, Clone, Copy)]
 pub struct ReviewInputs {
@@ -711,6 +744,8 @@ pub enum ImpulseRefused {
         index: usize,
         suppression: Suppression,
     },
+    /// About the member being seen themselves: they know they came home.
+    OwnPresence { index: usize },
     /// Already proposed in this same answer.
     RepeatedInThisRun { index: usize },
     /// The run cap or the day's remaining allowance is spent.
@@ -982,6 +1017,12 @@ pub fn interpret_heartbeat(
                 continue;
             }
         };
+        // The camera recognising the member is not news to that member.
+        let own_face = format!("face:{}", audience.profile_id());
+        if proposal.trigger().signal() == Some(own_face.as_str()) {
+            refusals.push(ImpulseRefused::OwnPresence { index });
+            continue;
+        }
         let shape = ProposalShape::of(&proposal);
         if let Some(suppression) = ledger.suppression_of(&shape) {
             refusals.push(ImpulseRefused::Suppressed { index, suppression });
@@ -2003,6 +2044,29 @@ mod tests {
     }
 
     #[test]
+    fn a_member_is_not_asked_about_being_seen_themselves() {
+        let me = audience();
+        let body = format!(
+            r#"[{{"trigger_kind":"camera","signal":"face:{}","rationale":"They were seen arriving","suggestion":"Log when they got home","confidence":0.9}}]"#,
+            me.profile_id()
+        );
+        let out = interpret_answer(&answer(&body), &me, Utc::now(), &FeedbackLedger::empty(), 0);
+        assert!(out.proposals.is_empty(), "{:?}", out.proposals);
+        assert!(
+            matches!(
+                out.refusals.as_slice(),
+                [ImpulseRefused::OwnPresence { index: 0 }]
+            ),
+            "{:?}",
+            out.refusals
+        );
+
+        let other = r#"[{"trigger_kind":"camera","signal":"face:somebody-else","rationale":"A visitor was seen","suggestion":"Note who visited today","confidence":0.9}]"#;
+        let out = interpret_answer(&answer(other), &me, Utc::now(), &FeedbackLedger::empty(), 0);
+        assert_eq!(out.proposals.len(), 1, "{:?}", out.refusals);
+    }
+
+    #[test]
     fn an_impulse_with_no_rationale_never_becomes_a_proposal() {
         let body =
             r#"[{"trigger_kind":"camera","rationale":"  ","suggestion":"ask","confidence":0.9}]"#;
@@ -2762,6 +2826,8 @@ mod tests {
             total_prompt_tokens: 0,
             total_completion_tokens: 0,
             model_name: None,
+            surface: None,
+            surface_device_id: None,
             created_at: updated_at,
             updated_at,
         }

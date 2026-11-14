@@ -17,6 +17,7 @@ import type {
   NotificationCategory,
   NotificationGroup,
 } from "../data/notifications";
+import { ReliabilityCard } from "../../components/ReliabilityCard";
 import { markdownToPlainText } from "../../lib/markdownBlocks";
 import "./notifications.css";
 
@@ -267,6 +268,8 @@ export function NotificationsView({ go }: NotificationsViewProps) {
           ))}
         </div>
       ))}
+
+      <ReliabilityCard />
     </div>
   );
 }

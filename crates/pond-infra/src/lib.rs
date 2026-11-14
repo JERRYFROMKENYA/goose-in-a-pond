@@ -1,3 +1,4 @@
+pub mod apns_push_relay;
 pub mod broadcast_notification_sender;
 pub mod db;
 pub mod fastembed_embedding;
@@ -15,6 +16,7 @@ pub mod onboarding;
 pub mod pairing_cpace;
 pub mod pruning;
 pub(crate) mod push_token_log;
+pub mod reliability;
 pub mod rule_redactor;
 pub mod secret_crypto;
 pub mod secret_migration;

@@ -16,7 +16,8 @@ use crate::shared::domain::agent::{
 use crate::shared::services::print_output::PrintOutput;
 use crate::shared::services::stdin_input::StdinInput;
 use crate::shared::services::voice_control::{StopReason, VoiceControl};
-use crate::user_data::domain::session::SessionMessage;
+use crate::user_data::domain::message_note::{MessageNote, Receipt};
+use crate::user_data::domain::session::{SessionMessage, SessionSurface};
 use crate::user_data::ports::session_storage::SessionStorage;
 use anyhow::Result;
 use futures::StreamExt as _;
@@ -199,6 +200,19 @@ pub(crate) fn quiet_hours_cover(start: &str, end: &str, now: LocalTimeOfDay) -> 
     } else {
         now >= start || now < end
     })
+}
+
+/// Whether the household's quiet hours cover `at`, read in its own time zone. `None` when a
+/// bound is unreadable: speech treats that as quiet, a held notice as not.
+pub fn household_quiet_at(
+    settings: &crate::user_data::domain::settings::Settings,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Option<bool> {
+    quiet_hours_cover(
+        &settings.quiet_hours_start,
+        &settings.quiet_hours_end,
+        LocalTimeOfDay::in_zone(&settings.timezone, at),
+    )
 }
 
 /// Whether `category` is in the comma-separated `enabled` list; any bad entry means less speech.
@@ -391,6 +405,10 @@ pub struct ChatService {
     /// The session row is made at the first turn, so a loop nobody talks to leaves none.
     session_on_first_turn: bool,
     session_made: Arc<std::sync::atomic::AtomicBool>,
+    /// Where a session this service makes was started.
+    surface: Option<SessionSurface>,
+    /// What this turn's tools set or failed to set, kept with the reply when it is stored.
+    turn_receipts: Arc<std::sync::Mutex<Vec<Receipt>>>,
     /// Voice Match names the speaker: their context, and their own session.
     voice_identity: Option<SpeakerContext>,
     /// Who woke the loop for the turn under way; `None` when nobody was recognised.
@@ -528,6 +546,8 @@ impl ChatService {
             spoken_observer: None,
             session_on_first_turn: false,
             session_made: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            surface: None,
+            turn_receipts: Arc::new(std::sync::Mutex::new(Vec::new())),
             voice_identity: None,
             waker: Arc::new(std::sync::Mutex::new(None)),
             unrecognised_scope: None,
@@ -872,6 +892,30 @@ impl ChatService {
         self
     }
 
+    /// Hands over what the turn's tools set or failed to set, for the reply about to be stored.
+    pub fn note_turn_receipts(&self, receipts: Vec<Receipt>) {
+        self.turn_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(receipts);
+    }
+
+    /// Takes the turn's receipts as the note for its reply; nothing is left for the next turn.
+    fn take_turn_note(&self) -> MessageNote {
+        MessageNote {
+            receipts: std::mem::take(
+                &mut *self.turn_receipts.lock().unwrap_or_else(|e| e.into_inner()),
+            ),
+            ..MessageNote::default()
+        }
+    }
+
+    /// Names where a session made on the first turn was started.
+    pub fn with_surface(mut self, surface: SessionSurface) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
     /// Makes the session row the first time a turn needs it; a failure is left to the write.
     async fn ensure_session(&self) {
         use std::sync::atomic::Ordering;
@@ -881,7 +925,18 @@ impl ChatService {
         let made = match self.session_storage.get_session(&self.session_id()).await {
             Ok(_) => true,
             Err(_) => match self.session_storage.create_session(self.session_id()).await {
-                Ok(_) => true,
+                Ok(_) => {
+                    if let Some(surface) = self.surface {
+                        let marked = self
+                            .session_storage
+                            .mark_surface(&self.session_id(), surface, None)
+                            .await;
+                        if let Err(e) = marked {
+                            tracing::warn!(error = %e, "could not record where a session began");
+                        }
+                    }
+                    true
+                }
                 Err(e) => {
                     tracing::warn!(
                         session_id = %self.session_id(),
@@ -1171,7 +1226,8 @@ impl ChatService {
             self.session_id(),
             ChatMessage::assistant_with_tool_calls(assistant_text, tool_calls),
         )
-        .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c));
+        .with_token_counts(usage.map(|(p, _)| p), usage.map(|(_, c)| c))
+        .with_note(self.take_turn_note());
         self.session_storage
             .add_message(self.session_id(), sm)
             .await?;
@@ -1514,8 +1570,13 @@ impl ChatService {
                     return Err(anyhow::anyhow!("Agent stream error: {}", content));
                 }
                 AgentStreamEvent::ToolResult {
-                    id, tool, content, ..
+                    id,
+                    tool,
+                    content,
+                    outcome,
+                    ..
                 } => {
+                    self.note_turn_receipts(outcome.into_iter().collect());
                     // Not spoken; truncated so a huge payload cannot bloat one NDJSON line.
                     let content = truncate_tool_result(content);
                     self.emit_event(WorkflowEvent::ToolResult { tool, id, content });
@@ -1742,7 +1803,8 @@ impl ChatService {
                     usage.map(|u| u.completion_tokens),
                 )
                 // `persist_assistant_turn`'s tuple can't carry this: its rows stay NULL, not zero.
-                .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens));
+                .with_reasoning_tokens(usage.and_then(|u| u.reasoning_tokens))
+                .with_note(self.take_turn_note());
         self.session_storage
             .add_message(self.session_id(), session_msg)
             .await?;

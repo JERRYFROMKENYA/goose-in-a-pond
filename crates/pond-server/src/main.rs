@@ -203,6 +203,16 @@ enum Commands {
     /// Show system status
     Status,
 
+    /// How dependably notices arrived and messages were answered
+    Reliability {
+        /// Days to look back over
+        #[arg(long, default_value_t = 7)]
+        days: u32,
+        /// Print the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Run interactive onboarding wizard
     Onboard {
         /// Reset and restart onboarding from scratch
@@ -749,6 +759,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             .await
         }
         Some(Commands::Status) => run_status().await,
+        Some(Commands::Reliability { days, json }) => run_reliability(days, json).await,
         Some(Commands::Onboard { reset }) => {
             if let Err(err) = run_onboard(reset).await {
                 eprintln!("Error: {:?}", err);
@@ -1717,6 +1728,11 @@ async fn run_server(
     let profile_repo: Arc<
         dyn pond_core::user_data::ports::profile::ProfileRepository + Send + Sync,
     > = Arc::new(SqliteProfileRepository::new(db.system.clone()));
+    // Where the pond keeps what it did by itself, one conversation per member.
+    pond_core::shared::services::goose_thread::install(Arc::new(
+        pond_core::shared::services::goose_thread::GooseThread::new(session_storage.clone())
+            .with_members(profile_repo.clone()),
+    ));
     let device_registry: Arc<
         dyn pond_core::user_data::ports::device_registry::DeviceRegistry + Send + Sync,
     > = Arc::new(SqliteDeviceRegistry::new(db.system.clone()));
@@ -2816,6 +2832,11 @@ async fn run_server(
                         ])
                     }
                 };
+                // In a household of one, a mention nobody was named for is offered to that member.
+                let lone_reminder_member = settings
+                    .lone_voice_sets_reminders
+                    .then(|| roster.sole_member().map(str::to_string))
+                    .flatten();
                 let config = BatchExtractionConfig::from_settings(&settings).with_household(roster);
 
                 let db_activity = newest_session_activity(extraction_storage.as_ref()).await;
@@ -2915,11 +2936,12 @@ async fn run_server(
                 status.write().await.record(config.mode, &report);
 
                 // After the pass, not inside it, so a proposal failure never costs a stored date.
-                match todo_offers::offer_pending_reminders(
+                match todo_offers::offer_pending_reminders_for(
                     promotion_reminders.as_ref(),
                     promotion_proposals.as_ref(),
                     REMINDER_PROMOTION_LIMIT,
                     chrono::Utc::now(),
+                    lone_reminder_member.as_deref(),
                 )
                 .await
                 {
@@ -3730,15 +3752,17 @@ async fn run_server(
         pond_infra::broadcast_notification_sender::BroadcastNotificationSender::new(
             notification_tx.clone(),
             notification_queue.clone(),
-            Some(push_relay),
+            Some(push_relay.clone()),
         )
         .with_device_attribution(device_attribution.clone())
         .with_household_recipients(Arc::new(
             pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
                 db.system.clone(),
-            ),
+            )
+            .with_idle_limit(settings_repo.clone()),
         ))
-        .with_history(notification_history.clone()),
+        .with_history(notification_history.clone())
+        .with_quiet_hours(settings_repo.clone()),
     );
     let notification_sender: Arc<dyn pond_core::mcp::ports::notification::NotificationSender> =
         targeted_notification_sender.clone();
@@ -3777,6 +3801,25 @@ async fn run_server(
             ),
         )
     });
+    // A notice no phone came for is woken again, a due reminder said aloud, and what quiet hours
+    // held handed over when they end.
+    {
+        let mut follow_up = pond_core::mcp::services::notice_follow_up::NoticeFollowUp::new(
+            notification_queue.clone(),
+            notification_sender.clone(),
+            settings_repo.clone(),
+        )
+        .with_relay(push_relay.clone());
+        if let Some(voice) = tts.clone() {
+            follow_up = follow_up.with_speaker(Arc::new(
+                pond_server::notice_follow_up::AnnouncerSpeaker::new(
+                    pond_audio_out::Announcer::new(voice),
+                    settings_repo.clone(),
+                ),
+            ));
+        }
+        pond_server::notice_follow_up::spawn(follow_up);
+    }
     // Members' web watches: checked in code, their owners told on their own devices.
     let watch_repo: Arc<dyn pond_core::shared::ports::web_watch::WebWatchRepository> = Arc::new(
         pond_infra::sqlite_web_watch::SqliteWebWatchRepository::new(db.system.clone()),
@@ -4446,6 +4489,51 @@ async fn run_server(
     let handshake: Arc<dyn pond_core::security::ports::handshake::Handshake> = Arc::new(
         SqliteHandshakeAdapter::new(db.system.clone(), Some(pairing_pin.clone()))
             .with_setup_claims(setup_claims.clone()),
+    );
+    // A pond set up before the pairing lock gets its main member: the only member, else the
+    // one settings name. A pond with no members yet names one when it is set up.
+    match handshake.pairing_lock().await {
+        Ok(lock) if lock.owner_profile_id.is_none() => {
+            let members: Vec<String> = profile_repo
+                .list()
+                .await
+                .map(|members| members.into_iter().map(|m| m.id).collect())
+                .unwrap_or_default();
+            let named = settings_repo
+                .get()
+                .await
+                .ok()
+                .and_then(|s| s.primary_profile_id)
+                .filter(|id| members.contains(id));
+            let main = match members.as_slice() {
+                [only] => Some(only.clone()),
+                _ => named,
+            };
+            if let Some(main) = main {
+                if let Err(error) = handshake.set_pairing_owner(&main, false).await {
+                    tracing::warn!(%error, "the pond's main member could not be named");
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "the pairing lock could not be read"),
+    }
+    // A phone that stopped connecting is removed after the household's chosen number of days.
+    pond_server::phone_retirement::spawn(
+        pond_core::user_data::services::phone_retirement::PhoneRetirement::new(
+            Arc::new(
+                pond_infra::sqlite_notification_recipients::SqliteNotificationRecipients::new(
+                    db.system.clone(),
+                ),
+            ),
+            handshake.clone(),
+            device_registry.clone(),
+            Arc::new(pond_infra::sqlite_goose_activity::SqliteGooseActivity::new(
+                db.system.clone(),
+            )),
+            profile_repo.clone(),
+            settings_repo.clone(),
+        ),
     );
     let pairing_hostname = hostname::get()
         .map(|h| h.to_string_lossy().to_string())
@@ -5202,6 +5290,17 @@ async fn run_server(
             std::future::pending::<std::convert::Infallible>().await
         }
     };
+    pond_api::pairing_lock::spawn_request_watch(state.clone());
+    // A turn a stop cut off is answered again once the pond is up and its listeners serve.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let since = chrono::Utc::now() - chrono::Duration::minutes(60);
+            pond_api::routes::answer_cut_turns(state, since).await;
+        });
+    }
+
     let serve_result = tokio::select! {
         never = revocations => match never {},
         result = embedded_server => result,
@@ -5209,10 +5308,19 @@ async fn run_server(
         result = https_server => result.map_err(anyhow::Error::from),
         result = pond_api::insecure_dev::serve(insecure_listener, listeners.insecure) => result,
         result = renewal => result,
-        _ = shutdown_signal() => {
-            tracing::info!("shutdown signal received -- stopping both listeners");
-            Ok(())
-        }
+        // The listeners keep serving inside this arm, so a turn in flight can finish and be
+        // stored before they stop.
+        _ = async {
+            shutdown_signal().await;
+            let waited = wait_for_turns_in_flight(&state, TURN_GRACE).await;
+            tracing::info!(
+                target: "giap::trace",
+                kind = "shutdown",
+                waited_ms = waited.waited.as_millis() as u64,
+                turns_left = waited.left,
+                "shutdown signal received -- stopping both listeners"
+            );
+        } => Ok(()),
     };
     tls_handle.shutdown();
     // Goodbyes now, so phones drop the pond at once rather than when its records expire.
@@ -5238,6 +5346,47 @@ async fn run_server(
 }
 
 /// Resolves on Ctrl-C, or SIGTERM on Unix (what `systemctl stop` and `docker stop` send).
+/// How long a stop waits for turns in flight. Shorter than systemd's default stop timeout, so
+/// the wait ends before the service manager kills the process.
+const TURN_GRACE: std::time::Duration = std::time::Duration::from_secs(45);
+
+struct StopWait {
+    waited: std::time::Duration,
+    /// Turns still running when the wait gave up.
+    left: usize,
+}
+
+/// Tells connected screens the pond is stopping, then waits for the turns in flight, at most
+/// `grace`. A turn that outlasts it is cut, and answered again when the pond is back.
+async fn wait_for_turns_in_flight(
+    state: &Arc<pond_api::AppState>,
+    grace: std::time::Duration,
+) -> StopWait {
+    let started = std::time::Instant::now();
+    if let Some(sender) = state.notification_sender.clone() {
+        let notice = pond_core::mcp::ports::notification::Notification {
+            id: uuid::Uuid::new_v4().to_string(),
+            target: "broadcast".to_string(),
+            category: "info".to_string(),
+            title: "The Pond is restarting".to_string(),
+            body: "It will be back in a few minutes.".to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            data: Some(serde_json::json!({"kind": "pond_restarting"})),
+        };
+        let _ = sender.publish_live(notice).await;
+    }
+    loop {
+        let left = state.runs.registry.in_flight();
+        if left == 0 || started.elapsed() >= grace {
+            return StopWait {
+                waited: started.elapsed(),
+                left,
+            };
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
@@ -5372,50 +5521,89 @@ fn write_ndjson_line(ev: &pond_core::shared::domain::agent::WorkflowEvent) {
     }
 }
 
-/// Background wake-ups for phones: FCM v1 when a service-account key exists (data-only pings,
-/// no content via Google), else the logging stub.
+/// Background wake-ups for phones: FCM for Android and APNs for iPhones, each when its key
+/// exists. Neither push carries a notice's words. With no usable key, the logging stub.
 fn push_relay(
     data_dir: &std::path::Path,
     push_tokens: Arc<dyn pond_core::user_data::ports::push_token::PushTokenRepository>,
 ) -> Arc<dyn pond_core::mcp::ports::notification_relay::NotificationRelay> {
+    let mut senders: Vec<Arc<dyn pond_core::mcp::ports::notification_relay::NotificationRelay>> =
+        Vec::new();
+
     let fcm_key_path = std::env::var("POND_FCM_KEY_PATH")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| data_dir.join("secrets").join("fcm-service-account.json"));
-    // Only the key's path is logged, never its contents.
+        .unwrap_or_else(|_| data_dir.join(pond_infra::reliability::ANDROID_PUSH_KEY));
+    // Only a key's path is logged, never its contents.
     if !fcm_key_path.exists() {
         tracing::warn!(
             kind = "push_relay_stubbed",
             reason = "no_key",
             expected_path = %fcm_key_path.display(),
-            "no FCM service-account key; asleep phones are not woken for notices \
-             (docs/api.md, \"Setting up push\")"
+            "no FCM service-account key; asleep Android phones are not woken for notices \
+             (docs/architecture/notifications.md, \"Setting up push\")"
         );
-        return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
-    }
-    match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
-        &fcm_key_path,
-        push_tokens.clone(),
-    ) {
-        Ok(relay) => {
-            tracing::info!(
-                kind = "push_relay_fcm",
-                path = %fcm_key_path.display(),
-                "background push active: FCM wakes paired phones"
-            );
-            Arc::new(relay)
-        }
-        Err(e) => {
+    } else {
+        match pond_infra::fcm_push_relay::FcmPushRelay::from_key_file(
+            &fcm_key_path,
+            push_tokens.clone(),
+        ) {
+            Ok(relay) => {
+                tracing::info!(
+                    kind = "push_relay_fcm",
+                    path = %fcm_key_path.display(),
+                    "background push active: FCM wakes paired Android phones"
+                );
+                senders.push(Arc::new(relay));
+            }
             // The reason names a field, a scheme or a host, never key material.
-            tracing::warn!(
+            Err(e) => tracing::warn!(
                 kind = "push_relay_stubbed",
                 reason = "key_unusable",
                 error = %format!("{e:#}"),
                 expected_path = %fcm_key_path.display(),
-                "FCM key unusable; background push falls back to the logging stub"
-            );
-            Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens))
+                "FCM key unusable; Android phones are not woken"
+            ),
         }
     }
+
+    let apns_key_path = std::env::var("POND_APNS_KEY_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.join(pond_infra::reliability::APPLE_PUSH_KEY));
+    if !apns_key_path.exists() {
+        tracing::warn!(
+            kind = "push_relay_stubbed",
+            reason = "no_apple_key",
+            expected_path = %apns_key_path.display(),
+            "no Apple push key; asleep iPhones are not woken for notices \
+             (docs/architecture/notifications.md, \"Setting up push\")"
+        );
+    } else {
+        match pond_infra::apns_push_relay::ApnsPushRelay::from_key_file(
+            &apns_key_path,
+            push_tokens.clone(),
+        ) {
+            Ok(relay) => {
+                tracing::info!(
+                    kind = "push_relay_apns",
+                    path = %apns_key_path.display(),
+                    "background push active: APNs wakes paired iPhones"
+                );
+                senders.push(Arc::new(relay));
+            }
+            Err(e) => tracing::warn!(
+                kind = "push_relay_stubbed",
+                reason = "apple_key_unusable",
+                error = %format!("{e:#}"),
+                expected_path = %apns_key_path.display(),
+                "Apple push key unusable; iPhones are not woken"
+            ),
+        }
+    }
+
+    if senders.is_empty() {
+        return Arc::new(pond_infra::stub_push_relay::StubPushRelay::new(push_tokens));
+    }
+    Arc::new(pond_infra::apns_push_relay::PushRelays::new(senders))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5930,6 +6118,14 @@ async fn run_chat(
             }
             other => return Err(other.into()),
         }
+    }
+    let surface = if voice_mode {
+        pond_core::user_data::domain::session::SessionSurface::Room
+    } else {
+        pond_core::user_data::domain::session::SessionSurface::Cli
+    };
+    if let Err(e) = storage.mark_surface(&session_id, surface, None).await {
+        tracing::debug!("could not record where this session began: {e}");
     }
 
     let warm_agent = agent.clone();
@@ -7683,6 +7879,16 @@ async fn run_proactive_reviewer(
                 "the heartbeat looked something into"
             );
             if let Some(answer) = answer {
+                pond_core::shared::services::goose_thread::post(
+                    Some(audience.profile_id()),
+                    answer,
+                    pond_core::user_data::domain::message_note::MessageNote::from_source(
+                        pond_core::user_data::domain::message_note::SourceKind::Lookup,
+                        text.to_string(),
+                        None,
+                    ),
+                )
+                .await;
                 did.push(
                     pond_core::shared::domain::goose_activity::GooseActivity::errand(
                         audience.profile_id(),
@@ -7724,18 +7930,37 @@ async fn run_proactive_reviewer(
                 tracing::warn!(error = %e, "proactive reviewer: could not persist a proposal");
                 continue;
             }
-            // Only the member's paired devices, never a broadcast.
-            let report = sender
-                .send_to_profile(
-                    audience.profile_id(),
-                    pond_server::system_notices::proposal_notification(proposal),
-                )
-                .await;
+            // Every suggestion goes to the member's thread, with what Goose noticed and the
+            // offer to do it.
+            let posted = pond_core::shared::services::goose_thread::post(
+                Some(audience.profile_id()),
+                &proposal.summary(),
+                review::thread_offer(proposal),
+            )
+            .await;
+            // Goose decides which ones are worth a notice: the sure ones. The rest wait there.
+            let tells = proposal.confidence() >= review::NOTICE_CONFIDENCE;
+            let mut queued = 0;
+            let mut failed = 0;
+            if tells {
+                let mut notice = pond_server::system_notices::proposal_notification(proposal);
+                if let (Some(posted), Some(serde_json::Value::Object(fields))) =
+                    (&posted, &mut notice.data)
+                {
+                    fields.insert("session_id".into(), serde_json::json!(posted.session_id));
+                }
+                // Only the member's paired devices, never a broadcast.
+                let report = sender.send_to_profile(audience.profile_id(), notice).await;
+                queued = report.queued.len();
+                failed = report.failed.len();
+            }
             tracing::info!(
                 proposal = %proposal.id(),
                 member = %audience.profile_id(),
-                queued = report.queued.len(),
-                failed = report.failed.len(),
+                in_thread = posted.is_some(),
+                tells,
+                queued,
+                failed,
                 "proposal made"
             );
             did.push(
@@ -7792,6 +8017,9 @@ fn install_long_task_deps(
     );
     pond_mcp_server::todo_tools::init_todo_deps(Arc::new(
         pond_infra::sqlite_todo::SqliteTodoRepository::new(pool.clone()),
+    ));
+    pond_mcp_server::todo_tools::init_heartbeat_docs(Arc::new(
+        SqlitePromptTemplateRepository::new(pool.clone()),
     ));
     pond_mcp_server::memory::init_memory_profiles(Arc::new(
         pond_infra::sqlite_profile::SqliteProfileRepository::new(pool.clone()),
@@ -8605,12 +8833,23 @@ async fn notify_long_task_owner(
     let Some(owner) = task.owner_profile_id() else {
         return;
     };
-    let report = sender
-        .send_to_profile(
-            owner,
-            pond_server::system_notices::long_task_notification(task, finished, body),
-        )
-        .await;
+    let mut notice =
+        pond_server::system_notices::long_task_notification(task, finished, body.clone());
+    // The answer is kept in the owner's thread, and the notice opens it there.
+    let posted = pond_core::shared::services::goose_thread::post(
+        Some(owner),
+        &body,
+        pond_core::user_data::domain::message_note::MessageNote::from_source(
+            pond_core::user_data::domain::message_note::SourceKind::Task,
+            notice.title.clone(),
+            Some(task.id().to_string()),
+        ),
+    )
+    .await;
+    if let (Some(posted), Some(serde_json::Value::Object(fields))) = (&posted, &mut notice.data) {
+        fields.insert("session_id".into(), serde_json::json!(posted.session_id));
+    }
+    let report = sender.send_to_profile(owner, notice).await;
     tracing::info!(
         kind = "long_task_notice_sent",
         task = %task.id(),
@@ -8841,6 +9080,36 @@ async fn tail_event_log(pool: sqlx::Pool<sqlx::Sqlite>) {
             cursor = id;
         }
     }
+}
+
+/// Prints the reliability report. Reads both databases read-only, so it is safe beside a
+/// serving pond and never migrates anything.
+async fn run_reliability(days: u32, json: bool) -> Result<()> {
+    let data_dir = default_data_dir();
+    let system = pond_infra::reliability::open_read_only(&data_dir.join("pond_system.db")).await?;
+    let logs = pond_infra::reliability::open_read_only(&data_dir.join("pond_logs.db")).await?;
+    let unseen_days = SqliteSettingsRepository::new(system.clone())
+        .get()
+        .await
+        .map(|s| s.unseen_phone_skip_days)
+        .unwrap_or(14);
+    let report = pond_infra::reliability::report(
+        &system,
+        &logs,
+        &data_dir,
+        days.max(1),
+        unseen_days,
+        chrono::Utc::now(),
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in report.lines() {
+            println!("  {line}");
+        }
+    }
+    Ok(())
 }
 
 async fn run_status() -> Result<()> {
@@ -11768,13 +12037,18 @@ async fn run_pairing(refresh: bool, member: Option<String>) -> Result<()> {
 
     // GET returns the current unconsumed code; POST mints a fresh one, for `member` if named.
     let resp = if let Some(member) = &member {
+        // Whoever runs this holds the pond itself, so the code needs no second yes.
         client
             .post(&base)
-            .json(&serde_json::json!({ "profile_id": member }))
+            .json(&serde_json::json!({ "profile_id": member, "approved": true }))
             .send()
             .await
     } else if refresh {
-        client.post(&base).send().await
+        client
+            .post(&base)
+            .json(&serde_json::json!({ "approved": true }))
+            .send()
+            .await
     } else {
         client.get(&base).send().await
     }

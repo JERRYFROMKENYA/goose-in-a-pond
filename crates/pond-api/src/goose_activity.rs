@@ -156,7 +156,10 @@ async fn undo(
                 .await
                 .map_err(server_error)?;
         }
-        ActivityKind::NoteClosed | ActivityKind::Suggestion | ActivityKind::Errand => {}
+        ActivityKind::NoteClosed
+        | ActivityKind::Suggestion
+        | ActivityKind::Errand
+        | ActivityKind::PhoneRemoved => {}
     }
     repo.mark_undone(&member, &id, chrono::Utc::now())
         .await

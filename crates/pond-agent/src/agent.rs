@@ -506,6 +506,7 @@ impl Agent for PondAgent {
                             content: result_text.clone(),
                             card: None,
                             keep: None,
+                            outcome: None,
                         }))
                         .await;
 
@@ -540,6 +541,7 @@ impl Agent for PondAgent {
                         completion_tokens: None,
                         reasoning_tokens: None,
                         liked: None,
+                        note: None,
                     };
                     if let Err(e) = storage_ref
                         .add_message(session_id_persist.clone(), sm)

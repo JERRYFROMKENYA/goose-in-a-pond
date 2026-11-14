@@ -42,7 +42,9 @@ use pond_core::user_data::domain::schedule::{
     SensorTriggerSpec, TaskKind,
 };
 use pond_core::user_data::domain::sensor::SensorReading;
-use pond_core::user_data::domain::session::{IdentificationSource, SessionIdentity};
+use pond_core::user_data::domain::session::{
+    IdentificationSource, SessionIdentity, SessionSurface,
+};
 use pond_core::user_data::domain::settings::Settings;
 use pond_core::user_data::ports::device_attribution::DeviceAttribution;
 use pond_core::user_data::ports::device_registry::RegisterDeviceRequest;
@@ -125,6 +127,15 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             "/handshake/spoken-code",
             post(crate::spoken_code::handshake_spoken_code),
         )
+        // A phone the pairing lock held, back for its request or letting itself in by PIN.
+        .route(
+            "/handshake/pairing-request/claim",
+            post(crate::pairing_lock::claim).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
+        .route(
+            "/handshake/pairing-request/recover",
+            post(crate::pairing_lock::recover).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/onboard", post(start_onboarding))
         .route("/onboard/complete", post(complete_onboarding))
         .route("/onboard/status", get(onboarding_status))
@@ -197,6 +208,7 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // The stream's fallback for a phone a push wake brought back: the caller's own queue only.
         .route("/notifications/pending", get(notifications_pending))
         .route("/notifications/{id}/ack", post(acknowledge_notification))
+        .route("/notifications/{id}/opened", post(notification_opened))
         // The household's notice history, scoped to the caller's device and with its read state.
         .route("/notifications/history", get(notifications_history))
         .route(
@@ -252,6 +264,10 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             patch(rename_session).delete(delete_session),
         )
         .route("/sessions/{session_id}/messages", get(get_session_messages))
+        .route(
+            "/sessions/{session_id}/messages/{message_id}/offer",
+            post(answer_offer),
+        )
         .route("/sessions/{session_id}/compact", post(compact_session))
         .route("/sessions/retitle", post(retitle_sessions))
         .route("/sessions/{session_id}/retitle", post(retitle_session))
@@ -625,12 +641,32 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/long-tasks/{id}/report", get(get_long_task_report))
         .route("/long-tasks/{id}/export", get(export_long_task))
         // My Pond: a member's device, unlocked with the admin card (`pond_admin.rs`).
+        // The pairing lock: read by any member, changed and answered by the main one.
+        .route(
+            "/pairing/lock",
+            get(crate::pairing_lock::lock_state).put(crate::pairing_lock::set_lock),
+        )
+        .route(
+            "/pairing/recovery-pin",
+            put(crate::pairing_lock::set_pin).delete(crate::pairing_lock::clear_pin),
+        )
+        .route("/pairing/owner", put(crate::pairing_lock::set_owner))
+        .route("/pairing/requests", get(crate::pairing_lock::requests))
+        .route(
+            "/pairing/requests/{id}/approve",
+            post(crate::pairing_lock::approve),
+        )
+        .route(
+            "/pairing/requests/{id}/decline",
+            post(crate::pairing_lock::decline),
+        )
         .route("/admin/status", get(crate::pond_admin::status))
         .route("/admin/unlock", post(crate::pond_admin::unlock))
         .route("/admin/lock", post(crate::pond_admin::lock))
         .route("/admin/enroll", post(crate::pond_admin::enroll))
         .route("/admin/key", delete(crate::pond_admin::forget_key))
         .route("/admin/overview", get(crate::pond_admin::overview))
+        .route("/admin/reliability", get(crate::pond_admin::reliability))
         .route(
             "/admin/files",
             get(crate::pond_admin::list_files).delete(crate::pond_admin::delete_file),
@@ -1011,6 +1047,7 @@ async fn emit_pairing_outcome(
     insecure_dev: bool,
     method: &'static str,
     returning: bool,
+    test: bool,
 ) {
     use pond_core::security::domain::event::{Event, EventCategory, PrivacySensitivity};
 
@@ -1055,12 +1092,24 @@ async fn emit_pairing_outcome(
         if paired && returning {
             event = event.attr("returning_device", true);
         }
+        if paired && test {
+            event = event.attr("test_device", true);
+        }
         if let Err(e) = event_log.append(event).await {
             tracing::warn!(error = %e, action, "failed to record pairing event");
         }
     }
 
     // After the event: the audit trail keeps every pairing, only the phone alert is spared.
+    if paired && test {
+        tracing::info!(
+            kind = "pairing_notice_skipped",
+            device = device_name.unwrap_or("unnamed"),
+            method,
+            "a test harness paired; nobody is told"
+        );
+        return;
+    }
     if paired && !announces_pairing(method, returning) {
         tracing::info!(
             kind = "pairing_notice_skipped",
@@ -1092,6 +1141,22 @@ async fn emit_pairing_outcome(
     {
         tracing::warn!(error = %e, action, "failed to push pairing notification");
     }
+}
+
+/// The household's notice for a phone that was let in after asking: the same "new device
+/// paired" a code pairing sends.
+pub(crate) async fn announce_paired_by_request(state: &AppState, device_name: &str) {
+    emit_pairing_outcome(
+        state,
+        true,
+        Some(device_name),
+        None,
+        false,
+        "request",
+        false,
+        false,
+    )
+    .await;
 }
 
 /// Whether an accepted pairing tells the household a device was paired.
@@ -1187,6 +1252,7 @@ async fn handshake_verify(
             insecure.is_some(),
             "loopback_hmac",
             false,
+            false,
         )
         .await;
         return Err(refusal);
@@ -1202,6 +1268,7 @@ async fn handshake_verify(
                 false,
                 "loopback_hmac",
                 false,
+                false,
             )
             .await;
             return Err(handshake_error("verify", e));
@@ -1215,6 +1282,7 @@ async fn handshake_verify(
         false,
         "loopback_hmac",
         resp.returning_device,
+        resp.test_device,
     )
     .await;
     Ok(Json(resp))
@@ -1252,6 +1320,7 @@ async fn handshake_pake_init(
                 Some(refusal.code()),
                 insecure.is_some(),
                 method,
+                false,
                 false,
             )
             .await;
@@ -1315,21 +1384,32 @@ async fn handshake_pake_verify(
                 insecure_dev,
                 method,
                 false,
+                false,
             )
             .await;
             return Err(handshake_error("pake_verify", e));
         }
     };
-    emit_pairing_outcome(
-        &state,
-        resp.accepted,
-        device_name.as_deref(),
-        resp.rejection_reason.as_deref(),
-        insecure_dev,
-        method,
-        resp.returning_device,
-    )
-    .await;
+    // Held by the pairing lock: not a failed attempt, and nobody was paired yet. The household
+    // hears of the request from `pairing_lock::spawn_request_watch`.
+    if resp.pairing_request.is_none() {
+        emit_pairing_outcome(
+            &state,
+            resp.accepted,
+            device_name.as_deref(),
+            resp.rejection_reason.as_deref(),
+            insecure_dev,
+            method,
+            resp.returning_device,
+            resp.test_device,
+        )
+        .await;
+    }
+    if resp.accepted && !resp.test_device && method == "cpace" {
+        if let Some(token) = resp.session_token.as_deref() {
+            name_main_member_from_phone(&state, token).await;
+        }
+    }
     let mut body = serde_json::to_value(&resp).map_err(|e| handshake_error("pake_verify", e))?;
     if let Some(reason) = resp.rejection_reason.as_deref().filter(|_| !resp.accepted) {
         body["error"] = json!(reason);
@@ -1476,6 +1556,14 @@ struct IssuePairingCodeRequest {
     /// Bind to nobody even when a member could be inferred (e.g. a guest's phone).
     #[serde(default)]
     unattributed: bool,
+    /// A test harness's code: the device that redeems it is not announced, gets no household
+    /// notices and is left out of the reliability report.
+    #[serde(default)]
+    test: bool,
+    /// Already accepted by whoever holds the host credential: its phone is let in without a
+    /// request while the pairing lock is on.
+    #[serde(default)]
+    approved: bool,
 }
 
 /// Issues a fresh single-use pairing code, optionally bound to a member. Loopback and the
@@ -1556,10 +1644,26 @@ async fn handshake_issue_pairing_code(
                 internal
             }
         })?;
+    if request.test {
+        state
+            .handshake
+            .mark_pairing_code_test(&pc.code)
+            .await
+            .map_err(|e| handshake_error("mark_pairing_code_test", e))?;
+    }
+    if request.approved {
+        state
+            .handshake
+            .mark_pairing_code_approved(&pc.code)
+            .await
+            .map_err(|e| handshake_error("mark_pairing_code_approved", e))?;
+    }
     Ok(Json(json!({
         "code": pc.code,
         "expires_at": pc.expires_at,
         "profile_id": pc.profile_id,
+        "test": request.test,
+        "approved": request.approved,
         "pairing": pairing_material(transport, embedded),
     })))
 }
@@ -1700,6 +1804,10 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
         Ok(current) => current,
         Err(e) => return failed(Some(&claimant), format!("{e:#}")),
     };
+    // Whoever set the pond up is its main member, until they hand the role on.
+    if let Some(theirs) = current.as_deref() {
+        name_main_member(state, theirs).await;
+    }
     let members: Vec<String> = match state.profile_repo.list().await {
         Ok(profiles) => profiles.into_iter().map(|p| p.id).collect(),
         Err(e) => return failed(Some(&claimant), format!("{e:#}")),
@@ -1722,6 +1830,34 @@ async fn attribute_claimant_to_owner(state: &Arc<AppState>, primary_profile_id: 
             "the device that claimed this pond now belongs to its owner"
         ),
         Err(e) => failed(Some(&claimant), format!("{e:#}")),
+    }
+    name_main_member(state, &owner).await;
+}
+
+/// A pond set up without the printed card has nobody in the seat until a member pairs a phone:
+/// the first member's phone names them, so the lock holds from then on.
+async fn name_main_member_from_phone(state: &Arc<AppState>, session_token: &str) {
+    let Ok(Some(caller)) = state.handshake.caller_for_token(session_token).await else {
+        return;
+    };
+    if let Ok(Some(member)) = device_attribution(state)
+        .device_profile(&caller.device_id)
+        .await
+    {
+        name_main_member(state, &member).await;
+    }
+}
+
+/// Fills the main member's seat if it is empty; never takes it from somebody.
+async fn name_main_member(state: &Arc<AppState>, profile_id: &str) {
+    match state.handshake.set_pairing_owner(profile_id, false).await {
+        Ok(true) => tracing::info!(
+            kind = "pairing_owner_named",
+            profile_id,
+            "the member who set this pond up is its main member"
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::debug!(%error, "the main member could not be named"),
     }
 }
 
@@ -1973,6 +2109,7 @@ async fn chat(
                     Json(json!({"error": format!("Failed to create session: {}", e)})),
                 )
             })?;
+        mark_session_surface(&state, &session_id, &device).await;
     }
 
     let model_role = "chat";
@@ -3125,6 +3262,8 @@ struct TurnAccumulator {
     full_text: String,
     /// One JSON row per tool result, as persisted.
     tool_results: Vec<String>,
+    /// What the turn's tools set or failed to set, kept with the reply.
+    receipts: Vec<pond_core::user_data::domain::message_note::Receipt>,
     /// Tool-call id -> arguments, kept from `ToolCall` because `ToolResult` doesn't repeat them.
     tool_call_inputs: std::collections::HashMap<String, String>,
     /// First visible token time; fallback TTFT for engines that report none.
@@ -3142,11 +3281,25 @@ impl TurnAccumulator {
             thought,
             full_text: String::new(),
             tool_results: Vec::new(),
+            receipts: Vec::new(),
             tool_call_inputs: std::collections::HashMap::new(),
             ttft: None,
             tool_call_start: None,
             last_tool_name: None,
             last_tool_latency_ms: None,
+        }
+    }
+
+    /// The reply with each failed set said in it. The agent adds the line itself; this puts it
+    /// back when a later step replaced the reply's text.
+    fn keep_not_set_lines(&mut self) {
+        for line in self.receipts.iter().filter_map(|r| r.not_set_line()) {
+            if !self.full_text.contains(&line) {
+                if !self.full_text.trim().is_empty() {
+                    self.full_text.push_str("\n\n");
+                }
+                self.full_text.push_str(&line);
+            }
         }
     }
 
@@ -3205,6 +3358,7 @@ impl TurnAccumulator {
                 content,
                 card,
                 keep,
+                outcome,
             } => {
                 if let Some(start) = self.tool_call_start.take() {
                     self.last_tool_latency_ms = Some(start.elapsed().as_millis() as u64);
@@ -3228,6 +3382,10 @@ impl TurnAccumulator {
                 // Shown during the turn; a client must not keep it, as history keeps only the stub.
                 if keep.is_some() {
                     frame["transient"] = json!(true);
+                }
+                if let Some(receipt) = outcome {
+                    frame["receipt"] = json!(receipt);
+                    self.receipts.push(receipt);
                 }
                 StreamStep::Frame(frame.to_string())
             }
@@ -3341,6 +3499,83 @@ fn spawn_run(
     attach_sse(state, permit, run, 0, AttachKind::Original)
 }
 
+/// Answers again the turns a stop cut off: a person's message stored with no reply after it.
+/// One at a time, each as an ordinary turn nobody is reading, so its reply is stored where the
+/// person finds it. Returns how many were answered.
+pub async fn answer_cut_turns(state: Arc<AppState>, since: chrono::DateTime<chrono::Utc>) -> usize {
+    let cut = match state.session_storage.cut_turns(since).await {
+        Ok(cut) => cut,
+        Err(error) => {
+            tracing::warn!(%error, "could not look for turns a stop cut off");
+            return 0;
+        }
+    };
+    let mut answered = 0;
+    for turn in cut {
+        // A schedule's own session is the scheduler's to run again, not a person's.
+        let pond_made =
+            !pond_core::shared::domain::session_activity::SessionOrigin::of(&turn.session_id)
+                .is_human()
+                && !pond_core::shared::services::goose_thread::is_thread(&turn.session_id);
+        if pond_made || turn.text.trim().is_empty() {
+            continue;
+        }
+        let Ok(req) = serde_json::from_value::<ChatRequest>(json!({
+            "session_id": turn.session_id,
+            "message": turn.text,
+            "resumable": true,
+        })) else {
+            continue;
+        };
+        let Ok(run_permit) = state.runs.permits.clone().try_acquire_owned() else {
+            break;
+        };
+        // The turn saves the message again; the cut copy would make two.
+        if let Err(error) = state
+            .session_storage
+            .delete_messages_from(&turn.session_id, &turn.message_id)
+            .await
+        {
+            tracing::warn!(%error, session_id = %turn.session_id, "a cut turn could not be cleared to answer again");
+            continue;
+        }
+        let device = ProvenDevice::none();
+        let run = new_run(&req, &device, crate::runs::RunPolicy::Detached);
+        if state.runs.registry.insert(run.clone()).is_err() {
+            break;
+        }
+        tracing::info!(
+            target: "giap::trace",
+            kind = "cut_turn_answered_again",
+            session_id = %turn.session_id,
+            "a turn a stop cut off is being answered again"
+        );
+        run_turn(state.clone(), run, Some(run_permit), req, device).await;
+        answered += 1;
+        if let Some(sender) = state.notification_sender.clone() {
+            use pond_core::mcp::domain::notice_delivery::{marked, QUIET_PASS_KEY};
+            use pond_core::mcp::ports::notification::{Notification, OpenScreen};
+            let notice = Notification {
+                id: format!("cut-turn-{}", turn.message_id),
+                target: "broadcast".to_string(),
+                category: "info".to_string(),
+                title: "Goose answered after restarting".to_string(),
+                body: "It was restarted in the middle of a reply, and has now finished it."
+                    .to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: marked(
+                    Some(OpenScreen::chat(Some(&turn.session_id)).data()),
+                    QUIET_PASS_KEY,
+                ),
+            };
+            if let Err(error) = sender.broadcast(notice).await {
+                tracing::warn!(%error, "could not tell the household a cut turn was answered");
+            }
+        }
+    }
+    answered
+}
+
 /// One agent turn, start to finish, whether or not anybody is listening.
 /// `stream_handler_parity.rs` pins the order: scope before `ChatService`, persist before `done`.
 async fn run_turn(
@@ -3388,6 +3623,7 @@ async fn drive_turn(
             run.finish(crate::runs::RunState::Failed);
             return;
         }
+        mark_session_surface(state, &session_id, &device).await;
     }
 
     let settings = state.settings_repo.get().await.unwrap_or_default();
@@ -3833,6 +4069,8 @@ async fn drive_turn(
             ),
         }
     } else {
+        turn.keep_not_set_lines();
+        chat_service.note_turn_receipts(std::mem::take(&mut turn.receipts));
         let _ = chat_service
             .persist_assistant_turn(
                 std::mem::take(&mut turn.tool_results),
@@ -4335,17 +4573,69 @@ fn cancel_handle(run: &crate::runs::RunHandle, requested_by: Option<&str>) {
     run.cancel.cancel();
 }
 
+/// Records where a conversation just made was started: the paired device's kind, else the pond.
+async fn mark_session_surface(state: &AppState, session_id: &str, device: &ProvenDevice) {
+    let surface = match device.id() {
+        None => SessionSurface::Pond,
+        Some(id) => match state.device_registry.get_device(id).await {
+            Ok(Some(row)) => {
+                SessionSurface::of_device_type(&row.device_type).unwrap_or(SessionSurface::Pond)
+            }
+            Ok(None) => SessionSurface::Pond,
+            Err(error) => {
+                tracing::warn!(%error, session_id, "could not read the device a conversation began on");
+                return;
+            }
+        },
+    };
+    if let Err(error) = state
+        .session_storage
+        .mark_surface(session_id, surface, device.id())
+        .await
+    {
+        tracing::warn!(%error, session_id, "could not record where a conversation began");
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionListQuery {
+    /// Comma-separated surfaces to keep (`phone`, `room`, ...); `unknown` keeps the unrecorded,
+    /// `here` those begun on the calling device and `elsewhere` those begun on another phone.
+    surface: Option<String>,
+}
+
+impl SessionListQuery {
+    fn keeps(&self, surface: Option<SessionSurface>, started_here: bool) -> bool {
+        let Some(wanted) = self.surface.as_deref() else {
+            return true;
+        };
+        let name = surface.map_or("unknown", SessionSurface::as_str);
+        wanted.split(',').map(str::trim).any(|w| {
+            w == name
+                || (w == "here" && started_here)
+                || (w == "elsewhere" && surface == Some(SessionSurface::Phone) && !started_here)
+        })
+    }
+}
+
 /// List the household's conversations, most recently updated first. Sessions the pond opened for
 /// its own work (`SessionOrigin::Machine`, the scheduler's `sched-…`) are not conversations and are
 /// left out.
 async fn list_sessions(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Query(query): Query<SessionListQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     use pond_core::user_data::domain::session::SessionIdentity;
 
     let caller =
         read_only_caller_scope(&state, principal.as_ref().map(|axum::Extension(p)| p), None).await;
+    let caller_device = principal
+        .as_ref()
+        .and_then(|axum::Extension(p)| p.device_id.clone());
+    let began_here = |s: &pond_core::user_data::domain::session::Session| {
+        caller_device.is_some() && s.surface_device_id == caller_device
+    };
     // Another member's conversation is left out by the rule its messages are read by.
     let sessions: Vec<_> = state
         .session_storage
@@ -4374,6 +4664,7 @@ async fn list_sessions(
         .iter()
         .filter(|s| {
             !pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+                && !pond_core::shared::services::goose_thread::is_thread(&s.id)
         })
         .count();
     if machine > 0 {
@@ -4385,8 +4676,11 @@ async fn list_sessions(
         );
     }
     let mut list_fetches = 0usize;
+    // The Goose thread is the pond's own writing, and still a conversation its member reads.
     for s in sessions.iter().filter(|s| {
-        pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+        (pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
+            || pond_core::shared::services::goose_thread::is_thread(&s.id))
+            && query.keeps(s.surface, began_here(s))
     }) {
         let message_count = state
             .session_storage
@@ -4429,6 +4723,8 @@ async fn list_sessions(
             "total_prompt_tokens": s.total_prompt_tokens,
             "total_completion_tokens": s.total_completion_tokens,
             "model_name": s.model_name,
+            "surface": s.surface,
+            "started_here": began_here(s),
             "created_at": s.created_at.to_rfc3339(),
             "updated_at": s.updated_at.to_rfc3339(),
         }));
@@ -4923,6 +5219,9 @@ async fn get_session_messages(
             });
             if let Some(tc_id) = &m.message.tool_call_id {
                 obj["tool_call_id"] = json!(tc_id);
+            }
+            if let Some(note) = &m.note {
+                obj["note"] = json!(note);
             }
             if !m.message.tool_calls.is_empty() {
                 obj["tool_calls"] = json!(m
@@ -12563,6 +12862,10 @@ async fn notifications_pending(
                 count = pending.len(),
                 "notifications: pending served"
             );
+            let ids: Vec<String> = pending.iter().map(|n| n.id.clone()).collect();
+            if let Err(e) = queue.note_fetched(&ids).await {
+                tracing::warn!(kind = "notification_fetch_stamp_failed", error = %e, "notifications: could not record a fetch");
+            }
             (StatusCode::OK, Json(json!({ "notifications": pending })))
         }
         Err(e) => {
@@ -12575,24 +12878,42 @@ async fn notifications_pending(
     }
 }
 
+/// What a phone may say with an acknowledgement. An older app sends no body.
+#[derive(Debug, Default, Deserialize)]
+struct AckBody {
+    /// Whether the phone put the notice in front of the person.
+    #[serde(default)]
+    shown: Option<bool>,
+}
+
 /// `POST /api/v1/notifications/{id}/ack` — mark one of the calling device's notifications
 /// delivered. `{"id": id, "acknowledged": true}`, also when it already was; `404` when no such
-/// notification is the caller's, whether or not another device has one by that id.
+/// notification is the caller's, whether or not another device has one by that id. An optional
+/// body `{"shown": true}` records that the phone showed it.
 async fn acknowledge_notification(
     State(state): State<Arc<AppState>>,
     principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
     axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
 ) -> (StatusCode, Json<Value>) {
     let (device_id, queue) =
         match caller_queue(&state, principal.as_ref(), "acknowledge_notification") {
             Ok(found) => found,
             Err(refusal) => return refusal,
         };
+    let said: AckBody = serde_json::from_slice(&body).unwrap_or_default();
     match queue.acknowledge(&id, &device_id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(json!({"id": id, "acknowledged": true})),
-        ),
+        Ok(true) => {
+            if said.shown == Some(true) {
+                if let Err(e) = queue.note_shown(&id, &device_id).await {
+                    tracing::warn!(kind = "notification_shown_stamp_failed", error = %e, "notifications: could not record a showing");
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(json!({"id": id, "acknowledged": true})),
+            )
+        }
         Ok(false) => {
             tracing::info!(
                 kind = "notification_ack_refused",
@@ -12655,6 +12976,33 @@ fn caller_history(
 #[derive(serde::Deserialize)]
 struct NotificationHistoryParams {
     limit: Option<usize>,
+}
+
+/// `POST /api/v1/notifications/{id}/opened` — record that the person opened one of the calling
+/// device's notifications. `{"id": id, "opened": true}`; `404` as for an acknowledgement.
+async fn notification_opened(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> (StatusCode, Json<Value>) {
+    let (device_id, queue) = match caller_queue(&state, principal.as_ref(), "notification_opened") {
+        Ok(found) => found,
+        Err(refusal) => return refusal,
+    };
+    match queue.note_opened(&id, &device_id).await {
+        Ok(true) => (StatusCode::OK, Json(json!({"id": id, "opened": true}))),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such notification for this device"})),
+        ),
+        Err(e) => {
+            tracing::warn!(kind = "notification_opened_failed", error = %e, "notifications: could not record an opening");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "could not record that the notification was opened"})),
+            )
+        }
+    }
 }
 
 /// How many notices `GET /notifications/history` returns when the caller does not say.
@@ -13144,6 +13492,7 @@ async fn agent_chat_stream(
                 yield Ok(Event::default().data(json!({"error": e.to_string()}).to_string()));
                 return;
             }
+            mark_session_surface(&state, &session_id, &device).await;
         }
 
         // After the session row exists, and before `ChatService`: its default scope is Household,
@@ -13291,6 +13640,8 @@ async fn agent_chat_stream(
 
         // ── Persist assistant turn ──────────────────────────────────────────
         // No extraction wiring: the batch engine reads every persisted turn.
+        turn.keep_not_set_lines();
+        chat_service.note_turn_receipts(std::mem::take(&mut turn.receipts));
         let _ = chat_service.persist_assistant_turn(
             std::mem::take(&mut turn.tool_results),
             &turn.full_text,
@@ -20318,6 +20669,96 @@ struct DecideProposalRequest {
     decision: ProposalDecision,
 }
 
+#[derive(Deserialize)]
+struct OfferAnswer {
+    take: bool,
+}
+
+/// `POST /api/v1/sessions/{session_id}/messages/{message_id}/offer` `{"take": bool}` — a member
+/// takes or passes over a suggestion in their thread. The answer is kept on the message, so the
+/// offer is answered once, and the suggestion is settled so the next review learns from it.
+/// Taking returns the words to send as their own turn; nothing is done here.
+async fn answer_offer(
+    State(state): State<Arc<AppState>>,
+    principal: Option<axum::Extension<pond_core::security::ports::policy::Principal>>,
+    Path((session_id, message_id)): Path<(String, String)>,
+    Json(answer): Json<OfferAnswer>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    use pond_core::user_data::domain::message_note::OfferState;
+    refuse_another_members_session(&state, principal.as_ref(), &session_id).await?;
+    let no_offer = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no offer on that message"})),
+        )
+    };
+    let message = state
+        .session_storage
+        .get_messages(&session_id)
+        .await
+        .map_err(|_| no_offer())?
+        .into_iter()
+        .find(|m| m.id == message_id)
+        .ok_or_else(no_offer)?;
+    let mut note = message.note.ok_or_else(no_offer)?;
+    let offer = note.suggestion.as_mut().ok_or_else(no_offer)?;
+    if offer.state != OfferState::Open {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(json!({"error": "the offer was already answered", "state": offer.state})),
+        ));
+    }
+    offer.state = if answer.take {
+        OfferState::Done
+    } else {
+        OfferState::Dismissed
+    };
+    let (state_now, prompt, suggestion_id) = (
+        offer.state,
+        offer.prompt.clone(),
+        offer.suggestion_id.clone(),
+    );
+    state
+        .session_storage
+        .set_message_note(&session_id, &message_id, &note)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "an offer's answer could not be kept");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "the answer could not be kept"})),
+            )
+        })?;
+    // Best-effort: a suggestion past its time is no longer there to settle.
+    if let Some(id) = suggestion_id {
+        let decision = if answer.take {
+            ProposalDecision::Approve
+        } else {
+            ProposalDecision::Reject
+        };
+        let _ = decide_proposal(
+            State(state.clone()),
+            Path(id),
+            principal,
+            Ok(Json(DecideProposalRequest {
+                session_id: session_id.clone(),
+                decision,
+            })),
+        )
+        .await;
+    }
+    tracing::info!(
+        target: "giap::trace",
+        kind = "offer_answered",
+        taken = answer.take,
+        "a suggestion in the thread was answered"
+    );
+    Ok(Json(json!({
+        "state": state_now,
+        "prompt": answer.take.then_some(prompt),
+    })))
+}
+
 /// `POST /api/v1/proposals/{id}/decide` — approve or reject; approving executes nothing.
 async fn decide_proposal(
     State(state): State<Arc<AppState>>,
@@ -22618,6 +23059,7 @@ mod tests {
             content: "24C and clear".to_string(),
             card: None,
             keep: None,
+            outcome: None,
         }));
         assert_eq!(
             result,
@@ -22669,6 +23111,7 @@ mod tests {
             content: "[[[mcp-ui:weather:{\"temp\":24}]]]\n24C and clear".to_string(),
             card: None,
             keep: None,
+            outcome: None,
         }));
 
         assert_eq!(
@@ -22702,6 +23145,7 @@ mod tests {
             content: "Web results for: q\nPassage.".to_string(),
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
             keep: None,
+            outcome: None,
         }));
         assert_eq!(frame["content"], "Web results for: q\nPassage.");
         assert_eq!(
@@ -22725,6 +23169,7 @@ mod tests {
             content: "Web results for: q\nThe park closes at 6:00 PM.".to_string(),
             card: Some("[[[mcp-ui:search:{\"query\":\"q\",\"results\":[]}]]]".to_string()),
             keep: Some(stub.to_string()),
+            outcome: None,
         }));
         assert_eq!(
             frame["content"],

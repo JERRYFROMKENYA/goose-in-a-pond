@@ -39,6 +39,11 @@ const KNOWN_MINTERS: &[(&str, &str)] = &[
          the pond, and room voice minted the id as a fresh UUID -- a person",
     ),
     (
+        "crates/pond-core/src/shared/services/goose_thread.rs",
+        "MACHINE: `goose-{member}`, the thread the pond posts its own results into. Covered by \
+         POND_AUTHORED_SESSION_PREFIXES, so a post is not a person arriving.",
+    ),
+    (
         "crates/pond-server/src/schedule_executors.rs",
         "MACHINE: `sched-{task_id}-{unix_ts}`, one per schedule fire and per rule \
          AgentPrompt action. Covered by POND_AUTHORED_SESSION_PREFIXES.",

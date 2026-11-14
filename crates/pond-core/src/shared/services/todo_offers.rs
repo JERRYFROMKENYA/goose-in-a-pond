@@ -45,6 +45,18 @@ pub async fn offer_pending_reminders(
     limit: usize,
     now: DateTime<Utc>,
 ) -> Result<OfferReport> {
+    offer_pending_reminders_for(reminders, proposals, limit, now, None).await
+}
+
+/// As [`offer_pending_reminders`], with `lone_member` taking the mentions nobody was named
+/// for: in a household of one, a voice the pond could not identify is theirs for a reminder.
+pub async fn offer_pending_reminders_for(
+    reminders: &dyn ReminderRepository,
+    proposals: &dyn ProposalRepository,
+    limit: usize,
+    now: DateTime<Utc>,
+    lone_member: Option<&str>,
+) -> Result<OfferReport> {
     let pending = reminders
         .list_pending(&ProfileScope::Household, limit)
         .await?;
@@ -54,7 +66,14 @@ pub async fn offer_pending_reminders(
     };
     // Member -> what Goose put in front of them in the last day, this run's offers included.
     let mut made_today: BTreeMap<String, usize> = BTreeMap::new();
-    for reminder in pending {
+    for mut reminder in pending {
+        if reminder.profile_id.is_none() {
+            if let Some(lone) = lone_member {
+                if reminders.assign(&reminder.id, lone).await.unwrap_or(false) {
+                    reminder.profile_id = Some(lone.to_string());
+                }
+            }
+        }
         let Some(member) = reminder.profile_id.clone() else {
             report.unaddressable += 1;
             continue;

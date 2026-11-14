@@ -10,6 +10,8 @@ pub mod hooks_runner;
 pub mod host_credential;
 pub mod listeners;
 pub mod llm_memory_consolidator;
+pub mod notice_follow_up;
+pub mod phone_retirement;
 pub mod ride_booking;
 pub mod schedule_executors;
 pub mod setup_code;

@@ -6,6 +6,7 @@
 
 use chrono::Utc;
 use pond_core::mcp::domain::tool_group::{TASKS_EXTENSION, TASK_WORK_EXTENSION};
+use pond_core::mcp::domain::tool_outcome::with_outcome;
 use pond_core::shared::domain::long_task::{
     match_waits_by_name, next_ready_step, read_step_draft, validate_plan, AnswerShape, Artifact,
     ArtifactKind, ArtifactSummary, LongTask, LongTaskBudget, LongTaskState, LongTaskStateRefused,
@@ -22,6 +23,7 @@ use pond_core::shared::services::step_bindings::{
     process_step_bindings, StepBinding, StepBindings, StepWork,
 };
 use pond_core::shared::services::turn_authority::TurnAuthorityRegistry;
+use pond_core::user_data::domain::message_note::Receipt;
 use pond_core::user_data::domain::profile::ProfileScope;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -232,6 +234,16 @@ fn quoted(items: &[String]) -> String {
         .join(", ")
 }
 
+/// The id in `run_start`'s own "Started task {id}. ..." line.
+fn started_task_id(said: &str) -> Option<String> {
+    let id = said
+        .strip_prefix("Started task ")?
+        .split('.')
+        .next()?
+        .trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// Wrap an answer or a refusal as tool success, logging the refusal.
 const REFUSAL_TRACE_CHARS: usize = 400;
 
@@ -380,10 +392,15 @@ anything you can answer now.")]
         params: Parameters<TaskStartParams>,
     ) -> Result<CallToolResult, ErrorData> {
         crate::set_current_tool("task_start");
-        Ok(answer(
-            "task_start",
-            self.run_start(&ctx.meta, params.0).await,
-        ))
+        let goal = params.0.goal.clone().unwrap_or_default();
+        let outcome = self.run_start(&ctx.meta, params.0).await;
+        let receipt = match &outcome {
+            Ok(said) => Receipt::set("task", goal, started_task_id(said)),
+            Err(_) => Receipt::not_set("task", goal, "The Pond could not start that task."),
+        };
+        let mut result = answer("task_start", outcome);
+        result.meta = Some(Meta(with_outcome(result.meta.map(|meta| meta.0), &receipt)));
+        Ok(result)
     }
 
     #[tool(description = "\
@@ -583,7 +600,18 @@ async fn status_text(
         let task = reached_task(deps, scope, &task_id).await?;
         let steps = deps.repo.list_steps(task.id()).await.map_err(store)?;
         let result = result_of(deps.repo.as_ref(), &task).await?;
-        return Ok(task_summary_for_notice(&task, &steps, result.as_ref()));
+        let mut said = task_summary_for_notice(&task, &steps, result.as_ref());
+        // The summary names the result; the answer is its body, which the caller came for.
+        if let Some(found) = &result {
+            if let Ok(Some(artifact)) = deps.repo.get_artifact(task.id(), &found.id).await {
+                let body: String = artifact.body().chars().take(RESULT_BODY_CHARS).collect();
+                if !body.trim().is_empty() {
+                    said.push_str("\n\nThe result:\n");
+                    said.push_str(body.trim());
+                }
+            }
+        }
+        return Ok(said);
     }
     let tasks = reached_tasks(deps, scope).await?;
     if tasks.is_empty() {
@@ -596,6 +624,9 @@ async fn status_text(
     }
     Ok(lines.join("\n"))
 }
+
+/// How much of a finished task's result its status hands the model.
+const RESULT_BODY_CHARS: usize = 6000;
 
 const NO_TASKS_RUNNING: &str = "There are no long tasks running for this person.";
 

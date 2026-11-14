@@ -28,6 +28,8 @@ pub enum ActivityKind {
     Suggestion,
     /// Something it looked up and answers here.
     Errand,
+    /// A paired phone that stopped connecting, removed.
+    PhoneRemoved,
 }
 
 impl ActivityKind {
@@ -39,6 +41,7 @@ impl ActivityKind {
             Self::WatchPaused => "watch_paused",
             Self::Suggestion => "suggestion",
             Self::Errand => "errand",
+            Self::PhoneRemoved => "phone_removed",
         }
     }
 
@@ -50,6 +53,7 @@ impl ActivityKind {
             "watch_paused" => Self::WatchPaused,
             "suggestion" => Self::Suggestion,
             "errand" => Self::Errand,
+            "phone_removed" => Self::PhoneRemoved,
             _ => return None,
         })
     }
@@ -159,6 +163,17 @@ impl GooseActivity {
             ActivityKind::WatchPaused,
             &format!("Paused the watch on {title}: its last {failures} checks failed"),
             Some(watch_id),
+            at,
+        )
+    }
+
+    /// A phone removed for not connecting in `days` days. Pairing it again is the way back.
+    pub fn phone_removed(member: &str, phone: &str, days: u32, at: DateTime<Utc>) -> Self {
+        Self::new(
+            member,
+            ActivityKind::PhoneRemoved,
+            &format!("Removed the phone {phone}: it had not connected for {days} days"),
+            None,
             at,
         )
     }

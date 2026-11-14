@@ -20,6 +20,7 @@ pub mod model_json;
 pub mod nearby;
 pub mod oauth_providers;
 pub mod onboarding;
+pub mod phone_retirement;
 pub mod place_detection;
 pub mod proactive_review;
 pub mod profile_interview;

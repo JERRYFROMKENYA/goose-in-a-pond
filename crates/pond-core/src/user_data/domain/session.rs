@@ -279,6 +279,9 @@ pub struct Session {
     /// `None` for a conversation begun before surfaces were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub surface: Option<SessionSurface>,
+    /// The paired device that began it; never sent to a client, which is told only whether it was its own.
+    #[serde(default, skip_serializing)]
+    pub surface_device_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -294,6 +297,7 @@ impl Session {
             total_completion_tokens: 0,
             model_name: None,
             surface: None,
+            surface_device_id: None,
             created_at: now,
             updated_at: now,
         }

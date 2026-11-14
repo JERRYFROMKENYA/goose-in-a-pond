@@ -4599,17 +4599,22 @@ async fn mark_session_surface(state: &AppState, session_id: &str, device: &Prove
 
 #[derive(Debug, Default, Deserialize)]
 struct SessionListQuery {
-    /// Comma-separated surfaces to keep (`phone`, `room`, ...); `unknown` keeps the unrecorded.
+    /// Comma-separated surfaces to keep (`phone`, `room`, ...); `unknown` keeps the unrecorded,
+    /// `here` those begun on the calling device and `elsewhere` those begun on another phone.
     surface: Option<String>,
 }
 
 impl SessionListQuery {
-    fn keeps(&self, surface: Option<SessionSurface>) -> bool {
+    fn keeps(&self, surface: Option<SessionSurface>, started_here: bool) -> bool {
         let Some(wanted) = self.surface.as_deref() else {
             return true;
         };
         let name = surface.map_or("unknown", SessionSurface::as_str);
-        wanted.split(',').any(|w| w.trim() == name)
+        wanted.split(',').map(str::trim).any(|w| {
+            w == name
+                || (w == "here" && started_here)
+                || (w == "elsewhere" && surface == Some(SessionSurface::Phone) && !started_here)
+        })
     }
 }
 
@@ -4625,6 +4630,12 @@ async fn list_sessions(
 
     let caller =
         read_only_caller_scope(&state, principal.as_ref().map(|axum::Extension(p)| p), None).await;
+    let caller_device = principal
+        .as_ref()
+        .and_then(|axum::Extension(p)| p.device_id.clone());
+    let began_here = |s: &pond_core::user_data::domain::session::Session| {
+        caller_device.is_some() && s.surface_device_id == caller_device
+    };
     // Another member's conversation is left out by the rule its messages are read by.
     let sessions: Vec<_> = state
         .session_storage
@@ -4669,7 +4680,7 @@ async fn list_sessions(
     for s in sessions.iter().filter(|s| {
         (pond_core::shared::domain::session_activity::SessionOrigin::of(&s.id).is_human()
             || pond_core::shared::services::goose_thread::is_thread(&s.id))
-            && query.keeps(s.surface)
+            && query.keeps(s.surface, began_here(s))
     }) {
         let message_count = state
             .session_storage
@@ -4713,6 +4724,7 @@ async fn list_sessions(
             "total_completion_tokens": s.total_completion_tokens,
             "model_name": s.model_name,
             "surface": s.surface,
+            "started_here": began_here(s),
             "created_at": s.created_at.to_rfc3339(),
             "updated_at": s.updated_at.to_rfc3339(),
         }));

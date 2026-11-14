@@ -29,6 +29,7 @@ struct Pond {
     sessions: Arc<dyn SessionStorage>,
     amina: String,
     baraka: String,
+    phone: String,
     _dir: tempfile::TempDir,
 }
 
@@ -72,7 +73,7 @@ async fn pond(amina_phone: bool) -> Pond {
             .await
             .unwrap();
     }
-    state.handshake = Arc::new(DeviceHandshake(device_id));
+    state.handshake = Arc::new(DeviceHandshake(device_id.clone()));
     let sessions = state.session_storage.clone();
     Pond {
         router: build_router(
@@ -83,6 +84,7 @@ async fn pond(amina_phone: bool) -> Pond {
         sessions,
         amina: members[0].clone(),
         baraka: members[1].clone(),
+        phone: device_id,
         _dir: built.dir,
     }
 }
@@ -303,8 +305,17 @@ async fn the_list_keeps_the_surfaces_asked_for_and_shows_a_member_her_goose_thre
     conversation(&pond, "s-phone", Some(&amina)).await;
     conversation(&pond, "s-room", Some(&amina)).await;
     conversation(&pond, "s-earlier", Some(&amina)).await;
+    conversation(&pond, "s-her-other-phone", Some(&amina)).await;
     pond.sessions
-        .mark_surface("s-phone", SessionSurface::Phone, None)
+        .mark_surface("s-phone", SessionSurface::Phone, Some(&pond.phone))
+        .await
+        .unwrap();
+    pond.sessions
+        .mark_surface(
+            "s-her-other-phone",
+            SessionSurface::Phone,
+            Some("her-other-phone"),
+        )
         .await
         .unwrap();
     pond.sessions
@@ -337,10 +348,29 @@ async fn the_list_keeps_the_surfaces_asked_for_and_shows_a_member_her_goose_thre
             ids(&send(pond, call(Method::GET, &uri, None)).await.1)
         }
     };
-    assert_eq!(listed("phone").await, ["s-phone"]);
+    assert_eq!(listed("phone").await, ["s-her-other-phone", "s-phone"]);
     assert_eq!(
-        listed("phone,goose").await,
-        [hers.session_id.as_str(), "s-phone"]
+        listed("here,goose").await,
+        [hers.session_id.as_str(), "s-phone"],
+        "this phone's own and the Goose thread"
+    );
+    assert_eq!(listed("elsewhere").await, ["s-her-other-phone"]);
+    let started_here = |id: &str| {
+        all["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["started_here"].clone())
+    };
+    assert_eq!(started_here("s-phone"), Some(serde_json::json!(true)));
+    assert_eq!(
+        started_here("s-her-other-phone"),
+        Some(serde_json::json!(false))
+    );
+    assert!(
+        !all.to_string().contains(&pond.phone),
+        "no device id is sent"
     );
     assert_eq!(listed("room").await, ["s-room"]);
     assert_eq!(

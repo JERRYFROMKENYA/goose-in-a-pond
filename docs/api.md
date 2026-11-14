@@ -1005,7 +1005,7 @@ All chat history lives in `pond_system.db`.
 
 | Route | Request | Response |
 |---|---|---|
-| `GET /sessions` | `?surface=phone,goose` (optional) | `{sessions: [{id, title, preview, message_count, total_prompt_tokens, total_completion_tokens, model_name, surface, created_at, updated_at}]}` |
+| `GET /sessions` | `?surface=here,goose` (optional) | `{sessions: [{id, title, preview, message_count, total_prompt_tokens, total_completion_tokens, model_name, surface, started_here, created_at, updated_at}]}` |
 | `PATCH /sessions/{session_id}` | `{title}` | `{session_id, title}` |
 | `DELETE /sessions/{session_id}` | | `204`, also for a missing session |
 | `GET /sessions/{session_id}/messages` | `?limit=` (default 100, max 500), `?offset=` | `{messages: [...]}`. Without `offset`, the newest `limit`; with it, oldest-first from `offset` |
@@ -1027,7 +1027,9 @@ attachment route, so fetch it with the bearer token rather than a bare `<img src
 `?surface=unknown` selects. The first writer wins and nothing changes it later. `goose` is the
 Goose thread, `goose-<profile id>` or `goose-household`: the one conversation the pond writes into
 by itself, holding schedule answers, finished tasks, due reminders, look-ups, watch hits and
-suggestions.
+suggestions. `started_here` says whether the calling device began the conversation; the device itself
+is never sent. In `?surface=`, `here` keeps what the caller's device began and `elsewhere` what
+another phone began.
 
 A message may carry `note`, which is stored with it and never derived from its words:
 

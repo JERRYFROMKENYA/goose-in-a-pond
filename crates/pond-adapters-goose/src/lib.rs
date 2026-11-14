@@ -1,4 +1,5 @@
 pub mod compaction_prompts;
+pub mod encoder_room;
 pub mod extension_manager;
 pub mod giap_registration;
 pub mod goose_agent;
@@ -19,6 +20,7 @@ pub mod token_counter;
 mod transient_history;
 pub mod vision_encoder;
 
+pub use encoder_room::release_idle_encoder;
 pub use extension_manager::GiapGooseExtensionManager;
 pub use giap_registration::{register_giap_extensions, registered_extensions};
 pub use goose_agent::GooseAdapter;

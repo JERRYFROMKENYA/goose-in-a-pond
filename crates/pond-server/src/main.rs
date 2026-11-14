@@ -357,6 +357,14 @@ enum Commands {
     #[command(hide = true)]
     BleHelper,
 
+    /// Kokoro on the GPU for one long speech, which the server runs as its own child (Jetson).
+    #[command(hide = true)]
+    KokoroGpuHelper {
+        /// The full-precision Kokoro weights to load.
+        #[arg(long)]
+        model: std::path::PathBuf,
+    },
+
     /// Print a sign-in link for the web dashboard in a browser.
     ///
     /// A browser needs the host credential to pair phones or manage remote access. The link
@@ -524,6 +532,10 @@ fn main() -> Result<()> {
     if matches!(cli.command, Some(Commands::BleHelper)) {
         run_ble_helper();
     }
+    // Before anything else can write to stdout, which carries the helper's audio.
+    if let Some(Commands::KokoroGpuHelper { model }) = &cli.command {
+        run_kokoro_gpu_helper(model);
+    }
     // Before the runtime (env mutation must be single-threaded) and any child spawn: a GUI
     // launch inherits launchd's bare PATH, which hides nvm's node, and a service can find an old
     // one first (the Jetson's apt Node 12), which the one `giap.sh node` recorded goes ahead of.
@@ -629,6 +641,62 @@ fn run_ble_helper() -> ! {
         eprintln!("ble-helper runs only on macOS; on this OS the server drives Bluetooth itself");
         std::process::exit(2);
     }
+}
+
+fn run_kokoro_gpu_helper(model: &std::path::Path) -> ! {
+    // The server hands its runtime on in the environment. Run by hand, only the installed GPU
+    // runtime will do, and a helper never downloads one.
+    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
+        if let Some(lib) =
+            onnx_gpu::installed_runtime(&default_data_dir(), ORT_VERSION, on_jetson())
+        {
+            pond_core::shared::services::process_env::set("ORT_DYLIB_PATH", &lib);
+        }
+    }
+    let threads = pond_adapters_kokoro::default_intra_threads();
+    let code = match pond_adapters_kokoro::gpu::run_helper(model, threads) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("kokoro-gpu-helper: {e:#}");
+            1
+        }
+    };
+    std::process::exit(code)
+}
+
+/// Long speech on the GPU, on a Jetson with the GPU runtime installed. The switch is read as
+/// each long speech begins, so changing it in Settings needs no restart.
+fn kokoro_gpu_speech(
+    data_dir: &std::path::Path,
+    kokoro_dir: &std::path::Path,
+    settings: SqliteSettingsRepository,
+) -> Option<pond_adapters_kokoro::GpuSpeech> {
+    onnx_gpu::installed_runtime(data_dir, ORT_VERSION, on_jetson())?;
+    let program = std::env::current_exe().ok()?;
+    let model = kokoro_dir.join(pond_adapters_kokoro::model_filename("fp32"));
+    let command = pond_adapters_kokoro::HelperCommand {
+        program,
+        args: vec![
+            "kokoro-gpu-helper".into(),
+            "--model".into(),
+            model.clone().into_os_string(),
+        ],
+    };
+    let reading = tokio::runtime::Handle::current();
+    let fetching = reading.clone();
+    let data_dir = data_dir.to_path_buf();
+    Some(
+        pond_adapters_kokoro::GpuSpeech::new(command, model)
+            .with_switch(move || {
+                reading
+                    .block_on(settings.get())
+                    .is_ok_and(|s| s.voice_tts_gpu_enabled)
+            })
+            .with_room_maker(|| pond_adapters_goose::release_idle_encoder("long_speech"))
+            .with_model_fetcher(move || {
+                fetching.spawn(model_download::ensure_kokoro_gpu_weights(data_dir.clone()));
+            }),
+    )
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
@@ -741,6 +809,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             onnx_gpu::run_engines(&data_dir, ORT_VERSION, on_jetson())
         }
         Some(Commands::BleHelper) => run_ble_helper(),
+        Some(Commands::KokoroGpuHelper { model }) => run_kokoro_gpu_helper(&model),
         None => {
             // No subcommand: interactive text chat, provider from Settings.
             let _log = tracing_setup::init_tracing(false, &data_dir);
@@ -1516,6 +1585,21 @@ async fn run_server(
                         }
                     }
                     out.set_speed(settings.voice_tts_speed);
+                    let out = match kokoro_gpu_speech(
+                        &data_dir,
+                        &kokoro_dir,
+                        SqliteSettingsRepository::new(db.system.clone()),
+                    ) {
+                        Some(gpu) => {
+                            if settings.voice_tts_gpu_enabled {
+                                tokio::spawn(model_download::ensure_kokoro_gpu_weights(
+                                    data_dir.clone(),
+                                ));
+                            }
+                            out.with_gpu_speech(gpu)
+                        }
+                        None => out,
+                    };
                     println!(
                         "  ✅ Kokoro TTS: {} @ {:.2}x",
                         out.voice().await,

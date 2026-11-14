@@ -39,6 +39,7 @@ tts_quality = "q8f16"
 wake_detector = "auto"
 vad_backend = "silero"
 voice_thinking_tone_enabled = true
+voice_tts_gpu_enabled = true
 audio_sound_test = true
 audio_manage_system = true
 recording_duration = 3

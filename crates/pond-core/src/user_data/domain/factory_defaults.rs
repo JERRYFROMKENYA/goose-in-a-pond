@@ -97,6 +97,7 @@ pub(super) const EXPECTED_KEYS: &[&str] = &[
     "wake_detector",
     "vad_backend",
     "voice_thinking_tone_enabled",
+    "voice_tts_gpu_enabled",
     "audio_sound_test",
     "audio_manage_system",
     "recording_duration",

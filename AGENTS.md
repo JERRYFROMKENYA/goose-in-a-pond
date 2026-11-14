@@ -180,7 +180,8 @@ A turn, where Silero is available (`crates/pond-server/src/voice_rig.rs` picks):
 Whisper on each speech segment, and endpoints the request with Silero on echo-cancelled audio →
 Whisper transcribes it → think → the reply is handed to Kokoro whole once the model stops
 writing (only a reply longer than one Kokoro pass is cut, at a sentence end) and spoken
-(`pond-adapters-kokoro`, `pond-audio-out`) → the wake word, or an enrolled household voice,
+(`pond-adapters-kokoro`, `pond-audio-out`; on a Jetson with the GPU runtime a long speech is made
+by a `kokoro-gpu-helper` child that exits when the speech ends) → the wake word, or an enrolled household voice,
 interrupts the reply (`InterruptWatch`) → a follow-up listen without the wake word, only when the
 reply ended with a question (`asks_for_an_answer`). With
 `vad_backend = "rms"` or no Silero, the older path runs: `WhisperKeywordDetector` on a 1.4 s window,

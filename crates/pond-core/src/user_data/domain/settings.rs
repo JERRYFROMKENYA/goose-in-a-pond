@@ -280,6 +280,11 @@ pub struct Settings {
     #[serde(default = "Settings::default_voice_thinking_tone_enabled")]
     pub voice_thinking_tone_enabled: bool,
 
+    /// Long speech is made on the graphics processor where the host has one set up and memory
+    /// allows; short replies are made on the CPU either way.
+    #[serde(default = "Settings::default_voice_tts_gpu_enabled")]
+    pub voice_tts_gpu_enabled: bool,
+
     /// Microphone the household pinned, by the name the system gives it; empty picks one that
     /// works. A pin that is unplugged or broken gives way until it is back.
     #[serde(default)]
@@ -893,6 +898,7 @@ impl Default for Settings {
             voice_tts_quality: Self::default_tts_quality(),
             vad_backend: Self::default_vad_backend(),
             voice_thinking_tone_enabled: Self::default_voice_thinking_tone_enabled(),
+            voice_tts_gpu_enabled: Self::default_voice_tts_gpu_enabled(),
             audio_input_device: String::new(),
             audio_output_device: String::new(),
             audio_sound_test: Self::default_audio_sound_test(),
@@ -1105,6 +1111,9 @@ impl Settings {
     }
     fn default_voice_thinking_tone_enabled() -> bool {
         factory_defaults::boolean("voice_thinking_tone_enabled", true)
+    }
+    fn default_voice_tts_gpu_enabled() -> bool {
+        factory_defaults::boolean("voice_tts_gpu_enabled", true)
     }
     /// On: a speaker that takes audio and makes no sound is only caught by listening for it.
     fn default_audio_sound_test() -> bool {
@@ -2341,6 +2350,7 @@ mod tests {
             "voice_kws_post_trigger_silence_ms",
             "voice_recording_duration_secs",
             "voice_thinking_tone_enabled",
+            "voice_tts_gpu_enabled",
             // The Voice hub view's and the catalogue's audio device panel.
             "audio_input_device",
             "audio_output_device",

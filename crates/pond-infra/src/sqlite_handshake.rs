@@ -1068,22 +1068,23 @@ impl SqliteHandshakeAdapter {
             transport,
         );
         if let Some(held) = held {
-            // The pond still proves itself, so the phone knows who holds its request. No keys:
-            // a phone not yet let in must not open the setup channel's sealed phase.
+            // The pond still proves itself, so the phone knows who holds its request. A setup
+            // channel run keeps its keys only to seal the request: its sealed phase never opens.
             response.accepted = false;
             response.session_token = None;
             response.refresh_token = None;
             response.expires_at = None;
-            match held {
+            return Ok(match held {
                 Held::Asked(pending) => {
                     response.rejection_reason = Some("approval_required".to_string());
                     response.pairing_request = Some(pending);
+                    (response, keys)
                 }
                 Held::Crowded => {
                     response.rejection_reason = Some("pairing_requests_full".to_string());
+                    (response, None)
                 }
-            }
-            return Ok((response, None));
+            });
         }
         response.returning_device = completed.returning;
         response.test_device = completed.test;
